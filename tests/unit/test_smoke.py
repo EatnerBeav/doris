@@ -2,7 +2,9 @@
 
 The real adapters talk to test_live's fake IMAP, SMTP and CalDAV servers on 127.0.0.1 (the
 adapters' default transports are swapped for plain connections to them), under the network
-guard the smoke installs itself: the env file names 127.0.0.1 as every host.
+guard the smoke installs itself: the env file names 127.0.0.1 as every host. Every test has
+its own state/ and repo/ folders (paths.STATE and paths.REPO patched), so the live halt, STOP
+and lock files it reads and takes are never the real ones.
 """
 import base64
 import datetime as dt
@@ -18,7 +20,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from doris import ics, netguard, smoke, templates
+from doris import ics, netguard, paths, smoke, supervisor, templates
 from doris.adapters import live
 from doris.shapes import Slot
 from tests.unit.test_live import COLLECTION, DORIS, PASSWORD, Box, FakeCalDAV, FakeIMAP, FakeSMTP, eml, u
@@ -49,8 +51,12 @@ class SmokeFixture(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="doris-smoke-test-")
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.env_path = self.write_env(ENV_TEXT)
+        self.repo = os.path.join(self.dir, "repo")
+        os.makedirs(self.repo)
         self.lines = []
         for patch in (
+                mock.patch.object(paths, "STATE", os.path.join(self.dir, "state")),
+                mock.patch.object(paths, "REPO", self.repo),
                 mock.patch.object(live, "_imap_tls", lambda host, port, timeout: imaplib.IMAP4(
                     "127.0.0.1", self.imap.port, timeout=timeout)),
                 mock.patch.object(live, "_smtp_tls", lambda host, port, timeout: smtplib.SMTP(
@@ -207,6 +213,89 @@ class SmokeTest(SmokeFixture):
         self.assertEqual(smoke.DEFAULT_ENV, "/root/doris-secrets/.env")
         with mock.patch.object(smoke, "DEFAULT_ENV", self.env_path):
             self.assertEqual(smoke.main([], out=self.lines.append), 0)
+
+
+class HaltAndLockTest(SmokeFixture):
+    """A smoke is a live run's peer: a halt in force for live refuses it, and it holds the live
+    lock from before its first connection to after its last, so no live run starts meanwhile."""
+
+    def lock_path(self):
+        return os.path.join(paths.state_dir("live"), supervisor.LOCK_NAME)
+
+    def nothing_contacted(self):
+        self.assertEqual((self.imap.commands, self.smtp.sessions, self.dav.requests), ([], [], []))
+
+    def touch(self, path, data=b""):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(data)
+
+    def test_a_halt_in_force_refuses_it_before_any_connection(self):
+        supervisor.request_stop("live", "cli")
+        self.assertEqual(self.run_smoke(), supervisor.EXIT_REFUSED_HALT)
+        self.assertEqual(self.lines, ["smoke: refused: Doris is halted (stop on the command line)"])
+        self.nothing_contacted()
+
+    def test_a_stop_file_in_the_live_folder_or_the_repo_refuses_it(self):
+        for folder in (paths.state_dir("live"), paths.REPO):
+            path = os.path.join(folder, "STOP")
+            self.touch(path)
+            self.lines.clear()
+            self.assertEqual(self.run_smoke(), supervisor.EXIT_REFUSED_HALT, folder)
+            self.assertEqual(self.lines, ["smoke: refused: Doris is halted (a STOP file)"])
+            os.remove(path)
+        self.nothing_contacted()
+
+    def test_a_halt_file_it_cannot_read_refuses_it(self):
+        self.touch(supervisor.halt_file("live"), b"not a halt record")
+        self.assertEqual(self.run_smoke(), supervisor.EXIT_REFUSED_HALT)
+        self.assertEqual(self.lines, ["smoke: refused: a halt file cannot be read, so the halt stays in force"])
+        self.nothing_contacted()
+
+    def test_a_halt_in_another_mode_does_not_refuse_it(self):
+        supervisor.request_stop("sandbox", "cli")
+        self.assertEqual(self.run_smoke(), 0)
+
+    def test_a_live_run_holding_the_lock_refuses_it_before_any_connection(self):
+        held = supervisor.acquire_lock(self.lock_path())
+        self.addCleanup(held.release)
+        self.assertEqual(self.run_smoke(), supervisor.EXIT_LOCKED)
+        self.assertEqual(self.lines, ["smoke: refused: another Doris is already running on this ledger"])
+        self.nothing_contacted()
+
+    def test_a_lock_it_cannot_take_refuses_it(self):
+        with mock.patch.object(supervisor, "acquire_lock", side_effect=PermissionError(13, "denied")):
+            self.assertEqual(self.run_smoke(), supervisor.EXIT_LOCKED)
+        self.assertEqual(self.lines, ["smoke: refused: the live lock cannot be taken (PermissionError)"])
+        self.nothing_contacted()
+
+    def test_it_holds_the_live_lock_at_every_connection_and_lets_go_at_the_end(self):
+        free = []
+
+        def probe(*_):
+            handle = supervisor.acquire_lock(self.lock_path())
+            free.append(handle is not None)
+            if handle is not None:
+                handle.release()
+        real_imap, real_smtp = live._imap_tls, live._smtp_tls
+        self.smtp.on_deliver = lambda sender, recipients, message: self.sent.add(message, u(2026, 11, 27, 12))
+        self.dav.on_request = probe
+        with mock.patch.object(live, "_imap_tls", lambda *a: (probe(), real_imap(*a))[1]), \
+                mock.patch.object(live, "_smtp_tls", lambda *a: (probe(), real_smtp(*a))[1]):
+            self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 0)
+        self.assertGreater(len(free), 10)
+        self.assertFalse(any(free), "the lock was free during the smoke")
+        again = supervisor.acquire_lock(self.lock_path())
+        self.assertIsNotNone(again)
+        again.release()
+
+    def test_a_ctrl_c_lets_go_of_the_lock_too(self):
+        with mock.patch.object(live.LiveCalendar, "query", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_smoke()
+        again = supervisor.acquire_lock(self.lock_path())
+        self.assertIsNotNone(again)
+        again.release()
 
 
 class SendToTest(SmokeFixture):

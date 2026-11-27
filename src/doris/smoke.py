@@ -34,8 +34,14 @@ With --send-to:
                                              found when either look found it
 
 Every connection goes through the network guard, allowing only live.hosts(env), so a host the
-adapters reach without naming it fails the smoke. Exit 0 only when every step passed; 1 when any
-failed; 2 when the command line or the env file is wrong (then nothing is contacted).
+adapters reach without naming it fails the smoke. A smoke is a live run's peer: it refuses to
+start while a halt is in force for live (HALT, or a STOP file) and holds the live ledger lock
+(state/live/ledger.lock) from before its first connection to after its last, so it never runs
+beside a live run and no live run starts while it runs.
+
+Exit 0 only when every step passed; 1 when any failed; 2 when the command line or the env file
+is wrong; 3 when a live run holds the lock (or the lock cannot be taken); 5 when a halt is in
+force. On 2, 3 and 5 nothing is contacted.
 """
 
 import argparse
@@ -43,10 +49,11 @@ import datetime as _dt
 import email.message
 import email.policy
 import email.utils
+import os
 import secrets
 import time
 
-from . import caps, compose, envfile, ics, netguard, templates
+from . import caps, compose, envfile, ics, netguard, paths, supervisor, templates
 from .adapters import live
 from .shapes import CalendarError, MailError, Slot
 
@@ -268,14 +275,42 @@ def main(argv, out=None) -> int:
     except live.ConfigError as exc:
         out("config: " + _why(exc))
         return 2
-    guard = netguard.install(hosts)
+    state = paths.state_dir("live")
+    halted = _halt_in_force(state)
+    if halted:
+        out("smoke: refused: " + halted)
+        return supervisor.EXIT_REFUSED_HALT
     try:
-        ok = check(mail, calendar, out, send_to=send_to)
+        lock = supervisor.acquire_lock(os.path.join(state, supervisor.LOCK_NAME))
+    except OSError as exc:
+        out("smoke: refused: the live lock cannot be taken (%s)" % type(exc).__name__)
+        return supervisor.EXIT_LOCKED
+    if lock is None:
+        out("smoke: refused: " + supervisor.LOCK_REFUSAL)
+        return supervisor.EXIT_LOCKED
+    try:
+        guard = netguard.install(hosts)
+        try:
+            ok = check(mail, calendar, out, send_to=send_to)
+        finally:
+            guard.uninstall()
     finally:
-        guard.uninstall()
+        lock.release()
     refused = guard.refused_count()
     if refused:
         out("network guard: FAILED (%s to a host the adapters do not name)" % _count(refused, "connection"))
         ok = False
     out("smoke: " + ("ok, every step passed" if ok else "FAILED"))
     return 0 if ok else 1
+
+
+def _halt_in_force(state):
+    """Why the smoke may not start, when a halt is in force for live; else None. A halt file it
+    cannot read counts as a halt (fail closed), as it does for a run."""
+    try:
+        cause = supervisor.halt_cause("live", state_dir=state)
+    except (supervisor.HaltFileError, OSError, ValueError):
+        return "a halt file cannot be read, so the halt stays in force"
+    if cause is None:
+        return None
+    return "Doris is halted (%s)" % supervisor.CAUSE_WORDS.get(cause, "a halt")
