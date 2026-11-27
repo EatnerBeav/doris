@@ -149,6 +149,7 @@ class LiveFixture(EnvFolder):
         self.sent = self.imap.boxes["Sent Items"] = Box(1700000002, special=("\\Sent",))
         self.smtp.on_deliver = lambda sender, rcpts, message: self.sent.add(message, self.clock)
         self.state = os.path.join(self.dir, "state", "live")
+        self.prove_smoke('{"ts": "2026-12-01T15:00:00Z", "sent_copy_found": true, "look": 1, "waited_s": 0}')
         self.clock = u(2026, 12, 1, 16, 0)
         self.said, self.runs, self.posts = [], 0, []
         for patch in (
@@ -163,6 +164,16 @@ class LiveFixture(EnvFolder):
                 mock.patch.dict(os.environ, SHELL)):
             patch.start()
             self.addCleanup(patch.stop)
+
+    def prove_smoke(self, text):
+        """What `smoke --send-to` leaves in the live state folder when it finds its copy in Sent."""
+        os.makedirs(self.state, exist_ok=True)
+        path = os.path.join(self.state, "smoke-sent.json")
+        if text is None:
+            os.remove(path)
+            return
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
 
     def post(self, url, headers, body, timeout):
         self.posts.append((url, dict(headers), json.loads(body.decode("utf-8"))))
@@ -243,6 +254,20 @@ class LiveStartTest(LiveFixture):
         self.assertIn("DORIS_OWNER_ADDRESS", str(cm.exception))
         self.assertFalse(os.path.exists(os.path.join(self.state, "ledger.sqlite")))
         self.nothing_contacted()
+
+    def test_no_live_run_starts_until_a_smoke_found_her_sent_copy(self):
+        for proof in (None, "not json", '{"sent_copy_found": false}', '{"sent_copy_found": "yes"}', "[true]"):
+            with self.subTest(proof=proof):
+                self.prove_smoke(proof)
+                with self.assertRaises(loop.Refused) as cm:
+                    self.go(fresh=True)
+                self.assertEqual(cm.exception.exit_code, 2)
+                self.assertEqual(len(str(cm.exception).splitlines()), 1)
+                self.assertIn("`python -m doris smoke --send-to wolf.whizz@fastmail.com` first", str(cm.exception))
+                self.assertFalse(os.path.exists(os.path.join(self.state, "ledger.sqlite")))
+                self.nothing_contacted()
+        self.prove_smoke('{"sent_copy_found": true}')
+        self.assertTrue(self.go(fresh=True).verify_ok)
 
     def test_a_live_config_carries_no_addresses_and_no_sandbox(self):
         for extra in ({"owner_addr": OWNER}, {"doris_addr": DORIS}, {"sandbox_root": self.dir}, {"env_path": None}):

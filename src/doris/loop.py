@@ -24,6 +24,7 @@ steps to her next ten-minute cycle after each arrival ("her 3:10 PM cycle"); in 
 
 import datetime as _dt
 import hashlib
+import json
 import math
 import os
 import time
@@ -45,6 +46,9 @@ SANDBOX_OWNER = "whizz@fastmail.com"   # the sandbox's owner and Doris addresses
 SANDBOX_DORIS = "doris.htm@fastmail.com"
 WINDOW = caps.MAX_HORIZON + _dt.timedelta(days=1)    # the span an offer reads
 ENV_OWNER = "DORIS_OWNER_ADDRESS"      # live: the owner's own address, from the env file
+SMOKE_PROOF = "smoke-sent.json"        # live state: `smoke --send-to` writes it when it finds its copy in Sent
+SMOKE_REFUSAL = ("Not started: no smoke check has found her sent copy in Sent yet. "
+                 "Run `python -m doris smoke --send-to wolf.whizz@fastmail.com` first.")
 ENV_KEY = "ANTHROPIC_API_KEY"
 ENV_NAMES = (ENV_KEY, "DORIS_MODEL", templates.MEETING_LINK_ENV, ENV_OWNER)   # names only ever reach a receipt
 
@@ -170,6 +174,17 @@ def _live_link(env, error):
     if not ok or len(value) > ics.MAX_LINK_CHARS or not all(0x21 <= ord(c) <= 0x7E for c in value):
         raise error("%s must be one https link of printable characters, at most %d" % (name, ics.MAX_LINK_CHARS))
     return value
+
+
+def smoke_proof_ok(state_dir):
+    """True when the live state folder holds the smoke's proof (SMOKE_PROOF, JSON with
+    "sent_copy_found": true) that her SMTP mail reaches her Sent folder. Anything else is False."""
+    try:
+        with open(os.path.join(state_dir, SMOKE_PROOF), "rb") as fh:
+            proof = json.loads(fh.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(proof, dict) and proof.get("sent_copy_found") is True
 
 
 def live_settings(env_path, model_source):
@@ -384,6 +399,8 @@ class _Run:
                           supervisor.WORKER_EXIT_HALTED)
         if cfg.mode == "live":              # every setting from the env file, before anything is made
             self.live = live_settings(cfg.env_path, cfg.model_source)
+            if not smoke_proof_ok(cfg.state_dir):
+                raise Refused(SMOKE_REFUSAL, 2)
             self.cfg = cfg = replace(cfg, owner_addr=self.live.owner_addr, doris_addr=self.live.doris_addr)
         os.makedirs(os.path.join(self.run_dir, "messages"), exist_ok=True)
         # live: the env file's link; the sandbox: its own fixed link, never one from the shell
