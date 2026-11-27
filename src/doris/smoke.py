@@ -27,11 +27,14 @@ Steps, in order; each runs whatever the one before it did:
                                              in a finally, so a failed step or Ctrl-C still deletes
   caldav read after delete, gone             LiveCalendar.get is None
   caldav test event may remain               only when it was not seen gone: names the booking ID
-With --send-to:
+With --send-to (without it, one line in their place says they did not run):
   smtp send one test message                 LiveMail.send: signed, Auto-Submitted, no Bcc
   sent copy, look 1 (at once)                LiveMail.find_in_sent, as the loop looks right after a send
   sent copy, look 2 (after a short wait)     the same after SENT_LOOK_WAIT_S; the copy counts as
                                              found when either look found it
+
+The last line says "ok, every step passed" only when every step ran and passed. When every step
+that ran passed but one did not run, it says so and names it, with why.
 
 Every connection goes through the network guard, allowing only live.hosts(env), so a host the
 adapters reach without naming it fails the smoke. A smoke is a live run's peer: it refuses to
@@ -39,9 +42,9 @@ start while a halt is in force for live (HALT, or a STOP file) and holds the liv
 (state/live/ledger.lock) from before its first connection to after its last, so it never runs
 beside a live run and no live run starts while it runs.
 
-Exit 0 only when every step passed; 1 when any failed; 2 when the command line or the env file
-is wrong; 3 when a live run holds the lock (or the lock cannot be taken); 5 when a halt is in
-force. On 2, 3 and 5 nothing is contacted.
+Exit 0 when every step that ran passed; 1 when any failed; 2 when the command line or the env
+file is wrong; 3 when a live run holds the lock (or the lock cannot be taken); 5 when a halt is
+in force. On 2, 3 and 5 nothing is contacted.
 """
 
 import argparse
@@ -70,6 +73,7 @@ SMOKE_BOOKING_ID = "doris-smoke-test"
 CLEANUP_TRIES = 3                                # the test event's delete, a short wait apart
 CLEANUP_WAIT_S = caps.CALENDAR_RETRY_WAIT_S
 SENT_LOOK_WAIT_S = 5.0                           # between the two looks in Sent
+SEND_NOT_RUN = "smtp send one test message, then its copy in Sent"   # its line when there is no --send-to
 TEST_TEXT = "A test message from Doris's live smoke check. Nothing to do and nothing to answer."
 
 _OWN_ERRORS = (MailError, CalendarError, live.ConfigError, envfile.EnvFileError)   # texts built never to hold a value
@@ -104,12 +108,20 @@ def _step(out, name, call):
     return True
 
 
+def _not_run(out, name, why):
+    """A step that did not run: its one line, and its name with why for the last line."""
+    out("%s: not run (%s)" % (name, why))
+    return "%s (%s)" % (name, why)
+
+
 # ------------------------------------------------------------------------------------------------
 # The steps
 # ------------------------------------------------------------------------------------------------
 def check(mail, calendar, out, send_to=None, now=None):
-    """Every step against these adapters, one line each. True when every one passed."""
+    """Every step against these adapters, one line each. (True when every step that ran passed,
+    [each step that did not run, named with why])."""
     now = now or _dt.datetime.now(UTC)
+    not_run = []
     passed = [
         _step(out, "imap login and inbox count", lambda: _count(mail.inbox_count(), "message") + " in INBOX"),
         _step(out, "sent folder found by its special-use flag", lambda: _count(len(mail.sent_folders()), "folder")),
@@ -117,9 +129,11 @@ def check(mail, calendar, out, send_to=None, now=None):
         _step(out, "caldav query, next 7 days", lambda: _query(calendar, now)),
     ]
     passed += _calendar_round_trip(calendar, out, now)
-    if send_to is not None:
+    if send_to is None:
+        not_run.append(_not_run(out, SEND_NOT_RUN, "no --send-to"))
+    else:
         passed += _send_and_look(mail, out, send_to, now)
-    return all(passed)
+    return all(passed), not_run
 
 
 def _query(calendar, now):
@@ -291,7 +305,7 @@ def main(argv, out=None) -> int:
     try:
         guard = netguard.install(hosts)
         try:
-            ok = check(mail, calendar, out, send_to=send_to)
+            ok, not_run = check(mail, calendar, out, send_to=send_to)
         finally:
             guard.uninstall()
     finally:
@@ -300,7 +314,8 @@ def main(argv, out=None) -> int:
     if refused:
         out("network guard: FAILED (%s to a host the adapters do not name)" % _count(refused, "connection"))
         ok = False
-    out("smoke: " + ("ok, every step passed" if ok else "FAILED"))
+    verdict = "FAILED" if not ok else "every step that ran passed" if not_run else "ok, every step passed"
+    out("smoke: " + verdict + ("; not run: " + "; ".join(not_run) if not_run else ""))
     return 0 if ok else 1
 
 

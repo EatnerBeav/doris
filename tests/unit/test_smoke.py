@@ -36,6 +36,7 @@ STEPS = ["imap login and inbox count", "sent folder found by its special-use fla
          "caldav query, next 7 days", "caldav test event left by an earlier run", "caldav create test event",
          "caldav read test event back, times match", "caldav delete test event", "caldav read after delete, gone"]
 SEND_STEPS = ["smtp send one test message", "sent copy, look 1 (at once)", "sent copy, look 2 (after a short wait)"]
+SEND_NOT_RUN = "smtp send one test message, then its copy in Sent"     # the line in their place without --send-to
 READ_ONLY_IMAP = {"CAPABILITY", "LOGIN", "LOGOUT", "EXAMINE", "LIST", "UID SEARCH", "UID FETCH"}
 
 
@@ -68,6 +69,9 @@ class SmokeFixture(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
+    def deliver_to_sent(self, sender, recipients, message):
+        self.sent.add(message, u(2026, 11, 27, 12))
+
     def write_env(self, text):
         path = os.path.join(self.dir, ".env")
         with open(path, "w", encoding="utf-8") as fh:
@@ -94,15 +98,29 @@ class SmokeFixture(unittest.TestCase):
 class SmokeTest(SmokeFixture):
 
     def test_every_step_passes_against_working_servers_with_one_plain_line_each(self):
-        self.assertEqual(self.run_smoke(), 0)
-        self.assertEqual([line.split(": ", 1)[0] for line in self.lines], STEPS + ["smoke"])
+        self.smtp.on_deliver = self.deliver_to_sent
+        self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 0)
+        self.assertEqual([line.split(": ", 1)[0] for line in self.lines], STEPS + SEND_STEPS + ["smoke"])
         self.assertEqual(self.result("imap login and inbox count"), "ok (2 messages in INBOX)")
         self.assertEqual(self.result("sent folder found by its special-use flag"), "ok (1 folder)")
         self.assertEqual(self.result("caldav query, next 7 days"), "ok (0 events)")
-        for step in STEPS:
+        for step in STEPS + SEND_STEPS:
             self.assertTrue(self.result(step).startswith("ok"), self.lines)
         self.assertEqual(self.result("smoke"), "ok, every step passed")
         self.assert_no_value()
+
+    def test_without_send_to_the_send_is_named_as_not_run_and_never_every_step_passed(self):
+        self.assertEqual(self.run_smoke(), 0)
+        self.assertEqual([line.split(": ", 1)[0] for line in self.lines], STEPS + [SEND_NOT_RUN, "smoke"])
+        self.assertEqual(self.result(SEND_NOT_RUN), "not run (no --send-to)")
+        self.assertEqual(self.result("smoke"), "every step that ran passed; not run: %s (no --send-to)" % SEND_NOT_RUN)
+        self.assertFalse(any("every step passed" in line for line in self.lines), self.lines)
+        self.assert_no_value()
+
+    def test_a_failed_smoke_still_names_what_did_not_run(self):
+        self.dav.status["PUT"] = 403
+        self.assertEqual(self.run_smoke(), 1)
+        self.assertEqual(self.result("smoke"), "FAILED; not run: %s (no --send-to)" % SEND_NOT_RUN)
 
     def test_without_send_to_nothing_is_sent_and_imap_is_only_read(self):
         self.run_smoke()
@@ -165,7 +183,7 @@ class SmokeTest(SmokeFixture):
                          "CalendarError (caldav delete: 503), on each of %d tries" % smoke.CLEANUP_TRIES)
         self.assertEqual(self.result("caldav read after delete, gone"), "FAILED (still there)")
         self.assertIn(smoke.SMOKE_BOOKING_ID, self.result("caldav test event may remain"))
-        self.assertEqual(self.result("smoke"), "FAILED")
+        self.assertEqual(self.result("smoke"), "FAILED; not run: %s (no --send-to)" % SEND_NOT_RUN)
         del self.dav.status["DELETE"]
         self.lines.clear()
         self.assertEqual(self.run_smoke(), 0)
@@ -193,7 +211,7 @@ class SmokeTest(SmokeFixture):
         self.assertEqual(self.result("caldav read test event back, times match"), "FAILED (not found)")
         self.assertTrue(self.result("smtp login, nothing sent").startswith("ok"))
         self.assertTrue(self.result("caldav read after delete, gone").startswith("ok"))
-        self.assertEqual(self.result("smoke"), "FAILED")
+        self.assertEqual(self.result("smoke"), "FAILED; not run: %s (no --send-to)" % SEND_NOT_RUN)
         self.assert_no_value()
 
     def test_an_event_read_back_with_other_times_fails(self):
@@ -299,9 +317,6 @@ class HaltAndLockTest(SmokeFixture):
 
 
 class SendToTest(SmokeFixture):
-
-    def deliver_to_sent(self, sender, recipients, message):
-        self.sent.add(message, u(2026, 11, 27, 12))
 
     def test_sends_one_plain_signed_test_message_then_finds_it_in_sent(self):
         self.smtp.on_deliver = self.deliver_to_sent
