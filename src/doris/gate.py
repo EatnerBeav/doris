@@ -441,7 +441,8 @@ def _g9_bookable_interval(action, ctx):
     back to them, and a start an open offer to them on the thread already holds. A slot she offers on
     her own starts on the hour or half hour. A pick (any booking not marked direct) books only a slot
     an open offer to its sender on its thread holds, exactly as offered, and keeps the grid it was
-    offered on. Every offered slot is checked, not just the first."""
+    offered on. Every offered slot is checked, not just the first. The receipt says written for a
+    direct booking only: a pick is checked on its offer's grid, but it is no time the sender wrote."""
     slots = _helper("slots")
     now = _now(ctx)
     if action.kind == "calendar_create":
@@ -449,22 +450,22 @@ def _g9_bookable_interval(action, ctx):
         if action.direct is not True:
             if (span.start_utc, span.end_utc) not in _open_offer_slots(action, ctx):
                 return _fail(rule="not_offered", start=_iso(span.start_utc), written=False)
-        to_check = [(span, True)]
+        to_check = [(span, True, action.direct is True)]
     else:
         offered = _offered_times(action)
         if not _times_ok(offered):
             raise _Missing("offered_times")
         length = _dt.timedelta(minutes=_offer_length(action))
         written = _written_starts(ctx, _open_offer_slots(action, ctx))
-        to_check = [(Slot(start, start + length), start in written) for start in offered]
-    for slot, written in to_check:
-        ok, rule = slots.bookable(slot, now, written)
+        to_check = [(Slot(start, start + length), start in written, start in written) for start in offered]
+    for slot, as_written, said in to_check:
+        ok, rule = slots.bookable(slot, now, as_written)
         if ok is True:
             continue
         if ok is False and rule in BOOKABLE_RULES:
-            return _fail(rule=rule, start=_iso(slot.start_utc), written=written)
+            return _fail(rule=rule, start=_iso(slot.start_utc), written=said)
         raise _OffContract("bookable")
-    return _pass(checked=len(to_check), written=to_check[0][1])
+    return _pass(checked=len(to_check), written=to_check[0][2])
 
 
 def _g10_direct_booking_evidence(action, ctx):

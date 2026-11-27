@@ -271,6 +271,14 @@ class PickedOffer(Restart):
         s2 = self.crash_then_run(loop._Run, "close", lambda self_, e, kind, outcome, *a, **k: outcome == "book")
         self.assert_booked_once(s2)
 
+    def test_the_receipt_calls_a_pick_of_her_slot_no_time_the_sender_wrote(self):
+        # G9 checks it on the grid it was offered on; only a direct booking is "written" (Fable review
+        # of PR #3, finding 7)
+        lines = receipts.read_lines(self.run_once().receipts_path)
+        checked = [l["payload"]["checks"]["G9"] for l in lines
+                   if l["kind"] == "checked" and l["payload"]["action"] == "calendar_create"]
+        self.assertEqual(checked, [{"status": "pass", "checked": 1, "written": False}])
+
 
 def expire_offers(state):
     """Every offer in the ledger expires while she is down (before the restart's clock)."""

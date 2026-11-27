@@ -786,6 +786,21 @@ class G9Test(GateTest):
         # it passed G9 when it was offered, so it keeps that grid (a quarter hour if the sender wrote it)
         self.bookable().assert_called_once_with(SLOT, NOW, True)
 
+    def test_g9_the_receipt_calls_only_a_direct_booking_written(self):
+        # a pick is checked on the grid it was offered on, but it is no time the sender wrote: the
+        # receipt says written for a direct booking only (Fable review of PR #3, finding 7)
+        self.assertEqual(self.one(self.check(booking()), "G9").detail, {"checked": 1, "written": True})
+        pick = self.one(self.check(booking(direct=False), parse=parse(readings=[]), offered={SLOT}), "G9")
+        self.assertEqual((pick.status, pick.detail), ("pass", {"checked": 1, "written": False}))
+        self.bookable().assert_called_with(SLOT, NOW, True)
+        self.bookable().return_value = (False, "under_24h")
+        for direct, written in ((True, True), (False, False)):
+            with self.subTest(direct=direct):
+                result = self.check(booking(direct=direct), parse=parse(readings=[]), offered={SLOT})
+                self.assertBlocked(result, "G9")
+                self.assertEqual(self.one(result, "G9").detail,
+                                 {"rule": "under_24h", "start": "2026-12-03T18:00:00Z", "written": written})
+
     def test_g9_an_open_offer_counts_only_for_the_sender_it_went_to(self):
         # same sender, same thread (Fable review of PR #3, finding 3): Pat names Rae's thread, writes to
         # the owner and picks the slot her offer holds; only an open offer to Pat could hold his pick
