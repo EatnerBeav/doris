@@ -73,7 +73,7 @@ _INTERNALDATE = re.compile(rb'INTERNALDATE "\s?(\d{1,2})-([A-Za-z]{3})-(\d{4}) (
 _UID = re.compile(rb"\bUID (\d+)")
 _FLAGS = re.compile(rb"\bFLAGS \(([^)]*)\)")
 _BODY_LITERAL = re.compile(rb"BODY\[\] \{\d+\}$")
-_LIST_LINE = re.compile(rb'^\((?P<attrs>[^)]*)\)\s+(?P<delim>"(?:[^"\\]|\\.)*"|NIL)\s+(?P<rest>.*)$', re.S)
+_LIST_LINE = re.compile(rb'^\((?P<attrs>[^)]*)\)\s+(?P<delim>"(?:[^"\\]|\\.)*"|NIL)\s+(?P<rest>.*)\Z', re.S)
 _KEYWORD = re.compile(r"^[A-Za-z0-9$_-]{1,64}\Z")
 _SERVER_ID = re.compile(r"^INBOX:([1-9][0-9]{0,9}):([1-9][0-9]{0,9})\Z")
 _MESSAGE_ID = re.compile(r"^[!#-;=?A-\[\]-~]{1,200}@[!#-;=?A-\[\]-~]{1,200}\Z")   # printable, no space " < > @ \

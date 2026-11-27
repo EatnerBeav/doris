@@ -1510,7 +1510,7 @@ class GetTest(CalFixture):
         self.fails(CalendarTimeout, self.cal.get, BID)
 
     def test_an_id_not_hers_is_refused_before_any_call(self):
-        for bad in ("other", "doris-../x", "", None):
+        for bad in ("other", "doris-../x", "", None, BID + "\n"):
             self.fails(NotHers, self.cal.get, bad)
         self.assertEqual(self.dav.requests, [])
 
@@ -1542,7 +1542,7 @@ class DeleteTest(CalFixture):
         self.assertEqual(self.dav.methods(), ["GET"])
 
     def test_an_id_not_hers_is_refused_before_any_call(self):
-        for bad in ("other", "doris-../x", "", None, "doris-a/b"):
+        for bad in ("other", "doris-../x", "", None, "doris-a/b", BID + "\n"):
             self.fails(NotHers, self.cal.delete, bad)
         self.assertEqual(self.dav.requests, [])
 

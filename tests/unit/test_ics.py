@@ -47,6 +47,16 @@ def unfold(raw):
     return raw.decode("ascii").replace("\r\n ", "").split("\r\n")
 
 
+class BookingIdTest(unittest.TestCase):
+
+    def test_her_ids_pass_and_a_trailing_newline_does_not(self):
+        """In Python, $ also matches before a final newline: "doris-abc\\n" is not one of her IDs."""
+        for good in ("doris-abc", "doris-0123456789abcdef01234567", "doris-a.b_c@d-e"):
+            self.assertTrue(ics.is_booking_id(good), repr(good))
+        for bad in ("doris-abc\n", "doris-abc\r\n", "doris-abc\r", "\ndoris-abc", "doris-", "doris-a..b", None):
+            self.assertFalse(ics.is_booking_id(bad), repr(bad))
+
+
 class BuildEventTest(unittest.TestCase):
 
     def test_fixed_fields_only_in_fixed_order(self):

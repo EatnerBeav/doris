@@ -11,7 +11,7 @@ twice, the name), never a value: the real file holds Doris's app password.
 
 import re
 
-_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 _EXPORT = re.compile(r"^export\s")
 _LINES = re.compile(r"\r\n|\n|\r")
 _QUOTES = ("'", '"')
