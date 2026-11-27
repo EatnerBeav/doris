@@ -654,6 +654,14 @@ class Runs(Base):
         with self.assertRaises(KeyError):
             self.db.end_run("run-9", T0)
 
+    def test_every_run_in_the_order_it_started(self):
+        # a sandbox restart's clock begins at clock.txt again, so the order is the ledger's, not the clock's
+        self.db.start_run("run-b", "sandbox", T0 + H)
+        self.db.end_run("run-b", T0 + 2 * H)
+        self.db.start_run("run-a", "sandbox", T0)
+        self.assertEqual([(r["run_id"], r["started_utc"], r["ended_utc"]) for r in self.db.runs()],
+                         [("run-b", T0 + H, T0 + 2 * H), ("run-a", T0, None)])
+
 
 class SensitiveSkip(Base):
     MID = "otp-7731-secret@bank.example"

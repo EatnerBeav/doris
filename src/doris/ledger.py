@@ -759,6 +759,12 @@ class Ledger:
         if self._run == run_id:
             self._run = None
 
+    def runs(self) -> List[dict]:
+        """Every run on this ledger, in the order started (rowid: a sandbox restart's clock begins at
+        clock.txt again, so started_utc can go back). The daily digest reads their receipt files."""
+        return [{"run_id": r["run_id"], "mode": r["mode"], "started_utc": _when(r["started_utc"]),
+                 "ended_utc": _when(r["ended_utc"])} for r in self._all("SELECT * FROM runs ORDER BY rowid")]
+
     def unended_runs(self) -> List[dict]:
         """Runs started and never ended (an interrupted run, for the startup line), oldest first."""
         return [{"run_id": r["run_id"], "mode": r["mode"], "started_utc": _when(r["started_utc"]), "ended_utc": None}
