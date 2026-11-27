@@ -34,6 +34,7 @@ import smtplib
 import ssl
 import urllib.parse
 import xml.etree.ElementTree as ET
+import xml.parsers.expat
 
 from .. import caps, ics, slots
 from ..shapes import AlreadyExists, CalendarError, CalendarTimeout, Event, InboundItem, MailError, SendUnknown
@@ -783,12 +784,7 @@ class LiveCalendar(CalendarAdapter):
         """[(resource name, calendar data or None)] from a 207 answer, the collection's own entry
         left out. A DOCTYPE, an answer that is not a multistatus, or the collection marked with
         an error status (507: the server cut the answer short) is a CalendarError."""
-        if b"<!DOCTYPE" in body or b"<!ENTITY" in body:
-            raise _failure(CalendarError, step, detail="the answer carries a DOCTYPE; not read")
-        try:
-            root = ET.fromstring(body)
-        except ET.ParseError:
-            raise _failure(CalendarError, step, detail="the answer cannot be read") from None
+        root = _xml(body, step)
         if root.tag != _DAV + "multistatus":
             raise _failure(CalendarError, step, detail="the answer is not a multistatus")
         collection = urllib.parse.unquote(self.path).rstrip("/")
@@ -910,6 +906,34 @@ _QUERY = """<?xml version="1.0" encoding="utf-8"?>
   </C:filter>
 </C:calendar-query>
 """
+
+
+class _DTDRefused(Exception):
+    """A DOCTYPE or an entity declaration in a server's XML answer."""
+
+
+def _refuse_dtd(*_):
+    raise _DTDRefused()
+
+
+def _xml(body, step):
+    """The root element of a server's XML answer. A DOCTYPE or an entity declaration is refused
+    by expat itself, in whatever encoding the answer is in (a byte scan misses "<!DOCTYPE" in
+    UTF-16 and trips on it inside CDATA), before ElementTree reads anything: no entity is ever
+    expanded. The C ElementTree parser does not expose its expat parser, hence the pre-pass."""
+    check = xml.parsers.expat.ParserCreate()
+    check.StartDoctypeDeclHandler = _refuse_dtd
+    check.EntityDeclHandler = _refuse_dtd
+    try:
+        check.Parse(body, True)
+    except _DTDRefused:
+        raise _failure(CalendarError, step, detail="the answer carries a DOCTYPE; not read") from None
+    except xml.parsers.expat.ExpatError:
+        raise _failure(CalendarError, step, detail="the answer cannot be read") from None
+    try:
+        return ET.fromstring(body)
+    except ET.ParseError:
+        raise _failure(CalendarError, step, detail="the answer cannot be read") from None
 
 
 def _ics_stamp(moment):

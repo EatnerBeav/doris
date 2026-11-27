@@ -1431,6 +1431,32 @@ class QueryTest(CalFixture):
             self.dav.raw_answer = answer
             self.fails(CalendarError, self.cal.query, S, E)
 
+    def test_a_title_that_mentions_a_doctype_inside_cdata_is_read_like_any_other(self):
+        """The guard is the parser's, not a byte scan: text that only looks like a DOCTYPE is data."""
+        data = vcal(timed("odd-title", S, E, "SUMMARY:<!DOCTYPE x [<!ENTITY y \"z\">]> notes")).decode()
+        body = ('<?xml version="1.0" encoding="utf-8"?>\n<d:multistatus xmlns:d="DAV:" '
+                'xmlns:cal="urn:ietf:params:xml:ns:caldav"><d:response><d:href>%sa.ics</d:href><d:propstat>'
+                '<d:prop><cal:calendar-data><![CDATA[%s]]></cal:calendar-data></d:prop>'
+                '<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>' % (COLLECTION, data))
+        self.dav.raw_answer = (207, "application/xml; charset=utf-8", body.encode("utf-8"))
+        self.assertEqual(self.cal.query(S, E), [Event("odd-title", "", "", "timed", S, E)])
+
+    def test_a_doctype_in_any_encoding_is_refused_never_expanded(self):
+        """UTF-16 hides "<!DOCTYPE" from a byte scan; the parser still sees it, and nothing is expanded."""
+        event = vcal(timed("from-an-entity", S, E)).decode().replace("\r\n", "&#10;")
+        for encoding in ("utf-16", "utf-16-le", "utf-8"):
+            body = ('<?xml version="1.0" encoding="%s"?>\n<!DOCTYPE d [<!ENTITY ev "%s">]>\n'
+                    '<d:multistatus xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav"><d:response>'
+                    '<d:href>%sa.ics</d:href><d:propstat><d:prop><cal:calendar-data>&ev;</cal:calendar-data>'
+                    '</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>'
+                    % (encoding.split("-le")[0], event, COLLECTION))
+            data = body.encode(encoding)
+            if encoding == "utf-16-le":
+                data = b"\xff\xfe" + data
+            self.dav.raw_answer = (207, "application/xml", data)
+            err = self.fails(CalendarError, self.cal.query, S, E)
+            self.assertIn("DOCTYPE", str(err), encoding)
+
     def test_a_server_that_hangs_is_a_calendar_timeout(self):
         self.dav.fault["REPORT"] = "hang"
         cal = self.make_calendar(timeout_s=0.3)
