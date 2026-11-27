@@ -51,7 +51,7 @@ class ThreadState:
     own_thread: bool = False            # its reply headers name a Message-ID in her Sent ledger
     held: bool = False                  # a held thread stays Shane's: nothing more is sent on it
     offer_count: int = 0                # offer records on this thread, ever (two at most)
-    open_offers: List[dict] = field(default_factory=list)   # not used, closed or expired: id, slots, length_min
+    open_offers: List[dict] = field(default_factory=list)   # to this sender; not used, closed, expired: id, slots...
     live_booking: Optional[dict] = None  # her standing booking on this thread: booking_id, slot, sender
     gone_booking: bool = False          # a booking here was marked gone (ruling 17)
     written_to: FrozenSet[str] = frozenset()   # addresses she has sent to on this thread

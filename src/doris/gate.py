@@ -408,9 +408,11 @@ def _g8_approved_template(action, ctx):
 
 # --- G9 to G13: what goes on the calendar ------------------------------------------------------
 def _open_offer_slots(action, ctx):
-    """The slots of the open offers on the action's thread, from the ledger, as (start, end) pairs.
-    Anything but a collection of Slots with aware times is off contract: the check cannot run."""
-    answer = _need(ctx, "open_offer_slots")(action.thread_key)
+    """The slots of the open offers on the action's thread that went to the sender of the message
+    being answered (an offer is one sender's: same sender, same thread), from the ledger, as (start,
+    end) pairs. Anything but a collection of Slots with aware times is off contract: the check cannot run."""
+    sender = _address(_need(ctx, "message").from_addr)
+    answer = _need(ctx, "open_offer_slots")(action.thread_key, sender)
     if not isinstance(answer, (set, frozenset, list, tuple)):
         raise _OffContract("open_offer_slots")
     pairs = set()
@@ -423,7 +425,8 @@ def _open_offer_slots(action, ctx):
 
 def _written_starts(ctx, open_pairs):
     """The starts G9 reads as times the sender wrote: the parser's kept readings of the message
-    being answered, and every start of an open offer on the thread (each passed G9 when offered)."""
+    being answered, and every start of an open offer to that sender on the thread (each passed G9
+    when offered)."""
     starts = {start for start, _ in open_pairs}
     parse = _field(ctx, "parse")
     if parse is not None:
@@ -435,10 +438,10 @@ def _g9_bookable_interval(action, ctx):
     """G9. Bookable interval (rulings 3, 5, 6): start and end inside Mon to Fri 9:00 AM to 5:00 PM
     Pacific, start 24 hours to 30 days from now, not on the holiday list, length allowed. A time the
     sender wrote may start on any quarter hour: a direct booking, the parser's kept readings offered
-    back to them, and a start an open offer on the thread already holds. A slot she offers on her own
-    starts on the hour or half hour. A pick (any booking not marked direct) books only a slot an open
-    offer on its thread holds, exactly as offered, and keeps the grid it was offered on. Every offered
-    slot is checked, not just the first."""
+    back to them, and a start an open offer to them on the thread already holds. A slot she offers on
+    her own starts on the hour or half hour. A pick (any booking not marked direct) books only a slot
+    an open offer to its sender on its thread holds, exactly as offered, and keeps the grid it was
+    offered on. Every offered slot is checked, not just the first."""
     slots = _helper("slots")
     now = _now(ctx)
     if action.kind == "calendar_create":

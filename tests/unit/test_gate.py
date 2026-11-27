@@ -232,7 +232,8 @@ class FakeCtx:
         self.live = None
         self.clean = True
         self.model_up = True
-        self.offered = set()               # the slots of the open offers on the thread
+        self.offered = set()               # the slots of the open offers to Rae on the thread
+        self.offered_to = {}               # the slots of open offers on the thread to anyone else, by address
         self.calls = []
         for name, value in over.items():
             setattr(self, name, value)
@@ -275,9 +276,10 @@ class FakeCtx:
     def model_ok(self):
         return self.model_up
 
-    def open_offer_slots(self, thread_key):
-        self.calls.append(("open_offer_slots", thread_key))
-        return set(self.offered)
+    def open_offer_slots(self, thread_key, sender):
+        # an offer is one sender's: `offered` went to Rae, `offered_to` to anyone else (same sender, same thread)
+        self.calls.append(("open_offer_slots", thread_key, sender))
+        return set(self.offered) if sender == RAE else set(self.offered_to.get(sender, ()))
 
 
 def raises(exc):
@@ -780,9 +782,27 @@ class G9Test(GateTest):
         ctx = FakeCtx(parse=parse(readings=[]), offered={SLOT2, SLOT})
         result = gate.check(booking(direct=False), ctx)
         self.assertEqual(self.one(result, "G9").status, "pass")
-        self.assertIn(("open_offer_slots", THREAD), ctx.calls)
+        self.assertIn(("open_offer_slots", THREAD, RAE), ctx.calls)
         # it passed G9 when it was offered, so it keeps that grid (a quarter hour if the sender wrote it)
         self.bookable().assert_called_once_with(SLOT, NOW, True)
+
+    def test_g9_an_open_offer_counts_only_for_the_sender_it_went_to(self):
+        # same sender, same thread (Fable review of PR #3, finding 3): Pat names Rae's thread, writes to
+        # the owner and picks the slot her offer holds; only an open offer to Pat could hold his pick
+        pat = message(from_addr=PAT)
+        ctx = FakeCtx(message=pat, parse=parse(readings=[]), offered={SLOT})
+        result = gate.check(booking(direct=False), ctx)
+        self.assertBlocked(result, "G9")
+        self.assertEqual(self.one(result, "G9").detail["rule"], "not_offered")
+        self.assertEqual([c for c in ctx.calls if c[0] == "open_offer_slots"], [("open_offer_slots", THREAD, PAT)])
+        ctx = FakeCtx(message=pat, parse=parse(readings=[]), offered={SLOT}, offered_to={PAT: {SLOT}})
+        self.assertEqual(self.one(gate.check(booking(direct=False), ctx), "G9").status, "pass")
+
+    def test_g9_the_sender_is_the_from_address_as_mail_compares_it(self):
+        ctx = FakeCtx(message=message(from_addr="Rae@Landscaping.example"), parse=parse(readings=[]),
+                      offered={SLOT})
+        self.assertEqual(self.one(gate.check(booking(direct=False), ctx), "G9").status, "pass")
+        self.assertIn(("open_offer_slots", THREAD, RAE), ctx.calls)
 
     def test_g9_blocks_a_pick_of_a_slot_no_open_offer_holds(self):
         longer = Slot(SLOT.start_utc, SLOT.end_utc + dt.timedelta(minutes=30))
@@ -842,10 +862,17 @@ class G9Test(GateTest):
         self.check(reply("T12"), parse=parse(readings=[]), offered={SLOT2})
         self.assertEqual([c.args[2] for c in self.bookable().call_args_list], [False, True, False])
 
+    def test_g9_another_senders_open_offer_is_no_time_this_sender_wrote(self):
+        # Rae's open offer holds SLOT2; on Pat's reply on the same thread it is checked on her own grid
+        self.check(reply("T12", to=[PAT]), message=message(from_addr=PAT), parse=parse(readings=[]),
+                   offered={SLOT2})
+        self.assertEqual([c.args[2] for c in self.bookable().call_args_list], [False, False, False])
+
     def test_g9_cannot_run_without_the_open_offers(self):
         naive = Slot(dt.datetime(2026, 12, 3, 18, 0), dt.datetime(2026, 12, 3, 18, 30))
-        for broken in (raises(RuntimeError("ledger down")), lambda tk: None, lambda tk: ["2026-12-03T18:00Z"],
-                       lambda tk: [SLOT.start_utc], lambda tk: [naive], lambda tk: SLOT):
+        for broken in (raises(RuntimeError("ledger down")), lambda tk, sender: None,
+                       lambda tk, sender: ["2026-12-03T18:00Z"], lambda tk, sender: [SLOT.start_utc],
+                       lambda tk, sender: [naive], lambda tk, sender: SLOT):
             with self.subTest(broken=broken):
                 self.assertBlocked(self.check(reply("T2"), open_offer_slots=broken), "G9", status="error")
                 self.assertBlocked(self.check(booking(direct=False), open_offer_slots=broken), "G9", status="error")

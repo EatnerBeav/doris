@@ -751,10 +751,12 @@ class _Run:
         part way, and the next run reads it again). A booking this message made itself is not "a
         live booking on the thread" (book() picks that one up), and an offer its own reply already
         carries does not count against the thread; a booking its own cancel or move already took off
-        the calendar still stands for it, so the reply goes on."""
+        the calendar still stands for it, so the reply goes on. Only the offers that went to this
+        message's sender are open to it (same sender, same thread); the thread's count is every offer."""
         tk, now = e.thread, self.now()
         mine = set(o["id"] for o in self.own_offers(e))
-        offers = [o for o in self.ledger.open_offers(tk, now) if o["id"] not in mine]
+        on_thread = [o for o in self.ledger.open_offers(tk, now) if o["id"] not in mine]
+        offers = [o for o in on_thread if o["sender"] == e.msg.from_addr.strip().lower()]
         own = ledger_mod.norm_id(e.key)
         booked = self.ledger.bookings_for_thread(tk)
         live = next((b for b in booked if b["state"] in ledger_mod.LIVE_BOOKING_STATES
@@ -767,7 +769,7 @@ class _Run:
             offer_count=self.ledger.offer_count(tk) - len(mine), open_offers=offers, live_booking=live,
             gone_booking=gone and live is None,
             written_to=frozenset(a.lower() for a in self.ledger.addresses_written_on_thread(tk)),
-            offer_to=offers[-1]["sender"] if offers else None)
+            offer_to=on_thread[-1]["sender"] if on_thread else None)
 
     def own_offers(self, e):
         """Offer records this message's own reply already carries on its thread (written down before
@@ -876,14 +878,20 @@ class _Run:
         if b is not None and b["state"] == "intent":
             self.ledger.set_booking_state(bid, "blocked")
 
-    def open_offer_slots(self, thread_key):
-        """Every slot of the thread's open offers, as G9 reads them."""
-        return [s for o in self.ledger.open_offers(thread_key, self.now()) for s in o["slots"]]
+    def open_offers_to(self, thread_key, sender):
+        """The thread's open offers that went to this address, oldest first. An offer is one sender's
+        (ruling 6: same sender, same thread), so another sender's is nothing to pick from or resend."""
+        addr = sender.strip().lower()
+        return [o for o in self.ledger.open_offers(thread_key, self.now()) if o["sender"] == addr]
+
+    def open_offer_slots(self, thread_key, sender):
+        """Every slot of the open offers to this sender on the thread, as G9 reads them."""
+        return [s for o in self.open_offers_to(thread_key, sender) for s in o["slots"]]
 
     def book_fresh(self, e, f, plan, bid):
         now, slot, msg = self.now(), plan.slot, e.msg
         # a pick keeps the grid its slot was offered on (G9): a time the sender wrote may sit on a quarter hour
-        written = plan.direct is True or slot in self.open_offer_slots(e.thread)
+        written = plan.direct is True or slot in self.open_offer_slots(e.thread, msg.from_addr)
         ok, rule = slots.bookable(slot, now, written=written)
         if not ok:
             self.drop_booking(bid)
@@ -1150,7 +1158,7 @@ class _Run:
             spend_usd=lambda: led.spend(self.run_id), silenced=led.is_silenced,
             counts=lambda thread_key: self.counts(thread_key, action),
             fresh_read=lambda slot: self.read(e, slot.start_utc, slot.end_utc), booking=led.booking,
-            open_offer_slots=lambda thread_key: self.open_offer_slots(thread_key),
+            open_offer_slots=lambda thread_key, sender: self.open_offer_slots(thread_key, sender),
             live_booking_for_thread=led.live_booking_for_thread,
             readback_clean=lambda bid: bid in self.clean_readbacks, model_ok=lambda: not self.model_down,
             meeting_link=self.link())

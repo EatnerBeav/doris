@@ -102,6 +102,55 @@ class QuarterHourTimes(Written):
         self.assertIn("DTEND:20261203T224500Z", ics)
 
 
+BOB = ("Bob Stone", "bob@elsewhere.example")
+
+
+def to_the_owner_on_her_thread(sender, mid, text):
+    """A reply to the owner alone that names Lena's request: it lands on her thread (ruling 18, branch 1)."""
+    name, addr = sender
+    return ("From: %s <%s>\r\n"
+            "To: Shane Bornstein <whizz@fastmail.com>\r\n"
+            "Subject: Re: Call next week?\r\n"
+            "Date: Tue, 01 Dec 2026 09:30:00 -0800\r\n"
+            "Message-ID: <%s>\r\n"
+            "In-Reply-To: <%s>\r\n"
+            "References: <%s>\r\n"
+            "MIME-Version: 1.0\r\n"
+            "Content-Type: text/plain; charset=\"utf-8\"\r\n"
+            "Content-Transfer-Encoding: 7bit\r\n\r\n%s\r\n\r\n%s\r\n"
+            % (name, addr, mid, LENA_KEY, LENA_KEY, text, name.split()[0])).encode("ascii")
+
+
+class AnOfferIsOneSenders(Written):
+    """Same sender, same thread (ruling 6; Fable review of PR #3, finding 3): someone else who names
+    Lena's request and picks "the first one" never books the quarter hour she offered Lena."""
+    text = QuarterHourTimes.text
+
+    def open_offers(self):
+        led = ledger_mod.Ledger(os.path.join(self.state, "ledger.sqlite"))
+        try:
+            return led.open_offers("<%s>" % self.key, at(2026, 12, 1, 17, 0))
+        finally:
+            led.close()
+
+    def test_a_pick_from_another_address_never_books_her_offer(self):
+        self.run_once()
+        add(self.root, "21-bob-pick.eml",
+            to_the_owner_on_her_thread(BOB, "20261201.0930.bob.pick@elsewhere.example", "The first one works."),
+            {"forwarded": "yes"})
+        s = self.run_once()
+        self.assertEqual(self.events(), [])
+        # nothing was offered to Bob, so "the first one" is a new request of his own: his own times
+        self.assertEqual(self.templates_sent(BOB[1]), ["T2"])
+        self.assertEqual(self.closing(s, "bob"), ["offer"])
+        lena, bob = self.open_offers()
+        self.assertEqual((lena["sender"], bob["sender"]), (LENA[1], BOB[1]))
+        self.assertEqual(lena["slots"][:2], [Slot(at(2026, 12, 3, 22, 15), at(2026, 12, 3, 22, 45)),
+                                             Slot(at(2026, 12, 4, 18, 45), at(2026, 12, 4, 19, 15))])
+        self.assertEqual(self.off_her_grid(bob["slots"]), [])
+        self.assertEqual(self.templates_sent(LENA[1]), ["T2"])
+
+
 class OnlyTimesTheSenderWrote(Written):
     # both written times are busy; Thursday's 10:15 on Friday and Friday's 2:45 on Thursday are free
     text = ("Hi, could Shane do Thursday, December 3 at 10:15 AM Pacific or Friday, December 4 at 2:45 PM "
