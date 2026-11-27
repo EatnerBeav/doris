@@ -731,16 +731,19 @@ class _Run:
         return {}
 
     def own_booking(self, e):
-        """This message's own booking, written down and not settled: its slot, the offer it came from
-        (a booking from no offer is a direct one) and its length."""
+        """This message's own booking, written down and not settled: its slot, whether it was direct
+        (kept with the booking; one recorded before the ledger kept it is direct when no offer on the
+        thread ever held its slot), the offer it came from and its length."""
         own = ledger_mod.norm_id(e.key)
         mine = [b for b in self.ledger.bookings_for_thread(e.thread)
                 if ledger_mod.norm_id(b["message_key"]) == own and b["state"] in RESUMABLE_BOOKING_STATES]
         if not mine:
             return None
-        slot = mine[-1]["slot"]
-        offer_id = self.ledger.offer_holding(e.thread, slot)
-        return {"slot": slot, "direct": offer_id is None, "offer_id": offer_id,
+        slot, direct = mine[-1]["slot"], mine[-1]["direct"]
+        offer_id = None if direct is True else self.ledger.offer_holding(e.thread, slot)
+        if direct is None:
+            direct = offer_id is None
+        return {"slot": slot, "direct": direct, "offer_id": offer_id,
                 "length_min": int((slot.end_utc - slot.start_utc).total_seconds() // 60)}
 
     def thread_state(self, e, s8):
@@ -893,7 +896,8 @@ class _Run:
         if busy:
             self.drop_booking(bid)
             return self.act(e, f, policy.on_unavailable(plan, "overlap", f.thread))
-        self.ledger.record_booking(bid, e.key, e.thread, msg.from_addr, slot, now, run_id=self.run_id)
+        self.ledger.record_booking(bid, e.key, e.thread, msg.from_addr, slot, now, run_id=self.run_id,
+                                   direct=plan.direct is True)
         event = ics.build_event(bid, slot, self.link(), "CONFIRMED", 0, now, None)
         action = Action(kind="calendar_create", message_key=e.key, thread_key=e.thread,
                         recipient_source="sender", booking_id=bid, span=slot, direct=plan.direct, ics=event,

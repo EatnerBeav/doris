@@ -5,6 +5,7 @@ the same state and sandbox, and checks what the prospect and the calendar end up
 twice, nothing booked again, nothing moved that the sender never asked to move.
 """
 
+import datetime
 import email
 import email.policy
 import json
@@ -327,6 +328,52 @@ class SecondOffer(Restart):
         self.assertEqual(self.templates_sent(self.MARCUS), ["T2", "T3"])
         self.assertEqual(self.offers(), 2)
         self.assertEqual(self.closing(s2, "marcus"), ["reoffer"])
+
+
+class DirectAtATimeOnceOffered(Restart):
+    """A direct booking at a time a closed offer on the thread once held, killed before the write:
+    the restart books it as the direct booking it was (Fable review of PR #3, finding 2)."""
+    names = ("02-marcus-request.eml",)
+    MARCUS = "marcus@brightlane.example"
+    KEY = "20261201.0810.intro.marcus@brightlane.example"
+    T2 = "<603b929bb52de1bf420bfe2ada43e6ac@fastmail.com>"
+
+    def reply(self, date, mid, text):
+        return ("From: Marcus Lee <marcus@brightlane.example>\r\n"
+                "To: Doris <doris.htm@fastmail.com>\r\n"
+                "Subject: Re: Intro call\r\n"
+                "Date: %s\r\n"
+                "Message-ID: <%s>\r\n"
+                "In-Reply-To: %s\r\n"
+                "References: <%s> %s\r\n"
+                "MIME-Version: 1.0\r\n"
+                "Content-Type: text/plain; charset=\"utf-8\"\r\n"
+                "Content-Transfer-Encoding: 7bit\r\n\r\n%s\r\n\r\nMarcus\r\n"
+                % (date, mid, self.T2, self.KEY, self.T2, text)).encode("ascii")
+
+    def test_killed_before_the_write_it_books_as_direct_after_the_restart(self):
+        self.run_once()
+        led = ledger_mod.Ledger(os.path.join(self.state, "ledger.sqlite"))
+        try:
+            (offer,) = led._all("SELECT id FROM offers")
+            first = led._all("SELECT start_utc FROM offer_slots WHERE offer_id = ? ORDER BY idx", (offer["id"],))[0]
+        finally:
+            led.close()
+        start = datetime.datetime.strptime(first["start_utc"], "%Y-%m-%dT%H:%M:%SZ")
+        local = start - datetime.timedelta(hours=8)                  # Pacific in December
+        when = local.strftime("%A, %B ") + str(local.day) + local.strftime(" at %I:%M %p Pacific").replace(" 0", " ")
+        add(self.root, "30-marcus-no.eml", self.reply("Tue, 01 Dec 2026 09:40:00 -0800",
+                                                      "20261201.0940.marcus.no@brightlane.example", "No thanks."),
+            {"forwarded": "no"})
+        add(self.root, "31-marcus-direct.eml",
+            self.reply("Tue, 01 Dec 2026 10:40:00 -0800", "20261201.1040.marcus.direct@brightlane.example",
+                       "Changed my mind. Could Shane do %s for 30 minutes?" % when), {"forwarded": "no"})
+        s3 = self.crash_then_run(sandbox_mod.SandboxCalendar, "create_only", lambda *a, **k: True)
+        self.assertEqual(self.templates_sent(self.MARCUS)[-1], "T1")
+        self.assertEqual(self.closing(s3, "marcus.direct"), ["book"])
+        (event,) = self.events()
+        with open(os.path.join(self.root, "calendar", event), "rb") as fh:
+            self.assertIn("DTSTART:" + start.strftime("%Y%m%dT%H%M%SZ"), fh.read().decode("ascii"))
 
 
 class CancelAndMove(Restart):

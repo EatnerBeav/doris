@@ -28,7 +28,8 @@ from .paths import MODES
 from .receipts import canonical, iso, jsonable
 from .shapes import Slot
 
-SCHEMA_VERSION = 2   # 2: an offer names the send that carries it (offers.message_id)
+SCHEMA_VERSION = 3   # 2: an offer names the send that carries it (offers.message_id)
+                     # 3: a booking keeps whether it was direct (bookings.direct); a 2 is brought up to 3
 MESSAGE_STATUSES = ("fetched", "processing", "done", "superseded", "dropped", "held", "quarantined")
 UNPROCESSED = ("fetched", "processing")
 SEND_KINDS = ("send_reply", "send_hold_notice", "send_digest")
@@ -71,7 +72,8 @@ _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS bookings (
         booking_id TEXT PRIMARY KEY, message_key TEXT NOT NULL, thread_key TEXT NOT NULL,
         thread_norm TEXT NOT NULL, sender TEXT NOT NULL, start_utc TEXT NOT NULL, end_utc TEXT NOT NULL,
-        state TEXT NOT NULL, created_utc TEXT NOT NULL, run_id TEXT NOT NULL)""",
+        state TEXT NOT NULL, created_utc TEXT NOT NULL, run_id TEXT NOT NULL,
+        direct INTEGER)""",                     # 1 direct, 0 from an offer; NULL: recorded before version 3
     """CREATE TABLE IF NOT EXISTS holds (
         id INTEGER PRIMARY KEY AUTOINCREMENT, thread_key TEXT NOT NULL, thread_norm TEXT NOT NULL,
         message_key TEXT, reason_code TEXT NOT NULL, notice_message_id TEXT, created_utc TEXT NOT NULL)""",
@@ -177,6 +179,10 @@ class Ledger:
                 versions = [r[0] for r in con.execute("SELECT version FROM schema_version")]
                 if not versions:
                     con.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+                elif versions == [2]:
+                    # 2 to 3 in the same transaction: its bookings stay, their `direct` unknown (NULL)
+                    con.execute("ALTER TABLE bookings ADD COLUMN direct INTEGER")
+                    con.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
                 elif versions != [SCHEMA_VERSION]:
                     raise LedgerError("the ledger %s has schema version %s; this Doris reads version %d"
                                       % (self._path, versions, SCHEMA_VERSION))
@@ -532,16 +538,20 @@ class Ledger:
     def _booking(row):
         return {"booking_id": row["booking_id"], "message_key": row["message_key"], "thread_key": row["thread_key"],
                 "sender": row["sender"], "slot": Slot(_when(row["start_utc"]), _when(row["end_utc"])),
-                "state": row["state"], "created": _when(row["created_utc"]), "run_id": row["run_id"]}
+                "state": row["state"], "created": _when(row["created_utc"]), "run_id": row["run_id"],
+                "direct": None if row["direct"] is None else bool(row["direct"])}
 
-    def record_booking(self, booking_id, message_key, thread_key, sender, slot, now, run_id=None) -> bool:
+    def record_booking(self, booking_id, message_key, thread_key, sender, slot, now, run_id=None, *, direct) -> bool:
         """State intent, committed before the calendar write (G12). run_id defaults to the run started on
         this object; with neither it is refused, so the per-run write cap can never miss a write.
-        The same booking recorded again is a no-op (returns False, state kept); a different one under the
-        same ID is refused."""
+        `direct` (True or False) is kept with it: a restart reads it back, never guessing it from the
+        thread's offers (ruling 8). The same booking recorded again is a no-op (returns False, state
+        kept); a different one under the same ID is refused."""
         run = run_id if run_id is not None else self._run
         if not run:
             raise ValueError("a booking needs its run: pass run_id or call start_run first")
+        if type(direct) is not bool:
+            raise ValueError("a booking is direct (True) or from an offer (False), not %r" % (direct,))
         start, end = _ts(slot.start_utc, "slot start"), _ts(slot.end_utc, "slot end")
         if not slot.start_utc < slot.end_utc:
             raise ValueError("a slot must end after it starts")
@@ -556,9 +566,9 @@ class Ledger:
                     raise ValueError("booking %s is already recorded for another message or slot" % (booking_id,))
                 return False
             con.execute("INSERT INTO bookings (booking_id, message_key, thread_key, thread_norm, sender, start_utc, "
-                        "end_utc, state, created_utc, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'intent', ?, ?)",
+                        "end_utc, state, created_utc, run_id, direct) VALUES (?, ?, ?, ?, ?, ?, ?, 'intent', ?, ?, ?)",
                         (booking_id, _text(message_key, "message_key"), thread_key, thread, who, start, end,
-                         _ts(now, "now"), run))
+                         _ts(now, "now"), run, 1 if direct else 0))
         return True
 
     def set_booking_state(self, booking_id, state):

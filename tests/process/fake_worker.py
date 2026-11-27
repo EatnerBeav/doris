@@ -210,8 +210,8 @@ class JsonLedger:
         self._save()
         return out
 
-    def record_booking(self, booking_id, message_key, thread_key, sender, slot, now, run_id=None):
-        self.db["bookings"][booking_id] = {"state": "intent", "thread_key": thread_key}
+    def record_booking(self, booking_id, message_key, thread_key, sender, slot, now, run_id=None, *, direct):
+        self.db["bookings"][booking_id] = {"state": "intent", "thread_key": thread_key, "direct": direct}
         self._save()
 
     def set_booking_state(self, booking_id, state):
@@ -305,7 +305,8 @@ def work(args):
     led.enqueue_action(args.run, "m1@a.example", "send_reply", {"template": "T4", "thread_key": "t1@a.example"})
     booking = led.enqueue_action(args.run, "m2@b.example", "calendar_create",
                                  {"booking_id": "doris-b2", "thread_key": "t2@b.example"})
-    led.record_booking("doris-b2", "m2@b.example", "t2@b.example", "sender@b.example", slot, now, run_id=args.run)
+    led.record_booking("doris-b2", "m2@b.example", "t2@b.example", "sender@b.example", slot, now, run_id=args.run,
+                       direct=True)
     led.record_send("<s1@fastmail.com>", "send_reply", "T2", "t1@a.example", "sender@a.example", "0" * 64, now,
                     args.run)
     led.start_action(booking)
