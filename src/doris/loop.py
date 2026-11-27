@@ -1646,17 +1646,25 @@ class _Run:
         """A run until stopped (`run`): at her first pass at or after 5:00 PM Pacific, that Pacific
         date's S2, once. The ledger answers first: once the server took the date's digest (handed_over
         or confirmed, decision 76), a pass reads, writes and sends nothing more for it, whatever
-        restarts or kills came between."""
+        restarts or kills came between. Receipts or a ledger that cannot answer send nothing: an error
+        line, and her next pass tries again (Contract 7)."""
         if not (self.cfg.digest and self.cfg.cycles is None):
             return
         now = self.now()                # one instant: the date she checks is the date she sends
         if zones.to_local(now, "Pacific").time() < DIGEST_AT:
             return
-        sent = self.ledger.send(compose.new_message_id(self.cfg.doris_addr, compose.digest_key(now), "S2", 1))
-        if sent is not None and sent["state"] in ledger_mod.SENT_STATES:
-            return
-        lines, verified = self.digest_window()
-        self.send_digest(lines, verified, now)
+        try:
+            sent = self.ledger.send(compose.new_message_id(self.cfg.doris_addr, compose.digest_key(now), "S2", 1))
+            if sent is not None and sent["state"] in ledger_mod.SENT_STATES:
+                return
+            lines, verified = self.digest_window()
+            self.send_digest(lines, verified, now)
+        except (Halted, Refused):
+            raise
+        except Exception as exc:
+            self.error(None, "digest", exc, template="S2")
+            self.say("%s  Digest not sent: %s (error line written). She tries again at her next pass."
+                     % (templates.fmt_pacific(now), type(exc).__name__))
 
     def digest_window(self):
         """(receipt lines, verified) for the daily digest: every line this mode's runs wrote after the

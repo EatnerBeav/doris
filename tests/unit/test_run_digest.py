@@ -11,6 +11,7 @@ import email
 import email.policy
 import os
 import shutil
+import sqlite3
 import tempfile
 import unittest
 from unittest import mock
@@ -201,6 +202,8 @@ class NeverTwice(LongRun):
         self.assertEqual(len(checks), 1)
         self.assertEqual((checks[0]["payload"]["passed"], checks[0]["payload"]["first_fail"]), (False, "G1"))
         self.assertEqual(s.halted, "cli")
+        kinds = [l["kind"] for l in receipts.read_lines(s.receipts_path)]
+        self.assertEqual(kinds[-3:], ["checked", "halted", "summary"])     # the gate stopped her there and then
         self.assertEqual(self.digests(), [])
         self.assertIsNone(self.send_state("2026-12-01"))                # nothing recorded, nothing sent
         self.run_until_stopped(passes=3)                  # resumed: 4:50, 5:00, 5:10 PM
@@ -270,6 +273,61 @@ class Window(LongRun):
         self.run_until_stopped(passes=3)
         (sent,) = self.digests()
         self.assertEqual(sent[1][:2], ["Handled 1, held 0, human approvals 0. Tue Dec 1", "Receipts verify: no."])
+
+
+class FailsClosed(LongRun):
+    """Receipts or a ledger that cannot answer: no digest, an error line, and her next pass goes on."""
+    names = ("05-opsweekly-newsletter.eml",)
+
+    def assert_no_digest_and_the_run_went_on(self, s, error):
+        self.assertEqual(self.digests(), [])
+        errors = [(l["ts"], l["payload"]["step"], l["payload"]["error"].split(":")[0])
+                  for l in receipts.read_lines(s.receipts_path) if l["kind"] == "error"]
+        self.assertEqual(errors, [("2026-12-02T01:00:00Z", "digest", error),     # 5:00 PM
+                                  ("2026-12-02T01:10:00Z", "digest", error)])    # and again at her next pass
+        self.assertIn("Tue Dec 1, 5:00 PM Pacific  Digest not sent: %s (error line written). She tries again "
+                      "at her next pass." % error, self.said)
+        self.assertEqual(s.halted, "cli")                 # ended by the stop, not by the failure
+        self.assertTrue(receipts.verify(s.receipts_path, finished=True).ok)
+
+    def test_receipts_that_cannot_be_read_send_no_digest_and_the_run_goes_on(self):
+        first = self.run_once()                           # Tue 8:40 AM: the newsletter, filed
+        with open(first.receipts_path, "rb") as fh:
+            lines = fh.read().split(b"\n")
+        lines[1] = b"not a receipt line"
+        with open(first.receipts_path, "wb") as fh:
+            fh.write(b"\n".join(lines))
+        self.clock(TUE_450PM)
+        s = self.run_until_stopped(passes=3, during=lambda n: n == 2 and self.elena_writes())
+        self.assert_no_digest_and_the_run_went_on(s, "ValueError")
+        held = [l["payload"]["outcome"] for l in receipts.read_lines(s.receipts_path) if l["kind"] == "held"]
+        self.assertEqual(held, ["hold:money"])            # Elena, read at the pass after the failure
+
+    def test_a_ledger_that_cannot_answer_sends_no_digest_and_the_run_goes_on(self):
+        self.clock(TUE_450PM)
+        real = ledger_mod.Ledger.send
+
+        def cannot_answer(db, message_id):
+            if ledger_mod.norm_id(message_id) == ledger_mod.norm_id(digest_mid("2026-12-01")):
+                raise sqlite3.OperationalError("disk I/O error")
+            return real(db, message_id)
+
+        with mock.patch.object(ledger_mod.Ledger, "send", cannot_answer):
+            s = self.run_until_stopped(passes=3)
+        self.assert_no_digest_and_the_run_went_on(s, "OperationalError")
+
+    def test_a_ledger_that_cannot_record_the_send_sends_no_digest_and_the_run_goes_on(self):
+        self.clock(TUE_450PM)
+        real = ledger_mod.Ledger.record_send
+
+        def cannot_record(db, message_id, kind, *args):
+            if kind == "send_digest":
+                raise sqlite3.OperationalError("database or disk is full")
+            return real(db, message_id, kind, *args)
+
+        with mock.patch.object(ledger_mod.Ledger, "record_send", cannot_record):
+            s = self.run_until_stopped(passes=3)
+        self.assert_no_digest_and_the_run_went_on(s, "OperationalError")
 
 
 if __name__ == "__main__":
