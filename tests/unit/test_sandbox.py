@@ -228,6 +228,14 @@ class CalendarWriteTest(Fixture):
             self.cal.delete("doris-x")
         self.assertEqual(self.cal_files(), ["doris-x.ics"])
 
+    def test_not_hers_is_the_shared_class_both_adapters_raise(self):
+        from doris import shapes
+        for call in (lambda: self.cal.get("owner-1"), lambda: self.cal.delete("owner-1"),
+                     lambda: self.cal.create_only("owner-1", hers("doris-aaa1", WED_11))):
+            with self.assertRaises(shapes.NotHers):
+                call()
+        self.assertTrue(issubclass(shapes.NotHers, CalendarError))
+
     def test_delete_of_an_absent_booking_is_a_no_op(self):
         self.cal.delete("doris-gone")
         self.assertEqual(self.cal_files(), [])

@@ -21,7 +21,8 @@ import time
 from typing import Dict, List, Optional
 
 from .. import caps, ics, slots
-from ..shapes import (AlreadyExists, CalendarError, CalendarTimeout, Event, InboundItem, MailError, SendUnknown)
+from ..shapes import (AlreadyExists, CalendarError, CalendarTimeout, Event, InboundItem, MailError, NotHers,
+                      SendUnknown)
 from .base import CalendarAdapter, MailAdapter
 
 UTC = _dt.timezone.utc
@@ -37,10 +38,6 @@ OTHER_FAULTS = ("model-down", "model-garbage", "budget-cap", "kill-mid-call", "k
 DEFAULT_SLOW_S = 5.0
 DEFAULT_LANDS_MIN = 60
 _MAX_PERIODS = 100000
-
-
-class NotHers(CalendarError):
-    """The booking ID or the event is not one of hers: refused before any call is made."""
 
 
 def _staged(exc, fault, **extra):

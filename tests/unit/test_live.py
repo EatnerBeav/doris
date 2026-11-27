@@ -28,8 +28,7 @@ from xml.sax.saxutils import escape
 from doris import caps, compose, ics, mail as mail_mod, screens, slots
 from doris.adapters import live
 from doris.adapters.base import CalendarAdapter, MailAdapter
-from doris.adapters.sandbox import NotHers
-from doris.shapes import (AlreadyExists, CalendarError, CalendarTimeout, Event, InboundItem, MailError,
+from doris.shapes import (AlreadyExists, CalendarError, CalendarTimeout, Event, InboundItem, MailError, NotHers,
                           SendUnknown, Slot)
 
 UTC = dt.timezone.utc

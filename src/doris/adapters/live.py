@@ -41,9 +41,9 @@ import xml.etree.ElementTree as ET
 import xml.parsers.expat
 
 from .. import caps, ics, slots
-from ..shapes import AlreadyExists, CalendarError, CalendarTimeout, Event, InboundItem, MailError, SendUnknown
+from ..shapes import (AlreadyExists, CalendarError, CalendarTimeout, Event, InboundItem, MailError, NotHers,
+                      SendUnknown)
 from .base import CalendarAdapter, MailAdapter
-from .sandbox import NotHers   # one class for "not one of hers", whichever adapter raises it
 
 UTC = _dt.timezone.utc
 _DAY = _dt.timedelta(days=1)
