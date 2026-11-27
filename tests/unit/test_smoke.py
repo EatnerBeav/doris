@@ -22,7 +22,7 @@ from unittest import mock
 
 from doris import ics, netguard, paths, smoke, supervisor, templates
 from doris.adapters import live
-from doris.shapes import Slot
+from doris.shapes import MailError, Slot
 from tests.unit.test_live import COLLECTION, DORIS, PASSWORD, Box, FakeCalDAV, FakeIMAP, FakeSMTP, eml, u
 
 ENV_TEXT = ("# a test env file: every host is the fakes' 127.0.0.1\n"
@@ -35,7 +35,8 @@ ENV_TEXT = ("# a test env file: every host is the fakes' 127.0.0.1\n"
 STEPS = ["imap login and inbox count", "sent folder found by its special-use flag", "smtp login, nothing sent",
          "caldav query, next 7 days", "caldav test event left by an earlier run", "caldav create test event",
          "caldav read test event back, times match", "caldav delete test event", "caldav read after delete, gone"]
-SEND_STEPS = ["smtp send one test message", "sent copy, look 1 (at once)", "sent copy, look 2 (after a short wait)"]
+SEND_STEPS = ["smtp send one test message", "sent copy, look 1 (at once)", "sent copy, look 2 (after a short wait)",
+              "sent copy found"]
 SEND_NOT_RUN = "smtp send one test message, then its copy in Sent"     # the line in their place without --send-to
 READ_ONLY_IMAP = {"CAPABILITY", "LOGIN", "LOGOUT", "EXAMINE", "LIST", "UID SEARCH", "UID FETCH"}
 
@@ -332,23 +333,49 @@ class SendToTest(SmokeFixture):
         self.assertEqual(self.result("smtp send one test message"), "ok")
         self.assertEqual(self.result("sent copy, look 1 (at once)"), "ok (found)")
         self.assertEqual(self.result("sent copy, look 2 (after a short wait)"), "ok (found)")
+        self.assertRegex(self.result("sent copy found"), r"^ok \(look 1, \d+\.\d s after the send\)\Z")
         self.assert_no_value()
 
-    def test_a_copy_that_appears_only_after_the_wait_passes_on_the_second_look(self):
-        held = []
+    def late_copy(self, wait_s):
+        """The copy reaches Sent only during the wait between the looks, which takes wait_s on a
+        clock the smoke reads (smoke._clock)."""
+        held, clock = [], [1000.0]
         self.smtp.on_deliver = lambda sender, recipients, message: held.append(message)
-        late = lambda seconds: [self.sent.add(m, u(2026, 11, 27, 12)) for m in held]
-        with mock.patch.object(smoke, "_sleep", late):
+
+        def wait(seconds):
+            clock[0] += wait_s
+            while held:
+                self.sent.add(held.pop(), u(2026, 11, 27, 12))
+        return [mock.patch.object(smoke, "_sleep", wait), mock.patch.object(smoke, "_clock", lambda: clock[0])]
+
+    def test_a_copy_that_appears_only_after_the_wait_passes_on_the_second_look(self):
+        patches = self.late_copy(5.0)
+        with patches[0], patches[1]:
             self.assertEqual(self.run_smoke("--send-to", "wolf.whizz@fastmail.com"), 0)
         self.assertEqual(self.result("sent copy, look 1 (at once)"), "not found yet")
         self.assertEqual(self.result("sent copy, look 2 (after a short wait)"), "ok (found)")
+        self.assertEqual(self.result("sent copy found"), "ok (look 2, 5.0 s after the send)")
 
     def test_a_copy_never_found_in_sent_fails_the_smoke(self):
         self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 1)
         self.assertEqual(len(self.smtp.delivered), 1)
         self.assertEqual(self.result("sent copy, look 1 (at once)"), "not found yet")
-        self.assertEqual(self.result("sent copy, look 2 (after a short wait)"), "FAILED (not found on either look)")
+        self.assertEqual(self.result("sent copy, look 2 (after a short wait)"), "not found")
+        self.assertEqual(self.result("sent copy found"), "FAILED (not found on either look)")
         self.assertEqual(self.result("smoke"), "FAILED")
+
+    def test_a_look_that_cannot_tell_is_named_and_the_other_look_still_counts(self):
+        self.smtp.on_deliver = self.deliver_to_sent
+        cannot_tell = MailError("imap sent lookup: a message the search named could not be read; cannot tell")
+        for answers, found in (([cannot_tell, True], "ok (look 2, "), ([True, cannot_tell], "ok (look 1, "),
+                               ([cannot_tell, False], "FAILED (not found; a look could not tell)")):
+            self.lines.clear()
+            with mock.patch.object(live.LiveMail, "find_in_sent", side_effect=answers):
+                self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 0 if found.startswith("ok") else 1)
+            looks = [self.result("sent copy, look 1 (at once)"), self.result("sent copy, look 2 (after a short wait)")]
+            self.assertIn("MailError (imap sent lookup: a message the search named could not be read; cannot tell)",
+                          looks)
+            self.assertTrue(self.result("sent copy found").startswith(found), self.lines)
 
     def test_either_test_address_in_any_case_is_sent_to_in_its_own_spelling(self):
         self.smtp.on_deliver = self.deliver_to_sent

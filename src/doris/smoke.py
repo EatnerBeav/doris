@@ -30,8 +30,9 @@ Steps, in order; each runs whatever the one before it did:
 With --send-to (without it, one line in their place says they did not run):
   smtp send one test message                 LiveMail.send: signed, Auto-Submitted, no Bcc
   sent copy, look 1 (at once)                LiveMail.find_in_sent, as the loop looks right after a send
-  sent copy, look 2 (after a short wait)     the same after SENT_LOOK_WAIT_S; the copy counts as
-                                             found when either look found it
+  sent copy, look 2 (after a short wait)     the same after SENT_LOOK_WAIT_S
+  sent copy found                            which look found the copy first, and how long after the
+                                             send; it counts as found when either look found it
 
 The last line says "ok, every step passed" only when every step ran and passed. When every step
 that ran passed but one did not run, it says so and names it, with why.
@@ -78,6 +79,7 @@ TEST_TEXT = "A test message from Doris's live smoke check. Nothing to do and not
 
 _OWN_ERRORS = (MailError, CalendarError, live.ConfigError, envfile.EnvFileError)   # texts built never to hold a value
 _sleep = time.sleep
+_clock = time.monotonic
 
 
 class _Failed(Exception):
@@ -132,7 +134,8 @@ def check(mail, calendar, out, send_to=None, now=None):
     if send_to is None:
         not_run.append(_not_run(out, SEND_NOT_RUN, "no --send-to"))
     else:
-        passed += _send_and_look(mail, out, send_to, now)
+        flags, _ = _send_and_look(mail, out, send_to, now)
+        passed += flags
     return all(passed), not_run
 
 
@@ -219,23 +222,36 @@ def _test_message(doris_addr, to_addr, message_id, now):
 
 
 def _send_and_look(mail, out, send_to, now):
-    """Send one test message, then look for her copy in Sent at once and after a short wait."""
+    """Send one test message, then look for her copy in Sent at once and after a short wait.
+    ([the send passed, the copy was found], (the look that found it first, seconds from the end
+    of the send to the end of that look) or None)."""
     message_id = "<%s@%s>" % (secrets.token_hex(16), mail.doris_addr.rsplit("@", 1)[-1])
     raw = _test_message(mail.doris_addr, send_to, message_id, now)
     sent = _step(out, "smtp send one test message", lambda: mail.send(raw, [send_to], message_id, template="smoke"))
-    first = _look(mail, message_id)
-    out("sent copy, look 1 (at once): " + {True: "ok (found)", False: "not found yet"}.get(first, first))
-    _sleep(SENT_LOOK_WAIT_S)
-    second = _look(mail, message_id)
-    if second is True:
-        line = "ok (found)"
-    elif second is False:
-        line = ("not found (found on look 1)" if first is True
-                else "FAILED (not found on either look)" if first is False else "FAILED (not found)")
+    after_send = _clock()
+    found = None
+    seen = []
+    for look, name in ((1, "sent copy, look 1 (at once)"), (2, "sent copy, look 2 (after a short wait)")):
+        if look == 2:
+            _sleep(SENT_LOOK_WAIT_S)
+        result = _look(mail, message_id)
+        seen.append(result)
+        if result is True:
+            if found is None:
+                found = (look, _clock() - after_send)
+            line = "ok (found)"
+        elif result is False:
+            line = "not found yet" if look == 1 else "not found"
+        else:
+            line = result                              # the failure, as printed
+        out("%s: %s" % (name, line))
+    if found is not None:
+        out("sent copy found: ok (look %d, %.1f s after the send)" % found)
+    elif seen == [False, False]:
+        out("sent copy found: FAILED (not found on either look)")
     else:
-        line = second
-    out("sent copy, look 2 (after a short wait): " + line)
-    return [sent, first is True or second is True]
+        out("sent copy found: FAILED (not found; a look could not tell)")
+    return [sent, found is not None], found
 
 
 def _look(mail, message_id):
