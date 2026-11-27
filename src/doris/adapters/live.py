@@ -867,10 +867,7 @@ class LiveCalendar(CalendarAdapter):
         collection = urllib.parse.unquote(self.path).rstrip("/")
         out = []
         for resp in root.findall(_DAV + "response"):
-            try:
-                href = urllib.parse.unquote(urllib.parse.urlsplit((resp.findtext(_DAV + "href") or "").strip()).path)
-            except ValueError:                         # e.g. "//[": not a URL
-                raise _failure(CalendarError, step, detail="an href cannot be read") from None
+            href = _href_path(resp, step)
             code = _status_code(resp.findtext(_DAV + "status"))
             if href.rstrip("/") == collection:
                 if code is not None and not 200 <= code < 300:
@@ -980,6 +977,31 @@ class LiveCalendar(CalendarAdapter):
             raise _failure(CalendarError, step, status=status)
         if self._multistatus(body, step):
             raise _failure(CalendarError, step, detail="an event with her booking ID's UID is on the calendar; not gone")
+
+    # -- what the smoke checks -------------------------------------------------------------------
+    def display_name(self):
+        """The calendar's display name (DAV:displayname) exactly as the server reports it, read
+        with one PROPFIND, Depth 0, on the collection: so a person can see which calendar the URL
+        names. A CalendarError when the answer cannot be read or gives the collection no name."""
+        step = "caldav display name"
+        status, _, body = self._request(step, "PROPFIND", self.path, _NAME_QUERY.encode("utf-8"),
+                                        {"Depth": "0", "Content-Type": "application/xml; charset=utf-8"}, read=True)
+        if status != 207:
+            raise _failure(CalendarError, step, status=status)
+        root = _xml(body, step)
+        if root.tag != _DAV + "multistatus":
+            raise _failure(CalendarError, step, detail="the answer is not a multistatus")
+        collection = urllib.parse.unquote(self.path).rstrip("/")
+        for resp in root.findall(_DAV + "response"):
+            if _href_path(resp, step).rstrip("/") != collection:
+                continue
+            for propstat in resp.findall(_DAV + "propstat"):
+                found = propstat.find(_DAV + "prop/" + _DAV + "displayname")
+                if found is not None and _status_code(propstat.findtext(_DAV + "status")) == 200:
+                    name = "".join(found.itertext())
+                    if name:
+                        return name
+        raise _failure(CalendarError, step, detail="the calendar reports no display name")
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1158,6 +1180,25 @@ _UID_QUERY = """<?xml version="1.0" encoding="utf-8"?>
   </C:filter>
 </C:calendar-query>
 """
+
+
+# RFC 4918 9.1: one property of the collection itself; nothing about any event.
+_NAME_QUERY = """<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:displayname/>
+  </D:prop>
+</D:propfind>
+"""
+
+
+def _href_path(resp, step):
+    """The path a multistatus response names, percent-decoded. An href that is not a URL (e.g.
+    "//[") is a CalendarError."""
+    try:
+        return urllib.parse.unquote(urllib.parse.urlsplit((resp.findtext(_DAV + "href") or "").strip()).path)
+    except ValueError:
+        raise _failure(CalendarError, step, detail="an href cannot be read") from None
 
 
 def _ics_stamp(moment):

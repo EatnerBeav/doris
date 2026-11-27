@@ -1311,7 +1311,8 @@ class FakeCalDAV(http.server.ThreadingHTTPServer):
         self.resources = {}           # resource name -> (etag, bytes)
         self.requests = []            # (method, path, headers with lowercase names, body)
         self.report = None            # the REPORT answer's items (None: every resource, unfiltered)
-        self.raw_answer = None        # (status, content type, bytes) answering REPORT instead
+        self.raw_answer = None        # (status, content type, bytes) answering REPORT and PROPFIND instead
+        self.display_name = "Bookings with Doris"   # the collection's DAV:displayname (None: it has none)
         self.status = {}              # method -> a status to answer with instead
         self.fault = {}               # method -> "drop" (close, no answer) | "hang" | "drip" | "drip_body"
         self.hang_s = 1.5
@@ -1396,7 +1397,7 @@ class CalDAVHandler(http.server.BaseHTTPRequestHandler):
         except OSError:
             pass                      # the client gave up: that is the point
 
-    do_REPORT = do_PUT = do_GET = do_DELETE = any_method
+    do_REPORT = do_PROPFIND = do_PUT = do_GET = do_DELETE = any_method
 
     def name(self):
         return urllib.parse.unquote(self.path[len(COLLECTION):]) if self.path.startswith(COLLECTION) else None
@@ -1438,6 +1439,23 @@ class CalDAVHandler(http.server.BaseHTTPRequestHandler):
         self.answer(207, multistatus(items), [("Content-Type", "application/xml; charset=utf-8")])
 
 
+    def on_PROPFIND(self, body):
+        srv = self.server
+        if srv.raw_answer is not None:
+            code, kind, data = srv.raw_answer
+            return self.answer(code, data, [("Content-Type", kind)])
+        if self.path != COLLECTION or self.headers.get("Depth") != "0":
+            return self.answer(400, b"the collection alone, Depth 0")
+        if srv.display_name is None:
+            prop, status = "<d:displayname/>", "404 Not Found"
+        else:
+            prop, status = "<d:displayname>%s</d:displayname>" % escape(srv.display_name, {"\r": "&#13;"}), "200 OK"
+        data = ('<?xml version="1.0" encoding="utf-8"?>\n<d:multistatus xmlns:d="DAV:"><d:response>'
+                "<d:href>%s</d:href><d:propstat><d:prop>%s</d:prop><d:status>HTTP/1.1 %s</d:status></d:propstat>"
+                "</d:response></d:multistatus>" % (escape(COLLECTION), prop, status)).encode("utf-8")
+        self.answer(207, data, [("Content-Type", "application/xml; charset=utf-8")])
+
+
 def report_uid(body):
     """The text a calendar-query matches UIDs against (RFC 4791 9.7.5: a substring), or None."""
     for prop in ET.fromstring(body).iter(C_NS + "prop-filter"):
@@ -1469,11 +1487,12 @@ class CalFixture(unittest.TestCase):
         return live.LiveCalendar(env(), timeout_s=timeout_s, http_factory=factory)
 
     def tearDown(self):
-        """Only the calendar's own resources, only these four methods, never a DELETE of the collection."""
+        """Only the calendar's own resources, only these five methods, never a DELETE of the collection;
+        the two that read the collection itself (REPORT, PROPFIND) never write."""
         for method, path, headers, body in self.dav.requests:
-            self.assertIn(method, ("REPORT", "PUT", "GET", "DELETE"))
+            self.assertIn(method, ("REPORT", "PROPFIND", "PUT", "GET", "DELETE"))
             self.assertTrue(path.startswith(COLLECTION), path)
-            if method != "REPORT":
+            if method not in ("REPORT", "PROPFIND"):
                 self.assertTrue(path.endswith(".ics") and "/" not in path[len(COLLECTION):], path)
 
     def fails(self, cls, call, *args):
@@ -1481,6 +1500,59 @@ class CalFixture(unittest.TestCase):
             call(*args)
         secret_free(self, cm.exception)
         return cm.exception
+
+
+# ===========================================================================================
+# Calendar: its display name (for the smoke to print)
+# ===========================================================================================
+class DisplayNameTest(CalFixture):
+
+    def answer(self, body, status=207):
+        self.dav.raw_answer = (status, "application/xml; charset=utf-8", body)
+
+    def test_one_depth_0_propfind_on_the_collection_asks_for_the_display_name_alone(self):
+        self.assertEqual(self.cal.display_name(), "Bookings with Doris")
+        (method, path, headers, body), = self.dav.requests
+        self.assertEqual((method, path, headers["depth"]), ("PROPFIND", COLLECTION, "0"))
+        self.assertEqual(headers["authorization"], self.dav.auth)
+        root = ET.fromstring(body)
+        self.assertEqual(root.tag, D_NS + "propfind")
+        self.assertEqual([child.tag for child in root.find(D_NS + "prop")], [D_NS + "displayname"])
+
+    def test_the_name_comes_back_as_the_server_wrote_it(self):
+        for name in ("  Owner & Doris <bookings>  ", "Caf\u00e9 \u2615", "two\nlines\r\n", "\u202eright to left"):
+            self.dav.display_name = name
+            self.assertEqual(self.cal.display_name(), name)
+
+    def test_no_display_name_or_an_empty_one_is_a_calendar_error(self):
+        for name in (None, ""):
+            self.dav.display_name = name
+            exc = self.fails(CalendarError, self.cal.display_name)
+            self.assertEqual(str(exc), "caldav display name: the calendar reports no display name")
+
+    def test_an_answer_other_than_207_is_a_calendar_error_naming_the_status(self):
+        self.dav.status["PROPFIND"] = 403
+        self.assertEqual(str(self.fails(CalendarError, self.cal.display_name)), "caldav display name: 403")
+
+    def test_a_name_given_for_another_resource_is_not_taken(self):
+        self.answer(('<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/dav/other/</d:href>'
+                     "<d:propstat><d:prop><d:displayname>Other</d:displayname></d:prop>"
+                     "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>").encode())
+        self.fails(CalendarError, self.cal.display_name)
+
+    def test_a_doctype_or_unreadable_answer_is_refused(self):
+        self.answer(b'<?xml version="1.0"?><!DOCTYPE d [<!ENTITY a "aa">]><d:multistatus xmlns:d="DAV:">'
+                    b"<d:response><d:href>" + COLLECTION.encode() + b"</d:href><d:propstat><d:prop>"
+                    b"<d:displayname>&a;</d:displayname></d:prop><d:status>HTTP/1.1 200 OK</d:status>"
+                    b"</d:propstat></d:response></d:multistatus>")
+        self.assertIn("DOCTYPE", str(self.fails(CalendarError, self.cal.display_name)))
+        self.answer(b"<d:multistatus xmlns:d=")
+        self.fails(CalendarError, self.cal.display_name)
+
+    def test_no_answer_in_time_is_a_calendar_timeout(self):
+        self.dav.fault["PROPFIND"] = "hang"
+        self.cal = self.make_calendar(timeout_s=0.3)
+        self.fails(CalendarTimeout, self.cal.display_name)
 
 
 # ===========================================================================================

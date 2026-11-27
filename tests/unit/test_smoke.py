@@ -34,9 +34,11 @@ ENV_TEXT = ("# a test env file: every host is the fakes' 127.0.0.1\n"
             "DORIS_CALDAV_URL=https://127.0.0.1" + COLLECTION + "\n")
 
 FETCH, FILE = "imap fetch, last 7 days, read-only", "imap file newest INBOX message with the smoke keyword"
+NAME = "caldav calendar display name"
 STEPS = ["imap login and inbox count", "sent folder found by its special-use flag", FETCH, FILE,
-         "smtp login, nothing sent", "caldav query, next 7 days", "caldav test event left by an earlier run", "caldav create test event",
-         "caldav read test event back, times match", "caldav delete test event", "caldav read after delete, gone"]
+         "smtp login, nothing sent", NAME, "caldav query, next 7 days", "caldav test event left by an earlier run",
+         "caldav create test event", "caldav read test event back, times match", "caldav delete test event",
+         "caldav read after delete, gone"]
 SEND_STEPS = ["smtp send one test message", "sent copy, look 1 (at once)", "sent copy, look 2 (after a short wait)",
               "sent copy found", "sent copy record for a live run"]
 SEND_NOT_RUN = "smtp send one test message, then its copy in Sent"     # the line in their place without --send-to
@@ -121,6 +123,7 @@ class SmokeTest(SmokeFixture):
         self.assertEqual([line.split(": ", 1)[0] for line in self.lines], STEPS + SEND_STEPS + ["smoke"])
         self.assertEqual(self.result("imap login and inbox count"), "ok (2 messages in INBOX)")
         self.assertEqual(self.result("sent folder found by its special-use flag"), "ok (1 folder)")
+        self.assertEqual(self.result(NAME), 'ok ("Bookings with Doris")')
         self.assertEqual(self.result("caldav query, next 7 days"), "ok (0 events)")
         for step in STEPS + SEND_STEPS:
             self.assertTrue(self.result(step).startswith("ok"), self.lines)
@@ -157,9 +160,10 @@ class SmokeTest(SmokeFixture):
             self.assertEqual(self.run_smoke(), 0)
             self.assertEqual(self.result("caldav test event left by an earlier run"), "ok (none)")
         self.assertTrue(ics.is_booking_id(smoke.SMOKE_BOOKING_ID))
-        # leftover check (a 404, confirmed by a UID query), create, read back, delete, read again
-        self.assertEqual(self.dav.methods(), ["REPORT", "GET", "REPORT", "PUT", "GET", "GET", "DELETE", "GET",
-                                              "REPORT"] * 2)
+        # display name, query, leftover check (a 404, confirmed by a UID query), create, read back, delete,
+        # read again
+        self.assertEqual(self.dav.methods(), ["PROPFIND", "REPORT", "GET", "REPORT", "PUT", "GET", "GET", "DELETE",
+                                              "GET", "REPORT"] * 2)
         puts = [r for r in self.dav.requests if r[0] == "PUT"]
         for _, path, _, body in puts:
             self.assertEqual(path, COLLECTION + smoke.SMOKE_BOOKING_ID + ".ics")
@@ -335,6 +339,35 @@ class HaltAndLockTest(SmokeFixture):
         again = supervisor.acquire_lock(self.lock_path())
         self.assertIsNotNone(again)
         again.release()
+
+
+class DisplayNameTest(SmokeFixture):
+    """The calendar's display name is the one server text a line shows, so a person can see which
+    calendar the URL names: as the server reports it, on one line, nothing in it able to move the
+    cursor or turn text around, and cut when long."""
+
+    def test_the_display_name_is_shown_as_the_server_reports_it(self):
+        self.dav.display_name = "  Owner's \"bookings\" & Caf\u00e9  "
+        self.assertEqual(self.run_smoke(), 0)
+        self.assertEqual(self.result(NAME), 'ok ("  Owner\'s "bookings" & Caf\u00e9  ")')
+
+    def test_a_line_end_or_a_direction_mark_in_it_is_shown_escaped_on_the_one_line(self):
+        self.dav.display_name = "cal\nsmoke: ok, every step passed\r\t\u202edesrever"
+        self.assertEqual(self.run_smoke(), 0)
+        self.assertEqual(self.result(NAME), 'ok ("cal\\nsmoke: ok, every step passed\\r\\t\\u202edesrever")')
+        self.assertEqual(len(self.lines), len(STEPS) + 2)
+        self.assertFalse(any("\n" in line or "\r" in line or "\u202e" in line for line in self.lines))
+
+    def test_a_long_display_name_is_cut(self):
+        self.dav.display_name = "x" * 1000
+        self.assertEqual(self.run_smoke(), 0)
+        self.assertEqual(self.result(NAME), 'ok ("%s...")' % ("x" * smoke.DISPLAY_NAME_MAX))
+
+    def test_a_calendar_that_reports_no_display_name_fails_that_step(self):
+        self.dav.display_name = None
+        self.assertEqual(self.run_smoke(), 1)
+        self.assertEqual(self.result(NAME), "CalendarError (caldav display name: the calendar reports no display name)")
+        self.assertEqual(self.result("caldav create test event"), "ok")
 
 
 class FetchAndFileTest(SmokeFixture):

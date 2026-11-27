@@ -9,8 +9,10 @@ Usage: python -m doris smoke [--env PATH] [--send-to ADDRESS]
 Each step prints one plain line: its name, then ok (with a count where it counts something), or
 the failure's class name with the adapter's own text, which carries a step, a status code or an
 exception's class name and never a value. No line names an address, a password, a folder, a
-calendar or an event, with one exception: when the test event may still be on the calendar, a
-line names its booking ID (a fixed one, SMOKE_BOOKING_ID) so a person can find it.
+calendar or an event, with two exceptions: one line shows the calendar's display name as the
+server reports it (so a person can see which calendar the URL names; see _shown), and when the
+test event may still be on the calendar, a line names its booking ID (a fixed one,
+SMOKE_BOOKING_ID) so a person can find it.
 
 Steps, in order; each runs whatever the one before it did:
   imap login and inbox count                 LiveMail.inbox_count (read-only)
@@ -22,6 +24,7 @@ Steps, in order; each runs whatever the one before it did:
                                              last, the only change the smoke makes to her mail; when
                                              the fetch found none (or failed), a line says it did not run
   smtp login, nothing sent                   LiveMail.check_smtp_login
+  caldav calendar display name               LiveCalendar.display_name, shown as the server reports it
   caldav query, next 7 days                  LiveCalendar.query, counted
   caldav test event left by an earlier run   a test event an earlier smoke left (cut short, or its
                                              delete failed) is deleted first
@@ -95,6 +98,7 @@ SMOKE_BOOKING_ID = "doris-smoke-test"
 CLEANUP_TRIES = 3                                # the test event's delete, a short wait apart
 CLEANUP_WAIT_S = caps.CALENDAR_RETRY_WAIT_S
 SENT_LOOK_WAIT_S = 5.0                           # between the two looks in Sent
+DISPLAY_NAME_MAX = 120                           # characters of the calendar's display name a line shows
 SEND_NOT_RUN = "smtp send one test message, then its copy in Sent"   # its line when there is no --send-to
 SENT_RECORD = "smoke-sent.json"                  # in state/live: what a live run needs before it starts
 TEST_TEXT = "A test message from Doris's live smoke check. Nothing to do and nothing to answer."
@@ -167,6 +171,7 @@ def check(mail, calendar, out, send_to=None, now=None, record=None):
         passed.append(_step(out, FILE_STEP, lambda: mail.file(newest.server_id, FILE_KEYWORD)))
     passed += [
         _step(out, "smtp login, nothing sent", mail.check_smtp_login),
+        _step(out, "caldav calendar display name", lambda: '"%s"' % _shown(calendar.display_name())),
         _step(out, "caldav query, next 7 days", lambda: _query(calendar, now)),
     ]
     passed += _calendar_round_trip(calendar, out, now)
@@ -178,6 +183,15 @@ def check(mail, calendar, out, send_to=None, now=None, record=None):
         if record is not None:
             passed.append(_record_step(out, record, found))
     return all(passed), not_run
+
+
+def _shown(text):
+    """A server's text as part of one printable line: as it came, but cut to DISPLAY_NAME_MAX
+    characters, and each character that is not printable (a line end, a tab, a control, a
+    direction mark that would turn the text around) written as its escape, e.g. \\n or \\u202e."""
+    cut = text[:DISPLAY_NAME_MAX]
+    shown = "".join(ch if ch.isprintable() else ascii(ch)[1:-1] for ch in cut)
+    return shown + ("..." if len(text) > DISPLAY_NAME_MAX else "")
 
 
 def _query(calendar, now):
