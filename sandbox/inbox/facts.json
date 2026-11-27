@@ -1,0 +1,51 @@
+{
+  "01-priya-request.eml": {
+    "forwarded": "yes"
+  },
+  "02-marcus-request.eml": {
+    "forwarded": "yes"
+  },
+  "03-dana-request.eml": {
+    "forwarded": "yes"
+  },
+  "04-dana-autoreply.eml": {
+    "forwarded": "no"
+  },
+  "05-opsweekly-newsletter.eml": {
+    "forwarded": "yes"
+  },
+  "06-jordan-stop.eml": {
+    "forwarded": "yes"
+  },
+  "07-marcus-pick.eml": {
+    "fault": "timeout-once",
+    "forwarded": "no"
+  },
+  "08-priya-move.eml": {
+    "forwarded": "no"
+  },
+  "08a-sam-request.eml": {
+    "fault": "lands-between",
+    "fault_end": "2026-12-07T19:00:00Z",
+    "fault_start": "2026-12-07T18:00:00Z",
+    "forwarded": "yes"
+  },
+  "09-ken-instruction.eml": {
+    "forwarded": "yes"
+  },
+  "10-unreadable.eml": {
+    "forwarded": "yes"
+  },
+  "11-elena-pricing.eml": {
+    "forwarded": "yes"
+  },
+  "12-marcus-add-person.eml": {
+    "forwarded": "no"
+  },
+  "13a-dana-pick.eml": {
+    "forwarded": "no"
+  },
+  "13b-dana-stop.eml": {
+    "forwarded": "no"
+  }
+}
