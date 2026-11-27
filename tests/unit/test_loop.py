@@ -178,6 +178,33 @@ class TheSentLooks(unittest.TestCase):
         self.assertFalse([l for l in looks if "after_wait_s" in l])
 
 
+class ALongSandboxRun(unittest.TestCase):
+    def test_a_later_pass_steps_her_clock_one_cycle_and_reads_the_new_mail(self):
+        from tests.unit.test_restart import DORIS, OWNER, mini_sandbox
+        tmp = tempfile.mkdtemp(prefix="doris-loop-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = mini_sandbox(tmp, ("01-priya-request.eml",))
+        with open(os.path.join(paths.SANDBOX, "inbox", "02-marcus-request.eml"), "rb") as fh:
+            marcus = fh.read()
+        marcus = b"".join(l for l in marcus.splitlines(True) if not l.lower().startswith(b"date:"))
+        dropped = []
+
+        def drop_in(seconds):           # a judge drops an email (no Date) in while she waits
+            if not dropped:
+                dropped.append(seconds)
+                with open(os.path.join(root, "inbox", "14-judge.eml"), "wb") as fh:
+                    fh.write(marcus)
+
+        cfg = loop.RunConfig(mode="throwaway", run_name="model-stub-sandbox-test", state_dir=os.path.join(tmp, "state"),
+                             sandbox_root=root, owner_addr=OWNER, doris_addr=DORIS, clock_mode="advance",
+                             cycles=2, cycle_s=0.01)
+        with mock.patch.object(loop, "_sleep", drop_in):
+            s = loop.run(cfg)
+        self.assertEqual(s.handled, 2)
+        observed = [l for l in receipts.read_lines(s.receipts_path) if l["kind"] == "observed" and "from_addr" in l["payload"]]
+        self.assertEqual([l["payload"]["clock"] for l in observed], ["2026-12-01T16:10:00Z", "2026-12-01T16:20:00Z"])
+
+
 class TheTerminalLines(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.mkdtemp(prefix="doris-loop-")

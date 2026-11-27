@@ -363,5 +363,73 @@ class SentLookTest(LiveFixture):
         self.assertEqual(sent_lookups(s), [(None, True)])
 
 
+class FakeTime(object):
+    """The wall clock for loop._time and loop._sleep: a sleep moves it on, then runs the hook."""
+
+    def __init__(self, start, hook=None):
+        self.now, self.slept, self.hook = start, [], hook
+
+    def time(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+        if self.hook is not None:
+            self.hook()
+
+
+class LongRunTest(LiveFixture):
+    """`run`: a pass, then a wait for her next cycle, then another, until stopped."""
+
+    def use(self, fake):
+        for patch in (mock.patch.object(loop, "_time", fake.time), mock.patch.object(loop, "_sleep", fake.sleep)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_mail_that_lands_while_she_waits_is_read_on_her_next_cycle(self):
+        self.go(fresh=True)
+        landed = []
+
+        def arrive():
+            if not landed:
+                landed.append(self.inbox.add(request(1), u(2026, 12, 1, 16, 2)))
+                self.clock = u(2026, 12, 1, 16, 10)
+
+        self.use(FakeTime(1000.0, arrive))
+        s = self.go(cycles=2, cycle_s=600.0)
+        self.assertEqual((s.handled, s.sends, s.bookings), (1, 1, 1))
+        lines = receipts.read_lines(s.receipts_path)
+        fetches = [l for l in lines if l["kind"] == "called" and l["payload"]["call"] == "mail_fetch"]
+        (observed,) = [l for l in lines if l["kind"] == "observed" and l["payload"].get("from_addr") == PROSPECT]
+        self.assertLess(fetches[0]["seq"], observed["seq"])
+        self.assertEqual(s.verify_ok, True)
+
+    def test_the_wait_runs_to_her_next_cycle_on_the_grid_in_short_steps(self):
+        self.go(fresh=True)
+        fake = FakeTime(1000.25)
+        self.use(fake)
+        self.go(cycles=2, cycle_s=600.0)
+        self.assertAlmostEqual(sum(fake.slept), 1200.0 - 1000.25)
+        self.assertLessEqual(max(fake.slept), loop.HALT_POLL_S)
+
+    def test_a_halt_while_she_waits_ends_a_run_that_would_go_on_until_stopped(self):
+        from doris import supervisor
+        self.go(fresh=True)
+        fake = FakeTime(1000.0, lambda: supervisor.request_stop("live", "cli", state_dir=self.state))
+        self.use(fake)
+        s = self.go(cycles=None, cycle_s=600.0)
+        self.assertEqual(s.halted, "cli")
+        self.assertEqual(len(fake.slept), 1)                  # seen at the very next look
+        kinds = [l["kind"] for l in receipts.read_lines(s.receipts_path)]
+        self.assertEqual(kinds[-2:], ["halted", "summary"])
+        self.assertTrue(s.verify_ok)
+
+    def test_a_run_needs_at_least_one_pass_and_a_positive_cycle(self):
+        for extra in ({"cycles": 0}, {"cycle_s": 0}, {"cycle_s": -1.0}):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                self.go(fresh=True, **extra)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,9 @@
 """The loop: read -> classify -> decide -> check -> act -> record, one message at a time.
 
-`run(cfg)` drains the inbox once and returns a RunSummary. Each cycle, in the order of
-calendar-rulings-spec ("The order inside one cycle"):
+`run(cfg)` makes cfg.cycles passes over the inbox and returns a RunSummary: one by default (the
+demo, traps); `python -m doris run` goes on until stopped, waiting for her next cycle on the wall
+clock between passes. Each cycle, in the order of calendar-rulings-spec ("The order inside one
+cycle"):
 
   1. fetch new mail;
   2. screens 1, 2 and 4 over the whole batch, so a stop lands before anything else happens;
@@ -22,6 +24,7 @@ steps to her next ten-minute cycle after each arrival ("her 3:10 PM cycle"); in 
 
 import datetime as _dt
 import hashlib
+import math
 import os
 import time
 import types
@@ -56,7 +59,9 @@ RESUMABLE_BOOKING_STATES = ("intent", "unconfirmed", "written", "confirmed", "co
 NOTICE_WITHOUT_TIMES = frozenset({"hold.owner_mail", "hold.calendar_down", "hold.unknown_result", "hold.no_slot",
                                   "hold.remove_failed", "hold.internal_error"})
 
+HALT_POLL_S = 1.0                      # how often a long run's wait looks for a halt itself
 _sleep = time.sleep                    # her waits go through here, so a test can stand in for the wall clock
+_time = time.time
 
 
 def _wall_now():
@@ -88,6 +93,8 @@ class RunConfig:
     say: Optional[Callable[[str], None]] = None   # one plain line per message, for the terminal
     env_path: Optional[str] = None          # live only: the env file the run loads itself (live_settings)
     fresh: bool = False                     # live only: start a new live ledger, reading mail from now on
+    cycles: Optional[int] = 1               # passes over the inbox; None: until stopped (`run`)
+    cycle_s: Optional[float] = None         # the wall-clock grid her waits keep; None: CYCLE, ten minutes
 
 
 @dataclass
@@ -334,7 +341,14 @@ class _Run:
                 raise ValueError("a %s run needs sandbox_root, owner_addr and doris_addr" % (cfg.mode,))
             if cfg.env_path is not None or cfg.fresh:
                 raise ValueError("env_path and fresh are for a live run only")
+        if cfg.cycles is not None and (isinstance(cfg.cycles, bool) or not isinstance(cfg.cycles, int)
+                                       or cfg.cycles < 1):
+            raise ValueError("cycles is a whole number from 1, or None for until stopped")
+        if cfg.cycle_s is not None and (isinstance(cfg.cycle_s, bool) or not isinstance(cfg.cycle_s, (int, float))
+                                        or not cfg.cycle_s > 0):
+            raise ValueError("cycle_s is a positive number of seconds")
         self.cfg = cfg
+        self.cycle_s = CYCLE.total_seconds() if cfg.cycle_s is None else float(cfg.cycle_s)
         self.mode = cfg.mode
         self.run_id = cfg.run_name
         self.run_dir = os.path.join(cfg.state_dir, "runs", cfg.run_name)
@@ -543,6 +557,31 @@ class _Run:
             if self.cfg.clock_mode == "advance" and not items and last == self.t:
                 return                      # the adapter named an arrival it then did not hand over
             last = self.t
+
+    def passes(self):
+        """cfg.cycles passes over the inbox (None: until stopped), each after a wait for her next
+        cycle. On the sandbox's advancing clock a later pass first steps her clock to her next cycle
+        and reads what is in by then (a judge's new email), before any later arrival."""
+        self.drain()
+        done = 1
+        while self.cfg.cycles is None or done < self.cfg.cycles:
+            self.wait_for_cycle()
+            if self.cfg.clock_mode == "advance":
+                self.t = next_cycle(self.t + _dt.timedelta(seconds=1))
+                self.batch(self.fetch())
+            self.drain()
+            done += 1
+
+    def wait_for_cycle(self):
+        """Until her next cycle: the next point on a wall-clock grid of cycle_s seconds. She looks for
+        a halt at least every HALT_POLL_S; under the kill switch the parent kills her sooner."""
+        end = (math.floor(_time() / self.cycle_s) + 1) * self.cycle_s
+        while True:
+            self.check_halt()
+            left = end - _time()
+            if left <= 0:
+                return
+            _sleep(min(left, HALT_POLL_S))
 
     def finish(self):
         s = self.summary
@@ -1579,14 +1618,14 @@ class _Run:
 
 
 def run(cfg):
-    """One run in this process, until the inbox is drained. Raises Refused when it cannot start,
-    and Halted under the kill switch (the parent writes the halted line)."""
+    """One run in this process: cfg.cycles passes over the inbox (None: until stopped). Raises
+    Refused when it cannot start, and Halted under the kill switch (the parent writes the halted line)."""
     r = _Run(cfg)
     try:
         r.open()
         try:
             r.start()
-            r.drain()
+            r.passes()
             if cfg.digest:
                 r.send_digest()
         except Halted as h:
