@@ -273,6 +273,12 @@ def _status_for(outcome):
     return "done"
 
 
+def _as_written(ev, slot):
+    """Her event read back exactly as she wrote it: the slot's start and end, and CONFIRMED."""
+    return (ev is not None and ev.start_utc == slot.start_utc and ev.end_utc == slot.end_utc
+            and ev.status == "CONFIRMED")
+
+
 def _event_line(ev):
     """A calendar read as a receipt keeps it: times, status, transparency and her own booking ID only."""
     out = {"start": ev.start_utc, "end": ev.end_utc, "status": ev.status, "transp": ev.transp, "kind": ev.kind}
@@ -1097,12 +1103,17 @@ class _Run:
         return self.confirm_booking(e, f, plan, bid, slot)
 
     def confirm_booking(self, e, f, plan, bid, slot):
-        """Her event is written: read it back and re-read its span, then T1 once."""
+        """Her event is written: read it back (held unless exactly as she wrote it), re-read its span, T1 once."""
         now = self.now()
         try:
             mine, others = self.readback(e, bid, slot)
         except _CalendarDown as down:
             return self.hold_code(e, down.code, f)
+        if mine is not None and not _as_written(mine, slot):
+            # The server kept other times or another status than she wrote: nothing goes to the prospect.
+            self.error(e, "readback", CalendarError("her event read back other than she wrote it"),
+                       booking_id=bid)
+            return self.hold_code(e, "hold.internal_error", f)
         if others:
             return self.collision(e, f, plan, bid, slot)
         if mine is None:
@@ -1265,8 +1276,7 @@ class _Run:
             if ev is not None:
                 detail.update(_event_line(ev))
             if expect is not None:
-                detail["fields_match"] = (ev is not None and ev.start_utc == expect.start_utc
-                                          and ev.end_utc == expect.end_utc and ev.status in ("CONFIRMED", ""))
+                detail["fields_match"] = _as_written(ev, expect)
             self.result(seq, subject=subject, **detail)
             return ev
 

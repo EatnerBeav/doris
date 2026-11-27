@@ -11,6 +11,7 @@ import http.client
 import imaplib
 import json
 import os
+import re
 import shutil
 import smtplib
 import tempfile
@@ -386,6 +387,37 @@ class SentLookTest(LiveFixture):
         s = self.started_fresh_then_asked()
         self.assertEqual(self.waits, [])
         self.assertEqual(sent_lookups(s), [(None, True)])
+
+
+class ReadBackTest(LiveFixture):
+    """After the create she reads her event back: unless its start, end and status are what she
+    wrote, she holds, and nothing goes to the prospect."""
+
+    def held_when_the_server_keeps(self, change):
+        real_put = self.dav.put
+        self.dav.put = lambda name, data: real_put(name, change(data))
+        s = self.started_fresh_then_asked()
+        self.assertEqual([rcpts for _, rcpts, _ in self.smtp.delivered if rcpts[0] == PROSPECT], [])
+        lines = receipts.read_lines(s.receipts_path)
+        (got,) = [l["payload"] for l in lines if l["kind"] == "result" and "fields_match" in l["payload"]]
+        self.assertFalse(got["fields_match"])
+        (error,) = [l["payload"] for l in lines if l["kind"] == "error"]
+        self.assertEqual(error["step"], "readback")
+        (held,) = [l["payload"] for l in lines if l["kind"] == "held"]
+        self.assertEqual(held["outcome"], "hold:internal_error")
+        self.assertEqual((s.handled, s.held, s.sends, s.bookings, s.hold_notices), (0, 1, 0, 0, 1))
+
+    def test_other_times_and_cancelled(self):
+        self.held_when_the_server_keeps(lambda data: re.sub(
+            rb"DTEND:\d{8}T\d{6}Z", b"DTEND:20261202T203000Z", re.sub(
+                rb"DTSTART:\d{8}T\d{6}Z", b"DTSTART:20261202T200000Z", data)).replace(
+            b"STATUS:CONFIRMED", b"STATUS:CANCELLED"))
+
+    def test_only_cancelled(self):
+        self.held_when_the_server_keeps(lambda data: data.replace(b"STATUS:CONFIRMED", b"STATUS:CANCELLED"))
+
+    def test_only_a_later_end(self):
+        self.held_when_the_server_keeps(lambda data: re.sub(rb"DTEND:\d{8}T\d{6}Z", b"DTEND:20261202T194500Z", data))
 
 
 class Crash(BaseException):
