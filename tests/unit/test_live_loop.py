@@ -724,7 +724,18 @@ class RunCommandTest(LiveFixture):
         self.assertIn(self.env_path, out)
 
     def test_a_live_start_writes_a_config_that_names_the_env_file_and_holds_no_setting(self):
-        code, out = self.cli("run", "--live", "--fresh", "--env", os.path.relpath(self.env_path))
+        # A relative --env, given from the folder that holds the file: on Windows CI the checkout and
+        # the temp folder sit on different drives, with no relative path between them.
+        here = os.getcwd()
+        os.chdir(self.dir)
+        try:
+            given = os.path.relpath(self.env_path)
+            code, out = self.cli("run", "--live", "--fresh", "--env", given)
+            named = os.path.abspath(given)
+        finally:
+            os.chdir(here)
+        self.assertFalse(os.path.isabs(given), given)
+        self.assertTrue(os.path.samefile(named, self.env_path), named)
         self.assertEqual(code, 0, out)
         (started,) = self.started
         self.assertEqual(started["mode"], "live")
@@ -738,7 +749,7 @@ class RunCommandTest(LiveFixture):
         config = json.loads(text)
         self.assertEqual({k: config.get(k) for k in ("mode", "state_dir", "env_path", "fresh", "model_source",
                                                      "clock_mode", "digest", "cycles", "cycle_s")},
-                         {"mode": "live", "state_dir": self.state, "env_path": self.env_path, "fresh": True,
+                         {"mode": "live", "state_dir": self.state, "env_path": named, "fresh": True,
                           "model_source": "live", "clock_mode": "fixed", "digest": False, "cycles": None,
                           "cycle_s": loop.CYCLE.total_seconds()})
         for name in ("sandbox_root", "owner_addr", "doris_addr", "model_id", "answers_path"):
