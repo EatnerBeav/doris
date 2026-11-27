@@ -26,7 +26,7 @@ import os
 import time
 import types
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, List, Optional
 
 from . import caps, compose, digest, gate, holds, ics, mail, netguard, parser, paths, policy, receipts
@@ -56,6 +56,10 @@ RESUMABLE_BOOKING_STATES = ("intent", "unconfirmed", "written", "confirmed", "co
 NOTICE_WITHOUT_TIMES = frozenset({"hold.owner_mail", "hold.calendar_down", "hold.unknown_result", "hold.no_slot",
                                   "hold.remove_failed", "hold.internal_error"})
 
+def _wall_now():
+    """The wall clock, aware UTC to the second: a live run's clock."""
+    return _dt.datetime.now(UTC).replace(microsecond=0)
+
 
 # ------------------------------------------------------------------------------------------
 # Config and summary
@@ -65,9 +69,9 @@ class RunConfig:
     mode: str                               # sandbox | live | throwaway
     run_name: str                           # starts with the model source, then the mode (A6)
     state_dir: str                          # holds ledger.sqlite, ledger.lock, HALT and runs/
-    sandbox_root: str                       # holds inbox/, calendar/, outbox/ and clock.txt
-    owner_addr: str
-    doris_addr: str
+    sandbox_root: Optional[str] = None      # sandbox and throwaway: inbox/, calendar/, outbox/ and clock.txt
+    owner_addr: Optional[str] = None        # sandbox and throwaway; a live run reads both from its env file
+    doris_addr: Optional[str] = None
     model_source: str = "stub"              # live | replayed | stub | yes-man
     model_id: Optional[str] = None
     answers_path: Optional[str] = None      # recorded answers, for replayed
@@ -79,6 +83,8 @@ class RunConfig:
     retry_wait_s: Optional[float] = None    # None: caps.CALENDAR_RETRY_WAIT_S
     calendar_timeout_s: Optional[float] = None   # sandbox calendar's wait: None the adapter's own; demo caps'
     say: Optional[Callable[[str], None]] = None   # one plain line per message, for the terminal
+    env_path: Optional[str] = None          # live only: the env file the run loads itself (live_settings)
+    fresh: bool = False                     # live only: start a new live ledger, reading mail from now on
 
 
 @dataclass
@@ -313,6 +319,18 @@ class _Run:
             raise ValueError("clock_mode is fixed or advance, not %r" % (cfg.clock_mode,))
         if cfg.model_source not in model_mod.SOURCES:
             raise ValueError("unknown model source %r" % (cfg.model_source,))
+        if cfg.mode == "live":
+            if cfg.sandbox_root is not None or cfg.owner_addr is not None or cfg.doris_addr is not None:
+                raise ValueError("a live run reads both addresses from its env file and has no sandbox")
+            if not cfg.env_path:
+                raise ValueError("a live run needs env_path, its env file")
+            if cfg.clock_mode != "fixed":
+                raise ValueError("a live run reads the wall clock: clock_mode is fixed")
+        else:
+            if not (cfg.sandbox_root and cfg.owner_addr and cfg.doris_addr):
+                raise ValueError("a %s run needs sandbox_root, owner_addr and doris_addr" % (cfg.mode,))
+            if cfg.env_path is not None or cfg.fresh:
+                raise ValueError("env_path and fresh are for a live run only")
         self.cfg = cfg
         self.mode = cfg.mode
         self.run_id = cfg.run_name
@@ -324,6 +342,8 @@ class _Run:
         self.lock = self.ledger = self.receipts = self.guard = None
         self.mail = self.calendar = self.model = self.env = None
         self.link_before = self.pinned_link = None
+        self.live = None                    # LiveSettings, for a live run
+        self.mail_since = None              # live: the ledger's fresh start; mail before it is never read
         self.model_target = cfg.model_source
         self.t = None
         self.model_down = False
@@ -345,15 +365,19 @@ class _Run:
         if cause is not None:
             raise Refused("Halted (%s). Only `python -m doris resume` clears it." % (cause,),
                           supervisor.WORKER_EXIT_HALTED)
+        if cfg.mode == "live":              # every setting from the env file, before anything is made
+            self.live = live_settings(cfg.env_path, cfg.model_source)
+            self.cfg = cfg = replace(cfg, owner_addr=self.live.owner_addr, doris_addr=self.live.doris_addr)
         os.makedirs(os.path.join(self.run_dir, "messages"), exist_ok=True)
-        self.pin_link(templates.PLACEHOLDER_MEETING_LINK)     # the sandbox's own fixed link, never the env's
-        self.t = None if cfg.mode == "live" else read_clock(cfg.sandbox_root)
+        # live: the env file's link; the sandbox: its own fixed link, never one from the shell
+        self.pin_link(self.live.meeting_link if self.live else templates.PLACEHOLDER_MEETING_LINK)
+        self.t = None if self.live else read_clock(cfg.sandbox_root)
         self.guard = netguard.install(self.allowed_hosts())
-        self.ledger = ledger_mod.Ledger(os.path.join(cfg.state_dir, "ledger.sqlite"))
+        self.ledger = self.open_ledger()
         self.receipts = receipts.ReceiptWriter(self.receipts_path, self.run_id, cfg.mode, clock=self.now)
         self.mail, self.calendar = self.adapters()
         self.model = model_mod.Model(cfg.model_source, model_id=cfg.model_id, answers_path=cfg.answers_path,
-                                     record_path=cfg.record_path)
+                                     record_path=cfg.record_path, env=self.live.env if self.live else None)
         if cfg.model_source in ("live", "replayed"):
             self.model_target = self.model.model_id
         led = self.ledger
@@ -365,11 +389,31 @@ class _Run:
             queued_count=lambda addr: len([m for m in led.unprocessed_messages(sender=addr)
                                            if ledger_mod.norm_id(m["key"]) not in self.batch_keys]))
 
+    def open_ledger(self):
+        """The mode's ledger. Live (ruling 8): no ledger, no run, unless told to start fresh; a fresh
+        start records its time, and she reads only mail received from then on."""
+        path = os.path.join(self.cfg.state_dir, "ledger.sqlite")
+        if self.live is None:
+            return ledger_mod.Ledger(path)
+        if self.cfg.fresh:
+            try:
+                ledger_mod.start_fresh(path, self.now())
+            except FileExistsError:
+                raise Refused("Not started: the live ledger is already there, and --fresh only starts a new one. "
+                              "Run without --fresh to go on from it.", 2) from None
+        elif not os.path.exists(path):
+            raise Refused("Not started: there is no live ledger yet. `python -m doris run --live --fresh` starts "
+                          "one, and she then reads only mail that arrives after it.", 2)
+        led = ledger_mod.Ledger(path, create=False)
+        self.mail_since = led.fresh_start()
+        if self.mail_since is None:
+            led.close()
+            raise Refused("Not started: the live ledger names no fresh start, so old mail cannot be told from new.", 2)
+        return led
+
     def pin_link(self, link):
         """The one link this run uses, pinned for the reply, the .ics and G13 alike; let go at close."""
-        before = templates.use_meeting_link(link)
-        if self.pinned_link is None:
-            self.link_before = before
+        self.link_before = templates.use_meeting_link(link)
         self.pinned_link = link
 
     def close_handles(self):
@@ -387,7 +431,7 @@ class _Run:
             self.lock = None
 
     def allowed_hosts(self):
-        hosts = []
+        hosts = list(self.live.hosts) if self.live else []      # live: the hosts the env file names
         if self.cfg.model_source == "live":
             hosts.append("api.anthropic.com")
             proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
@@ -396,18 +440,20 @@ class _Run:
         return tuple(h for h in hosts if h)
 
     def adapters(self):
-        if self.cfg.mode == "live":
-            raise Refused("The live adapters (IMAP, SMTP, CalDAV) are not built yet.", 2)
+        cal = {} if self.cfg.calendar_timeout_s is None else {"timeout_s": self.cfg.calendar_timeout_s}
+        if self.live:
+            from .adapters import live
+            return (live.LiveMail(self.live.env, self.cfg.doris_addr, since_utc=self.mail_since),
+                    live.LiveCalendar(self.live.env, **cal))
         from .adapters import sandbox
         clock = self.now if self.cfg.clock_mode == "advance" else None
-        cal = {} if self.cfg.calendar_timeout_s is None else {"timeout_s": self.cfg.calendar_timeout_s}
         return (sandbox.SandboxMail(self.cfg.sandbox_root, self.cfg.doris_addr, clock=clock),
                 sandbox.SandboxCalendar(self.cfg.sandbox_root, **cal))
 
     # --- small helpers ---------------------------------------------------------------------
     def now(self):
         if self.t is None:
-            return _dt.datetime.now(UTC).replace(microsecond=0)
+            return _wall_now()
         return self.t
 
     def halt_cause(self):
@@ -446,12 +492,21 @@ class _Run:
         cfg = self.cfg
         interrupted = [r["run_id"] for r in self.ledger.unended_runs() if r["run_id"] != self.run_id]
         self.ledger.start_run(self.run_id, self.mode, self.now())
-        self.write("observed", {
+        payload = {
             "step": "start", "mode": cfg.mode, "model_source": cfg.model_source, "model": self.model_target,
             "run_name": cfg.run_name, "clock": self.now(), "clock_mode": cfg.clock_mode,
-            "env_set": sorted(n for n in ENV_NAMES if os.environ.get(n)), "interrupted_runs": interrupted,
-            "simulated": cfg.mode != "live"})
+            "env_set": self.env_set(), "interrupted_runs": interrupted, "simulated": cfg.mode != "live"}
+        if self.live:
+            payload.update(fresh_start=cfg.fresh, mail_since=self.mail_since)
+        self.write("observed", payload)
         self.reconcile()
+
+    def env_set(self):
+        """The names set, never a value: live from its env file, otherwise from the environment."""
+        if self.live:
+            from .adapters import live
+            return sorted(n for n in set(ENV_NAMES) | set(live.ENV_NAMES) if (self.live.env.get(n) or "").strip())
+        return sorted(n for n in ENV_NAMES if os.environ.get(n))
 
     def reconcile(self):
         """Ruling 8 and A3: before anything new, every unfinished send is looked up in Sent (never
