@@ -352,7 +352,7 @@ class SentLookTest(LiveFixture):
         # the T1 and then the hold notice (S1) it leads to: each looked for twice, a wait between
         self.assertEqual(self.waits, [caps.SENT_LOOK_WAIT_S] * 2)
         self.assertEqual(sent_lookups(s), [(None, False), (caps.SENT_LOOK_WAIT_S, False)] * 2)
-        self.assertEqual(send_states(self.state), ["unknown", "unknown"])
+        self.assertEqual(send_states(self.state), ["handed_over", "handed_over"])     # decision 76: SMTP took both
         (held,) = [l["payload"] for l in receipts.read_lines(s.receipts_path) if l["kind"] == "held"]
         self.assertEqual(held["outcome"], "hold:send_unconfirmed")
 
@@ -361,6 +361,58 @@ class SentLookTest(LiveFixture):
         s = self.started_fresh_then_asked()
         self.assertEqual(self.waits, [])
         self.assertEqual(sent_lookups(s), [(None, True)])
+
+
+class Crash(BaseException):
+    """A kill at this exact point: nothing in the loop catches it."""
+
+
+class HandedOverTest(LiveFixture):
+    """Decision 76: SMTP's 250 is written down as handed_over before the Sent look, and nothing in
+    that state is ever sent again, whatever the Sent look or a restart finds. Here, as Fastmail may,
+    the server never files her SMTP mail in Sent."""
+
+    def setUp(self):
+        super().setUp()
+        self.smtp.on_deliver = None
+        patch = mock.patch.object(loop, "_sleep", lambda seconds: None)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def to(self, address):
+        return [data for _, rcpts, data in self.smtp.delivered if rcpts[0] == address]
+
+    def test_a_restart_right_after_the_250_never_sends_the_reply_again(self):
+        self.go(fresh=True)
+        self.inbox.add(request(1), u(2026, 12, 1, 16, 2))
+        self.clock = u(2026, 12, 1, 16, 10)
+        real = live.LiveMail.find_in_sent
+        fired = []
+
+        def killed_at_the_first_look(mail, message_id):
+            if not fired:
+                fired.append(message_id)
+                raise Crash("killed right after the 250, before the Sent look")
+            return real(mail, message_id)
+
+        with mock.patch.object(live.LiveMail, "find_in_sent", killed_at_the_first_look):
+            with self.assertRaises(Crash):
+                self.go()
+        self.assertEqual(send_states(self.state), ["handed_over"])
+        self.clock = u(2026, 12, 1, 16, 20)
+        s = self.go()
+        self.assertEqual(len(self.to(PROSPECT)), 1)                  # one T1, never a second
+        (held,) = [l["payload"] for l in receipts.read_lines(s.receipts_path) if l["kind"] == "held"]
+        self.assertEqual(held["outcome"], "hold:send_unconfirmed")   # the closing for a copy never found
+        self.assertEqual(len(self.to(OWNER)), 1)                     # and its one notice
+
+    def test_three_runs_in_one_day_send_one_digest(self):
+        for n, minute in enumerate((0, 10, 20)):
+            self.clock = u(2026, 12, 1, 16, minute)
+            s = self.go(fresh=(n == 0), digest=True)
+            self.assertTrue(s.verify_ok)
+        self.assertEqual(len(self.to(OWNER)), 1)
+        self.assertEqual(send_states(self.state), ["handed_over"])
 
 
 class FakeTime(object):

@@ -891,14 +891,16 @@ class _Run:
             if sent is None:
                 continue
             found = True if sent["state"] == "confirmed" else self.look_in_sent(e, mid, template)
-            if found is None:
-                self.ledger.set_send_state(mid, "unknown")
-                e.recovered = True
-                return {"own_reply_unknown": template}
             if found:
                 self.ledger.set_send_state(mid, "confirmed")
                 e.recovered = True
                 return {"own_reply": template}
+            if found is None or sent["state"] == "handed_over":
+                # the lookup failed, or the server took it and Sent shows no copy: it may have gone
+                # out, so it is never sent again (decision 76 for the second)
+                self.ledger.set_send_state(mid, "unknown")      # the ledger keeps handed_over as it is
+                e.recovered = True
+                return {"own_reply_unknown": template}
         b = self.own_booking(e)
         if b is not None:
             e.recovered = True
@@ -1422,9 +1424,11 @@ class _Run:
 
     def deliver(self, e, mid, kind, template, to_addr, raw, body, envelope, tslots, before_send=None):
         """Recorded before it is sent; sent once; found in Sent after (one more look); never resent blind.
-        A send an earlier run recorded and never confirmed is looked up in Sent first: found, it is
-        done; the lookup failing, nothing goes out (unknown); confirmed absent, it goes out now under
-        the same Message-ID (ruling 8). True only when her copy is found in Sent."""
+        SMTP's acceptance is written down (handed_over) before the Sent look, and a send in that state
+        never goes again, whatever Sent shows (decision 76). A send an earlier run recorded and never
+        confirmed is looked up in Sent first: found, it is done; handed over, it is not sent again; the
+        lookup failing, nothing goes out (unknown); confirmed absent, it goes out now under the same
+        Message-ID (ruling 8). True only when her copy is found in Sent."""
         subject = e.subject if e is not None else ""
         old = self.ledger.send(mid)
         if old is not None and old["state"] == "confirmed":
@@ -1440,6 +1444,8 @@ class _Run:
             if found:
                 self.ledger.set_send_state(mid, "confirmed")
                 return True
+            if old["state"] == "handed_over":
+                return False                # the server took it once; it never goes again
             if found is None:
                 self.ledger.set_send_state(mid, "unknown")
                 return False
@@ -1453,20 +1459,22 @@ class _Run:
                           slots=templates.receipt_slots(tslots))
         try:
             self.mail.send(raw, envelope, mid, template=template)
-            self.result(seq, subject=subject, ok=True, state="handed_over")
         except SendUnknown:
             self.result(seq, subject=subject, ok=False, state="unknown")
         except MailError:
             self.result(seq, subject=subject, ok=False, state="refused")
             self.ledger.set_send_state(mid, "unknown")
             return False
+        else:
+            self.ledger.set_send_state(mid, "handed_over")     # the 250, written down before any look
+            self.result(seq, subject=subject, ok=True, state="handed_over")
         found = self.look_in_sent(e, mid, template)
         if not found:                       # one more look; live gives the server time to file her copy
             wait = caps.SENT_LOOK_WAIT_S if self.live else 0.0
             if wait > 0:
                 _sleep(wait)
             found = self.look_in_sent(e, mid, template, after_wait_s=wait or None)
-        self.ledger.set_send_state(mid, "confirmed" if found else "unknown")
+        self.ledger.set_send_state(mid, "confirmed" if found else "unknown")   # unknown never undoes handed_over
         return bool(found)
 
     def look_in_sent(self, e, mid, template, after_wait_s=None):
