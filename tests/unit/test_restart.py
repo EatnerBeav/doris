@@ -66,6 +66,21 @@ def add(root, name, raw, facts):
         json.dump(known, fh)
 
 
+def cover_her_event(root):
+    """The owner puts an event of his own on top of her booking (one booking in the folder)."""
+    cal = os.path.join(root, "calendar")
+    (name,) = [n for n in os.listdir(cal) if n.startswith("doris-")]
+    with open(os.path.join(cal, name), "rb") as fh:
+        lines = fh.read().decode("ascii").split("\r\n")
+    start = next(l for l in lines if l.startswith("DTSTART")).split(":", 1)[1]
+    end = next(l for l in lines if l.startswith("DTEND")).split(":", 1)[1]
+    body = ("BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Team Whizz//Doris sandbox fixtures//EN",
+            "BEGIN:VEVENT", "UID:owner-on-top", "DTSTAMP:20261127T180000Z", "DTSTART:" + start,
+            "DTEND:" + end, "SUMMARY:Busy", "STATUS:CONFIRMED", "TRANSP:OPAQUE", "END:VEVENT", "END:VCALENDAR")
+    with open(os.path.join(cal, "owner-on-top.ics"), "wb") as fh:
+        fh.write(("\r\n".join(body) + "\r\n").encode("ascii"))
+
+
 class Restart(unittest.TestCase):
     names = ()
 
@@ -83,8 +98,9 @@ class Restart(unittest.TestCase):
                              clock_mode="advance", retry_wait_s=0)
         return loop.run(cfg)
 
-    def crash_then_run(self, target, attr, when):
-        """Run 1 dies inside target.attr the first time when(...) is true; run 2 goes clean."""
+    def crash_then_run(self, target, attr, when, between=None):
+        """Run 1 dies inside target.attr the first time when(...) is true; between() runs, if given
+        (the world changes while she is down); run 2 goes clean."""
         real = getattr(target, attr)
         fired = []
 
@@ -98,6 +114,8 @@ class Restart(unittest.TestCase):
             with self.assertRaises(Crash):
                 self.run_once()
         self.assertTrue(fired)
+        if between is not None:
+            between()
         return self.run_once()
 
     def sent(self, to=None):
@@ -170,6 +188,77 @@ class DirectBooking(Restart):
         finally:
             led.close()
         self.assert_booked_once(self.run_once())
+
+    def test_an_event_put_on_top_after_the_confirmation_went_out_leaves_hers(self):
+        # T1 is in Sent, so the prospect was told: the restart never takes her booking off (Fable re-review B)
+        s2 = self.crash_then_run(loop._Run, "close", lambda self_, e, kind, outcome, *a, **k: outcome == "book",
+                                 between=lambda: cover_her_event(self.root))
+        self.assert_booked_once(s2)
+
+    def test_an_event_put_on_top_before_the_confirmation_went_out_is_the_collision_path(self):
+        # ruling 8: no confirmation went out yet, so an overlap found on restart takes hers off
+        s2 = self.crash_then_run(loop._Run, "reply", lambda self_, e, f, template, *a, **k: template == "T1",
+                                 between=lambda: cover_her_event(self.root))
+        self.assertEqual(self.templates_sent(self.PRIYA), ["T4"])
+        self.assertEqual(self.events(), [])
+        self.assertEqual(self.closing(s2, "priya"), ["offer"])
+
+
+class NewerMailWhileDown(Restart):
+    """A message a kill left part way, and a newer one from the same sender on its thread arrives
+    before the restart: the first is finished before the newer one runs, never superseded with its
+    booking left on the calendar unannounced."""
+    names = ("01-priya-request.eml",)
+    PRIYA = "priya@northwind.example"
+
+    def test_a_booking_left_part_way_is_confirmed_before_the_newer_mail_moves_it(self):
+        from tests.unit.test_failures import SameBatchFollowUp
+
+        s2 = self.crash_then_run(loop._Run, "reply", lambda self_, e, f, template, *a, **k: template == "T1",
+                                 between=lambda: add(self.root, "01b-priya-follow-up.eml",
+                                                     SameBatchFollowUp.FOLLOW_UP, {"forwarded": "yes"}))
+        self.assertEqual(self.templates_sent(self.PRIYA), ["T1", "T18"])
+        self.assertEqual(self.closing(s2, "priya"), ["book", "move"])
+
+
+class PickedOffer(Restart):
+    """A pick from her offer books it; a kill before the confirmation or before the closing line,
+    then the restart: T1 once and the same one event, never a fresh offer (Fable re-review A)."""
+    names = ("02-marcus-request.eml", "07-marcus-pick.eml")
+    MARCUS = "marcus@brightlane.example"
+
+    def assert_booked_once(self, s2):
+        self.assertEqual(self.templates_sent(self.MARCUS), ["T2", "T1"])
+        self.assertEqual(len(self.events()), 1, self.events())
+        self.assertEqual(self.offers(), 1)
+        self.assertEqual(self.closing(s2, "marcus"), ["book"])
+
+    def test_killed_after_the_write_before_the_confirmation(self):
+        s2 = self.crash_then_run(loop._Run, "reply", lambda self_, e, f, template, *a, **k: template == "T1")
+        self.assert_booked_once(s2)
+
+    def test_killed_after_the_confirmation_before_the_closing_line(self):
+        s2 = self.crash_then_run(loop._Run, "close", lambda self_, e, kind, outcome, *a, **k: outcome == "book")
+        self.assert_booked_once(s2)
+
+
+class HoldNotice(Restart):
+    """A hold, then a kill before its notice went out or before the closing line: the owner is told
+    once, for the reason the hold was made (Fable re-review E)."""
+    names = ("11-elena-pricing.eml",)
+    ELENA = "elena@harborline.example"
+
+    def assert_told_once(self, s2):
+        self.assertEqual([t for t in self.templates_sent(OWNER) if t == "S1"], ["S1"])
+        self.assertEqual(self.sent(self.ELENA), [])
+        self.assertEqual(self.closing(s2, "elena"), ["hold:money"])
+
+    def test_killed_between_the_hold_and_its_notice(self):
+        self.assert_told_once(self.crash_then_run(loop._Run, "notice", lambda *a, **k: True))
+
+    def test_killed_after_the_notice_before_the_closing_line(self):
+        self.assert_told_once(self.crash_then_run(
+            loop._Run, "close", lambda self_, e, kind, outcome, *a, **k: outcome.startswith("hold:")))
 
 
 class Offer(Restart):
@@ -286,6 +375,14 @@ class HaltThenResume(Restart):
         self.assertEqual(s1.halted, "cli")
         self.assertEqual(self.sent(), [])
         self.assertEqual(self.events(), [])
+        lines = receipts.read_lines(s1.receipts_path)
+        self.assertEqual([l["kind"] for l in lines[-2:]], ["halted", "summary"])
+        self.assertTrue(receipts.verify(s1.receipts_path, finished=True).ok)
+        with open(s1.receipts_path, "rb") as fh:
+            kept = fh.read().splitlines(True)[:-1]          # the summary cut off the end
+        with open(s1.receipts_path, "wb") as fh:
+            fh.write(b"".join(kept))
+        self.assertFalse(receipts.verify(s1.receipts_path, finished=True).ok)
         supervisor.resume("throwaway", state_dir=self.state)
         s2 = self.run_once()
         self.assertEqual(self.templates_sent("priya@northwind.example"), ["T1"])

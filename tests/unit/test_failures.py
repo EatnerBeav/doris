@@ -57,6 +57,7 @@ class HeaderBytes(Restart):
         self.assertEqual(self.sent(PRIYA), [])
         (outcome,) = self.closing(s, "priy")
         self.assertTrue(outcome.startswith("hold:"), outcome)
+        self.assertEqual([t for t in self.templates_sent(OWNER) if t == "S1"], ["S1"])   # Fable re-review F
 
 
 class UnexpectedError(Restart):
@@ -111,6 +112,17 @@ class SameBatchFollowUp(Restart):
         self.assertEqual(len(self.events()), 1, self.events())
         self.assertEqual(self.closing(s, "priya"), ["superseded", "book"])
 
+    def test_a_stranger_naming_her_request_does_not_supersede_it(self):
+        # only the sender's own newer message wins on a thread (Fable re-review C)
+        stranger = self.FOLLOW_UP.replace(b"Priya Raman <priya@northwind.example>", b"Mal Ory <mal@elsewhere.example>")
+        stranger = stranger.replace(b"0805.priya.scratch-that@northwind.example", b"0805.forged@elsewhere.example")
+        add(self.root, "01b-stranger.eml", stranger, {"forwarded": "yes"})
+        s = self.run_once()
+        self.assertEqual(self.templates_sent(PRIYA), ["T1"])
+        self.assertEqual(len(self.events()), 1, self.events())
+        self.assertEqual(self.closing(s, "priya"), ["book"])
+        self.assertEqual(self.sent("mal@elsewhere.example"), [])
+        self.assertEqual(len(self.closing(s, "forged")), 1)
 
     def test_two_messages_that_name_each_other_still_end(self):
         # forged headers: each claims to answer the other; the batch still settles one thread
@@ -125,6 +137,24 @@ class SameBatchFollowUp(Restart):
         s = self.run_once()
         self.assertEqual(len(self.closing(s, "priya")), 3)
         self.assertEqual(unprocessed(self.state), [])
+
+
+class ForgedChain(Restart):
+    """Hundreds of forged mails in one batch, each naming the next as the one it answers: threading
+    them never runs out of stack, and every one reaches its closing line (Fable re-review D)."""
+    names = ()
+
+    def test_a_long_chain_of_forged_replies_ends(self):
+        n = 400
+        for i in range(n):
+            raw = (b"From: Mal Ory <mal@elsewhere.example>\r\nTo: Shane Bornstein <whizz@fastmail.com>\r\n"
+                   b"Subject: Re: chain\r\nDate: Tue, 01 Dec 2026 08:05:00 -0800\r\n"
+                   b"Message-ID: <chain-%d@elsewhere.example>\r\nIn-Reply-To: <chain-%d@elsewhere.example>\r\n"
+                   b"MIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"utf-8\"\r\n\r\nHello.\r\n") % (i, i + 1)
+            add(self.root, "c%04d.eml" % i, raw, {"forwarded": "yes"})
+        s = self.run_once()
+        self.assertEqual(unprocessed(self.state), [])
+        self.assertEqual(len(self.closing(s, "chain-")), n)
 
 
 class InboxReadFails(Restart):

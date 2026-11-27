@@ -513,6 +513,14 @@ class Ledger:
         return self._con.execute("UPDATE offers SET closed_reason = ? WHERE thread_norm = ? AND used = 0 "
                                  "AND closed_reason IS NULL", (_text(reason, "reason"), norm_id(thread_key))).rowcount
 
+    def offer_holding(self, thread_key, slot) -> Optional[int]:
+        """The offer on the thread that held exactly this slot, used, closed or expired (the first one),
+        or None: how a booking read again after a restart knows it came from an offer (ruling 8)."""
+        row = self._one("SELECT o.id FROM offers o JOIN offer_slots s ON s.offer_id = o.id WHERE o.thread_norm = ? "
+                        "AND s.start_utc = ? AND s.end_utc = ? ORDER BY o.id LIMIT 1",
+                        (norm_id(thread_key), _ts(slot.start_utc, "slot start"), _ts(slot.end_utc, "slot end")))
+        return None if row is None else row["id"]
+
     def offered_starts(self, thread_key) -> set:
         """Every slot start offered on the thread, ever (times offered before never come back)."""
         rows = self._all("SELECT s.start_utc FROM offer_slots s JOIN offers o ON o.id = s.offer_id "
@@ -599,6 +607,17 @@ class Ledger:
                           (_text(thread_key, "thread_key"), norm_id(thread_key), _opt_text(message_key, "message_key"),
                            _text(reason_code, "reason_code"), _opt_text(notice_message_id, "notice_message_id"),
                            _ts(now, "now")))
+
+    def hold_for_message(self, message_key) -> Optional[dict]:
+        """The hold this message already made (the first one), or None: thread_key, message_key,
+        reason_code, notice_message_id (None when no notice was due), created."""
+        want = norm_id(message_key)
+        for row in self._all("SELECT * FROM holds WHERE message_key IS NOT NULL ORDER BY id"):
+            if norm_id(row["message_key"]) == want:
+                return {"thread_key": row["thread_key"], "message_key": row["message_key"],
+                        "reason_code": row["reason_code"], "notice_message_id": row["notice_message_id"],
+                        "created": _when(row["created_utc"])}
+        return None
 
     def thread_held(self, thread_key) -> bool:
         """A held thread stays the owner's: nothing more is sent on it."""

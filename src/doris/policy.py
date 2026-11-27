@@ -70,6 +70,12 @@ class Facts:
     pick: object                        # shapes.PickResult when the thread has open offers, else None
     money_code: Optional[str]           # money_check() on the sender's own text: "currency", "word" or None
     reply_to_mismatch: bool             # a Reply-To that differs from From (ruling 15)
+    # What this message already did before a kill or a stop (ruling 8, A3); the loop fills these
+    # only for a message read again, from the ledger and Sent.
+    own_hold: Optional[str] = None      # the hold code it was already held with
+    own_reply: Optional[str] = None     # the template of its reply already in Sent
+    own_reply_unknown: Optional[str] = None   # the template of its reply Sent could not be asked about
+    own_booking: Optional[dict] = None  # its booking written down: slot, direct, offer_id, length_min
 
 
 @dataclass
@@ -230,10 +236,44 @@ def _move(f):
                 length_min=_length(f.parse))
 
 
+# The closing word for a message whose reply already went out (its template says what it did).
+REPLIED_OUTCOMES = {"T1": "book", "T2": "offer", "T13": "offer", "T4": "offer", "T12": "offer", "T3": "reoffer",
+                    "T10": "cancel", "T18": "move"}
+
+
+def _resume(f):
+    """Ruling 8 and A3: a message read again after a kill or a stop keeps what it already did, before
+    the thread or the model can say anything else. Its hold stands (one notice), a reply already in
+    Sent ends it, and its booking is looked up by its ID, never planned or made again. None: nothing
+    of its own is written down, so the table below decides."""
+    if f.own_hold is not None:
+        code = f.own_hold
+        return Plan(action="hold", outcome="hold:" + code[len("hold."):], why=_why("policy.resume_hold"),
+                    hold_code=code)
+    if f.own_reply_unknown is not None:
+        return _hold("hold.send_unconfirmed")       # it may have gone out: never sent again blind
+    if f.own_reply is not None:
+        return Plan(action="replied", outcome=REPLIED_OUTCOMES.get(f.own_reply, "offer"),
+                    why=_why("policy.resume_sent", template=f.own_reply), template=f.own_reply)
+    b = f.own_booking
+    if b is not None:
+        answer = f.answer
+        question = (answer.side_question_text if answer is not None and answer.ok and answer.side_question
+                    else None)
+        return Plan(action="book", outcome="book", why=_why("policy.resume_booking"), slot=b["slot"],
+                    direct=b["direct"] is True, offer_id=b["offer_id"], length_min=b["length_min"],
+                    side_question=question)
+    return None
+
+
 def decide(f):
     """The policy table. Returns the one Plan for this message."""
     cls = f.answer.cls if f.answer is not None else "unsure"
     t = f.thread
+
+    resumed = _resume(f)
+    if resumed is not None:
+        return resumed
 
     # A held thread stays Shane's: nothing more is sent on it, and no new notice.
     if t.held:

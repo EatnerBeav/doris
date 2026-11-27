@@ -276,6 +276,17 @@ class OwnerTemplatesTest(Base):
         with self.assertRaises(TemplateError):
             templates.render("S1", s1_slots(reason="hold.made_up"))
 
+    def test_s1_shows_an_address_outside_ascii(self):
+        # the owner still hears about a sender whose address has a byte outside ASCII (Fable re-review F)
+        body = templates.render("S1", s1_slots(address="priy\u00e0@northwind.example"))
+        self.assertTrue(body.startswith("Held for you: Elena Voss (priy\u00e0@northwind.example), "), body)
+
+    def test_s1_address_is_one_address_on_one_line(self):
+        for bad in ("elena@harborline.example\nBcc: x@evil.example", "elena@harborline.example, x@evil.example",
+                    "Elena <elena@harborline.example>", "no-at-sign", "", "a@b\x7f.example", "a" * 250 + "@x.example"):
+            with self.assertRaises(TemplateError, msg=repr(bad)):
+                templates.render("S1", s1_slots(address=bad))
+
     def test_s1_name_cannot_break_lines(self):
         with self.assertRaises(TemplateError):
             templates.render("S1", s1_slots(name="Elena\nBcc: x@evil.example"))

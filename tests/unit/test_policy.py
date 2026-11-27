@@ -314,6 +314,47 @@ class CodeHoldsBeatTheModel(WhyIsListed):
         self.assertEqual(p.action, "book")
 
 
+class Resume(WhyIsListed):
+    """Ruling 8 and A3: a message read again after a kill or a stop keeps what it already did,
+    whatever the model or the thread now say (Fable re-review A, B, E)."""
+
+    def test_its_own_hold_stands(self):
+        p = policy.decide(facts("pick", own_hold="hold.money"))
+        self.assertEqual((p.action, p.hold_code, p.outcome), ("hold", "hold.money", "hold:money"))
+        self.assertWhy(p, "policy.resume_hold")
+
+    def test_a_reply_already_in_sent_ends_it(self):
+        for template, outcome in (("T1", "book"), ("T2", "offer"), ("T3", "reoffer"), ("T10", "cancel"),
+                                  ("T18", "move"), ("T12", "offer")):
+            p = policy.decide(facts("unsure", own_reply=template))
+            self.assertEqual((p.action, p.template, p.outcome), ("replied", template, outcome))
+            self.assertWhy(p, "policy.resume_sent")
+
+    def test_a_reply_sent_could_not_be_asked_about_is_held(self):
+        p = policy.decide(facts("pick", own_reply_unknown="T1", own_booking={
+            "slot": slot(), "direct": True, "offer_id": None, "length_min": 30}))
+        self.assertEqual((p.action, p.hold_code), ("hold", "hold.send_unconfirmed"))
+        self.assertWhy(p, "hold.send_unconfirmed")
+
+    def test_its_own_booking_is_picked_up_never_planned_again(self):
+        mine = {"slot": slot(2), "direct": False, "offer_id": 4, "length_min": 30}
+        p = policy.decide(facts("unsure", own_booking=mine, thread=thread(offer_count=1)))
+        self.assertEqual((p.action, p.outcome, p.slot, p.direct, p.offer_id, p.length_min),
+                         ("book", "book", slot(2), False, 4, 30))
+        self.assertWhy(p, "policy.resume_booking")
+
+    def test_the_hold_comes_first_then_the_reply_then_the_booking(self):
+        mine = {"slot": slot(), "direct": True, "offer_id": None, "length_min": 30}
+        self.assertEqual(policy.decide(facts(own_hold="hold.send_unconfirmed", own_reply="T1",
+                                             own_booking=mine)).action, "hold")
+        self.assertEqual(policy.decide(facts(own_reply="T1", own_booking=mine)).action, "replied")
+
+    def test_its_own_effects_come_before_a_held_thread(self):
+        # its own hold is what made the thread held
+        p = policy.decide(facts(own_hold="hold.money", thread=thread(held=True)))
+        self.assertEqual(p.outcome, "hold:money")
+
+
 class OfferForm(unittest.TestCase):
     def test_no_available_slot_holds(self):
         self.assertEqual(policy.offer_form("T2", 0), (None, "hold.no_slot"))

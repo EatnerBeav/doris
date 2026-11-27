@@ -55,6 +55,9 @@ CODES = {
     "policy.suppress_opt_out": "The model read an opt-out: sender silenced, no reply.",
     "policy.superseded": "A newer message on this thread waits: this one is superseded.",
     "policy.pick_plus_question": "A pick plus a question: book the pick, the question goes on the digest.",
+    "policy.resume_hold": "Read again after a restart: it was already held for the owner, so the hold stands and its notice goes out once.",
+    "policy.resume_sent": "Read again after a restart: her {template} reply is already in Sent, so nothing more is sent.",
+    "policy.resume_booking": "Read again after a restart: its booking is already written down, so she looks it up by its ID and never books it again.",
     # --- gate -------------------------------------------------------------------------------
     "gate.pass": "All {n} checks that apply passed.",
     "gate.g1_halted": "Blocked by G1: a halt is in force ({rule}).",

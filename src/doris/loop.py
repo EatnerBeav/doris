@@ -48,6 +48,9 @@ CALENDAR_FAULTS = frozenset({"timeout-once", "timeout-twice", "read-fails", "slo
                              "remove-fails-once", "remove-fails-always"})
 MAIL_FAULTS = frozenset({"sent-unconfirmed"})
 NEW_OFFER_TEMPLATES = frozenset({"T2", "T3", "T4", "T13", "T18"})   # each one is an offer record
+REPLY_TEMPLATES = ("T1", "T2", "T3", "T4", "T10", "T12", "T13", "T18")   # her one reply to a message
+# Her own booking for a message that a kill or a stop left part way: picked up again, never made again.
+RESUMABLE_BOOKING_STATES = ("intent", "unconfirmed", "written", "confirmed", "collision_unresolved", "removed")
 NOTICE_WITHOUT_TIMES = frozenset({"hold.owner_mail", "hold.calendar_down", "hold.unknown_result", "hold.no_slot",
                                   "hold.remove_failed", "hold.internal_error"})
 
@@ -435,7 +438,8 @@ class _Run:
             dropped.append({"kind": "message", "message": m["key"], "thread": m["thread_key"],
                             "template": None, "booking_id": None})
         why_code = "halt." + cause if ("halt." + cause) in why_mod.CODES else "halt.unreadable"
-        self.write("halted", {"cause": cause, "in_flight": flight or "none", "dropped": dropped},
+        self.write("halted", {"cause": cause, "in_flight": flight or "none", "dropped": dropped,
+                              "summary": "follows"},       # cut the summary and verify fails
                    why=why_mod.why(why_code))
 
     # --- read ---------------------------------------------------------------------------------
@@ -458,44 +462,51 @@ class _Run:
         key = msg.key if msg is not None else mail.raw_key(item.raw)
         return ledger_mod.norm_id(key) in self.redo
 
-    def thread_of(self, msg, in_batch=None):
-        """The thread a message is on: the thread of her message it answers, else of an inbound
-        message it answers (in the ledger, or in_batch: earlier in this same batch), else its own
-        Message-ID (it starts one). What it claims never counts."""
+    def thread_step(self, msg, by_key, seen):
+        """One link of a message's thread: the thread of her message it answers, else of an inbound
+        message it answers in the ledger, else of one earlier in this batch (by_key, never one already
+        on this walk: `seen`), else its own Message-ID (it starts one). What it claims never counts.
+        Returns (thread, None) when this message settles it, or (None, other) when it shares the
+        thread of `other`, a message in this same batch."""
         named = list(msg.in_reply_to) + list(reversed(msg.references))
         for mid in named:
             t = self.ledger.thread_of_sent(mid)
             if t:
-                return t
+                return t, None
         for mid in named:
-            t = self.ledger.thread_of_message(mid) or (in_batch(mid) if in_batch is not None else None)
+            t = self.ledger.thread_of_message(mid)
             if t:
-                return t
-        return msg.key
+                return t, None
+            other = by_key.get(ledger_mod.norm_id(mid))
+            if other is not None and ledger_mod.norm_id(other.key) not in seen:
+                return None, other
+        return msg.key, None
 
     def threads(self, entries):
         """Every message's thread, before any of the batch is written down. A reply to a message in
-        this same batch joins that message's thread, so of the two only the newer goes on (Fable #4)."""
+        this same batch joins that message's thread, so of the two only the newer goes on (Fable #4).
+        Walked one link at a time, never by recursion, so no chain of forged replies can run her out
+        of stack (Fable re-review D)."""
         by_key = {}
         for e in entries:
             if e.msg is not None:
                 by_key.setdefault(ledger_mod.norm_id(e.key), e)
         done = {}
-
-        def resolve(e, path):
-            k = ledger_mod.norm_id(e.key)
-            if k not in done:
-                def earlier(mid):
-                    other = by_key.get(ledger_mod.norm_id(mid))
-                    if other is None or ledger_mod.norm_id(other.key) in path:
-                        return None             # not in this batch, or a loop of forged headers
-                    return resolve(other, path | {k})
-                done[k] = self.thread_of(e.msg, earlier)
-            return done[k]
-
         for e in entries:
-            if e.msg is not None:
-                e.thread = resolve(e, frozenset())
+            if e.msg is None:
+                continue
+            walked, seen, cur, thread = [], set(), e, None
+            while thread is None:
+                k = ledger_mod.norm_id(cur.key)
+                if k in done:
+                    thread = done[k]
+                    break
+                walked.append(k)
+                seen.add(k)
+                thread, cur = self.thread_step(cur.msg, by_key, seen)
+            for k in walked:
+                done[k] = thread
+            e.thread = done[ledger_mod.norm_id(e.key)]
 
     def batch(self, items):
         fresh = [it for it in items if self.is_new(it)]
@@ -515,25 +526,42 @@ class _Run:
         for e in early:
             self.close_screened(e)
         # (3) ruling 17 (her bookings still on the calendar) is not in the skeleton
-        # (4) the rest, oldest first; of several waiting on one thread only the newest goes on
+        # (4) the rest, oldest first; of several one sender has waiting on one thread only the newest
+        # goes on (a stranger naming someone's message never takes its place: Fable re-review C)
         rest = [e for e in entries if e not in early]
         newest = {}
         for e in rest:
             if e.settled_by() is None:
-                newest[e.thread] = e
+                newest[(e.thread, e.msg.from_addr)] = e
         for e in rest:
             self.check_halt()
             if e.settled_by() is not None:
                 self.close_screened(e)
-            elif newest.get(e.thread) is not e:
+            elif newest.get((e.thread, e.msg.from_addr)) is not e and not self.acted_on(e):
                 self.observe(e)
                 self.close(e, "decided", "superseded", why_mod.why("policy.superseded"),
-                           superseded_by=newest[e.thread].key)
+                           superseded_by=newest[(e.thread, e.msg.from_addr)].key)
             else:
                 self.handle(e)
         self.redo -= self.batch_keys
         self.batch_keys = set()
         return len(entries)
+
+    def acted_on(self, e):
+        """A message read again that already did something before a kill or a stop: a hold, a reply
+        recorded, a booking written down, or a booking its cancel or move took off. It is finished
+        first (ruling 8), never superseded by a newer one and its effects left half done."""
+        if not e.redo:
+            return False
+        if self.ledger.hold_for_message(e.key) is not None:
+            return True
+        if any(self.ledger.send(compose.new_message_id(self.cfg.doris_addr, e.key, t, 1)) is not None
+               for t in REPLY_TEMPLATES):
+            return True
+        own = ledger_mod.norm_id(e.key)
+        booked = self.ledger.bookings_for_thread(e.thread)
+        return (any(ledger_mod.norm_id(b["message_key"]) == own for b in booked)
+                or self.unbooked_here(e, booked) is not None)
 
     def write_down(self, e):
         """Queued means written down (A3): the whole batch is in the ledger before any of it runs."""
@@ -667,10 +695,53 @@ class _Run:
             offered = [s for o in thread.open_offers for s in o["slots"]]
             pick = parser.match_pick(msg.own_text, offered, parse.zone, now)
         agrees, e.agree = parser.model_agrees(parse, answer) if answer.ok else (False, {"reason": "no_model"})
+        own = self.own_effects(e) if e.redo else {}
         return policy.Facts(sender=msg.from_addr, branch=str(s8.get("branch", "else")),
                             others_on_thread=int(s8.get("others_on_thread", 0) or 0), thread=thread, answer=answer,
                             parse=parse, model_agrees=agrees, pick=pick, money_code=policy.money_check(msg.own_text),
-                            reply_to_mismatch=any(not screens.same_address(r, msg.from_addr) for r in msg.reply_to))
+                            reply_to_mismatch=any(not screens.same_address(r, msg.from_addr) for r in msg.reply_to),
+                            **own)
+
+    def own_effects(self, e):
+        """What a message read again after a kill or a stop already did (ruling 8, A3), for policy to
+        keep: its hold; its reply, if Sent has it (one never confirmed is looked up now: the lookup
+        failing, it may have gone out, so it is never sent again blind); its booking written down."""
+        h = self.ledger.hold_for_message(e.key)
+        if h is not None:
+            e.recovered = True
+            return {"own_hold": h["reason_code"]}
+        for template in REPLY_TEMPLATES:
+            mid = compose.new_message_id(self.cfg.doris_addr, e.key, template, 1)
+            sent = self.ledger.send(mid)
+            if sent is None:
+                continue
+            found = True if sent["state"] == "confirmed" else self.look_in_sent(e, mid, template)
+            if found is None:
+                self.ledger.set_send_state(mid, "unknown")
+                e.recovered = True
+                return {"own_reply_unknown": template}
+            if found:
+                self.ledger.set_send_state(mid, "confirmed")
+                e.recovered = True
+                return {"own_reply": template}
+        b = self.own_booking(e)
+        if b is not None:
+            e.recovered = True
+            return {"own_booking": b}
+        return {}
+
+    def own_booking(self, e):
+        """This message's own booking, written down and not settled: its slot, the offer it came from
+        (a booking from no offer is a direct one) and its length."""
+        own = ledger_mod.norm_id(e.key)
+        mine = [b for b in self.ledger.bookings_for_thread(e.thread)
+                if ledger_mod.norm_id(b["message_key"]) == own and b["state"] in RESUMABLE_BOOKING_STATES]
+        if not mine:
+            return None
+        slot = mine[-1]["slot"]
+        offer_id = self.ledger.offer_holding(e.thread, slot)
+        return {"slot": slot, "direct": offer_id is None, "offer_id": offer_id,
+                "length_min": int((slot.end_utc - slot.start_utc).total_seconds() // 60)}
 
     def thread_state(self, e, s8):
         """The thread as policy sees it, before this message did anything (ruling 8: a kill can come
@@ -731,6 +802,8 @@ class _Run:
             return self.move(e, f, plan)
         if a == "hold":
             return self.hold(e, plan.hold_code, plan.why, f)
+        if a == "replied":                      # its reply went out before a kill: nothing more to do
+            return self.close(e, "decided", plan.outcome, plan.why, template=plan.template)
         if a == "thread_held":
             return self.close(e, "held", plan.outcome, plan.why)
         if a == "suppress":
@@ -1233,13 +1306,18 @@ class _Run:
         return self.hold(e, code, why_mod.why(code), f)
 
     def hold(self, e, code, why_, f=None):
-        """One ledger record and one notice (S1) to the owner; nothing to the prospect; the thread stays his."""
+        """One ledger record and one notice (S1) to the owner; nothing to the prospect; the thread stays his.
+        A message held before a kill keeps its one record, and its notice goes out once (Sent first)."""
         now = self.now()
-        notice = None
-        if code not in templates.NO_NOTICE and e.msg is not None:
-            if self.ledger.count_hold_notices(now - _dt.timedelta(hours=1)) < caps.HOLD_NOTICES_PER_HOUR:
-                notice = compose.new_message_id(self.cfg.doris_addr, e.key, "S1", 1)
-        self.ledger.record_hold(e.thread, e.key, code, notice, now)
+        prior = self.ledger.hold_for_message(e.key) if e.redo else None
+        if prior is not None:
+            notice = prior["notice_message_id"]
+        else:
+            notice = None
+            if code not in templates.NO_NOTICE and e.msg is not None:
+                if self.ledger.count_hold_notices(now - _dt.timedelta(hours=1)) < caps.HOLD_NOTICES_PER_HOUR:
+                    notice = compose.new_message_id(self.cfg.doris_addr, e.key, "S1", 1)
+            self.ledger.record_hold(e.thread, e.key, code, notice, now)
         self.ledger.close_offers(e.thread, "held")
         if notice is not None:
             self.notice(e, code, notice, f)

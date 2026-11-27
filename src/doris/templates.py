@@ -17,6 +17,7 @@ Times are rendered from UTC by code (templates.md, ruling 10):
 import datetime as _dt
 import os
 import re
+import unicodedata
 
 from .shapes import UTC
 
@@ -212,6 +213,19 @@ def _addr(v, what="address"):
     return v
 
 
+# An address shown to the owner in a hold notice: body text, never a header. One address on one
+# line, like _ADDR, but it takes letters outside ASCII, so a sender whose address has one is still
+# named in the notice (Fable re-review F). No control or format characters (a bidi override).
+_SHOWN_ADDR = re.compile(r'^[^\s<>()\[\]\\,;:"@]+@[^\s<>()\[\]\\,;:"@]+\.[^\s<>()\[\]\\,;:"@.]+$')
+
+
+def _shown_addr(v):
+    if (not isinstance(v, str) or len(v) > 254 or not _SHOWN_ADDR.match(v)
+            or any(unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") for c in v)):
+        raise TemplateError("address must be one email address on one line")
+    return v
+
+
 def _text(v, what, limit):
     if not isinstance(v, str) or len(v) > limit:
         raise TemplateError("%s must be a string of at most %d characters" % (what, limit))
@@ -344,7 +358,7 @@ def _s1(s):
     reason = reason_phrase(s["reason"])
     z = _zone(s["zone"])
     lines = [
-        "Held for you: %s (%s), %s." % (_line(s["name"], "name"), _addr(s["address"]), reason),
+        "Held for you: %s (%s), %s." % (_line(s["name"], "name"), _shown_addr(s["address"]), reason),
         "They wrote at %s:" % fmt_pacific(_aware(s["wrote_at"], "wrote_at")),
         "\"%s\"" % _text(s["quote"], "quote", 400),
         "Nothing has been sent to them, and I won't send anything more on this thread. "

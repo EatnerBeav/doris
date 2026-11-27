@@ -265,6 +265,20 @@ class Verify(Tmp):
         w.write("halted", {"cause": "cli", "in_flight": "none", "dropped": []}, subject="run", why=WHY)
         self.assertTrue(receipts.verify(self.path, finished=True).ok)
 
+    def test_a_halted_line_that_promises_a_summary_does_not_end_a_run(self):
+        # an unsupervised run writes its own halted line, then its summary: cut the summary and the
+        # run has not ended (Fable re-review, receipts.py:159)
+        w = self.writer()
+        w.write("observed", {"message_sha256": "ab" * 32}, subject="m1@northwind.example")
+        w.write("halted", {"cause": "cli", "in_flight": "none", "dropped": [], "summary": "follows"},
+                subject="run", why=WHY)
+        res = receipts.verify(self.path, finished=True)
+        self.assertFalse(res.ok, res)
+        self.assertEqual((res.lines, res.first_bad_seq), (2, 3))
+        self.assertIn("no closing line", res.reason)
+        w.write("summary", {"handled": 0, "held": 0, "human_approvals": 0}, subject="run")
+        self.assertTrue(receipts.verify(self.path, finished=True).ok)
+
     def test_an_empty_file_is_not_a_finished_run(self):
         os.makedirs(os.path.dirname(self.path))
         self.put(b"")

@@ -335,6 +335,17 @@ class Offers(Base):
         self.assertEqual(o["slots"], [slot(2, 18), slot(3, 19), slot(4, 20)])
         self.assertIsInstance(o["slots"][0], Slot)
 
+    def test_the_offer_that_held_a_slot_used_closed_or_expired(self):
+        # a booking read again after a restart finds the offer it came from (ruling 8)
+        oid = self.offer()
+        self.db.use_offer(oid)
+        self.db.close_offers(TH, "booked")
+        self.assertEqual(self.db.offer_holding(TH, slot(3, 19)), oid)
+        self.assertEqual(self.db.offer_holding("<" + TH + ">", slot(3, 19)), oid)
+        self.assertIsNone(self.db.offer_holding(TH, slot(3, 19, length=45)))
+        self.assertIsNone(self.db.offer_holding(TH, slot(3, 20)))
+        self.assertIsNone(self.db.offer_holding("t2@x.example", slot(3, 19)))
+
     def test_expired_at_now_and_not_before(self):
         self.offer()
         expiry = T0 + dt.timedelta(days=7)
@@ -497,6 +508,15 @@ class Holds(Base):
         self.assertTrue(self.db.thread_held(TH))
         self.assertTrue(self.db.thread_held("<" + TH + ">"))
         self.assertFalse(self.db.thread_held("t2@x.example"))
+
+    def test_the_hold_a_message_already_made(self):
+        self.assertIsNone(self.db.hold_for_message(K1))
+        self.db.record_hold(TH, K2, "hold.unsure", None, T0)
+        self.db.record_hold(TH, K1, "hold.money", "<n1@fastmail.com>", T0)
+        h = self.db.hold_for_message("<" + K1 + ">")
+        self.assertEqual((h["reason_code"], h["notice_message_id"], h["thread_key"]),
+                         ("hold.money", "<n1@fastmail.com>", TH))
+        self.assertEqual(self.db.hold_for_message(K2)["reason_code"], "hold.unsure")
 
 
 class Queue(Base):
