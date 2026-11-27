@@ -32,7 +32,7 @@ def load(path) -> dict:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         raise EnvFileError("the env file is not UTF-8 text") from None
-    if text.startswith("﻿"):
+    if text.startswith("\ufeff"):
         text = text[1:]
     out = {}
     for number, line in enumerate(_LINES.split(text), 1):

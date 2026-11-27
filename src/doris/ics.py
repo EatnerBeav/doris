@@ -262,7 +262,7 @@ class VEvent:
 def _logical_lines(data) -> List[str]:
     if not isinstance(data, (bytes, bytearray)):
         raise ValueError("an .ics is bytes")
-    text = bytes(data).decode("utf-8", errors="replace").lstrip("﻿")
+    text = bytes(data).decode("utf-8", errors="replace").lstrip("\ufeff")
     out = []   # type: List[str]
     for line in re.split(r"\r\n|\n|\r", text):
         if line[:1] in (" ", "\t") and out:

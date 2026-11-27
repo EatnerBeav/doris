@@ -61,6 +61,11 @@ class ReadsTest(Fixture):
     def test_crlf_line_endings_and_a_byte_order_mark(self):
         self.assertEqual(envfile.load(self.write(b"\xef\xbb\xbfA=1\r\nB=2\r\n")), {"A": "1", "B": "2"})
 
+    def test_the_source_writes_the_byte_order_mark_as_an_escape(self):
+        """An invisible U+FEFF in the source is one an editor can drop without anyone seeing it."""
+        with open(envfile.__file__, "rb") as fh:
+            self.assertFalse(b"\xef\xbb\xbf" in fh.read(), "a literal U+FEFF in the source")
+
     def test_never_touches_the_process_environment(self):
         with mock.patch.dict(os.environ, {}, clear=False):
             before = dict(os.environ)

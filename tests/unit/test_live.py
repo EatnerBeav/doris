@@ -793,6 +793,19 @@ class ProbeTest(ImapFixture):
 class DefaultTransportTest(unittest.TestCase):
     """Without a factory the adapters use TLS that verifies the server, with the timeout given."""
 
+    def test_tls_is_1_2_or_newer_even_where_the_default_context_allows_older(self):
+        real = ssl.create_default_context
+
+        def as_on_3_9(*args, **kw):          # 3.9's default context sets no floor of its own
+            ctx = real(*args, **kw)
+            ctx.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+            return ctx
+        with mock.patch.object(ssl, "create_default_context", as_on_3_9):
+            ctx = live._tls()
+        self.assertEqual(ctx.minimum_version, ssl.TLSVersion.TLSv1_2)
+        self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(ctx.check_hostname)
+
     def test_imap_is_tls_with_a_verified_certificate_and_the_timeout(self):
         seen = {}
 

@@ -194,8 +194,11 @@ def hosts(env) -> list:
 # ------------------------------------------------------------------------------------------------
 def _tls():
     """A client context that verifies the server's certificate and name (never the stdlib's
-    unverified default, which smtplib and imaplib fall back to when given none)."""
-    return ssl.create_default_context()
+    unverified default, which smtplib and imaplib fall back to when given none), TLS 1.2 or
+    newer: Python 3.9's default context sets no floor of its own."""
+    ctx = ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    return ctx
 
 
 def _imap_tls(host, port, timeout):

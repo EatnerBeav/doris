@@ -284,6 +284,11 @@ class ReadEventTest(unittest.TestCase):
                                     "END:VEVENT")
         self.assertEqual(ics.read_event(raw).start_utc, u(2026, 12, 2, 18, 0))
 
+    def test_the_source_writes_the_byte_order_mark_as_an_escape(self):
+        """An invisible U+FEFF in the source is one an editor can drop without anyone seeing it."""
+        with open(ics.__file__, "rb") as fh:
+            self.assertFalse(b"\xef\xbb\xbf" in fh.read(), "a literal U+FEFF in the source")
+
     def test_timezone_and_alarm_components_do_not_leak_into_the_event(self):
         raw = cal("BEGIN:VTIMEZONE", "TZID:X", "BEGIN:STANDARD", "DTSTART:19701101T020000", "END:STANDARD",
                   "END:VTIMEZONE",
