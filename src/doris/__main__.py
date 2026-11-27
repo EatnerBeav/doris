@@ -28,7 +28,6 @@ STOP_MODES = ("sandbox", "live")
 LATER = ("redteam", "replay", "watch")
 WORKER = "_worker"
 RUN_CYCLE_S = loop.CYCLE.total_seconds()   # `run`: the wall-clock wait from one pass to her next cycle
-LIVE_ENV = "/root/doris-secrets/.env"      # `run --live`: the env file unless --env names another (smoke's too)
 
 
 def answers_path():
@@ -93,7 +92,7 @@ def run_cmd(argv):
                     help="her own mailbox and the owner's shared calendar, every setting from the env file")
     ap.add_argument("--fresh", action="store_true",
                     help="live: start the live ledger (once); she reads only mail that arrives after it")
-    ap.add_argument("--env", metavar="PATH", help="live: the env file (default %s)" % LIVE_ENV)
+    ap.add_argument("--env", metavar="PATH", help="live: the env file (default %s)" % paths.LIVE_ENV)
     args = ap.parse_args(argv)
     if not args.live and (args.fresh or args.env is not None):
         print("Not started: --fresh and --env are for a live run, so they need --live.")
@@ -112,7 +111,7 @@ def run_cmd(argv):
         _say("She reads the sandbox inbox %s; a new .eml dropped in waits for her next cycle." % every)
         return supervise("sandbox", state, name, run_dir, sandbox_config(
             name, state, run_dir, source, model_id, digest=False, cycles=None, cycle_s=RUN_CYCLE_S))
-    env_path = os.path.abspath(args.env or LIVE_ENV)
+    env_path = os.path.abspath(args.env or paths.LIVE_ENV)
     try:                                     # the worker makes every check again, under its lock
         settings = loop.live_preflight(state, env_path, args.fresh)
     except loop.Refused as refused:

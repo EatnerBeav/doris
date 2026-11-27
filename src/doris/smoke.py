@@ -82,7 +82,6 @@ from .adapters import live
 from .shapes import CalendarError, MailError, Slot
 
 UTC = _dt.timezone.utc
-DEFAULT_ENV = "/root/doris-secrets/.env"
 SEND_TO_ALLOWED = ("wolf.whizz@fastmail.com", "whizz@fastmail.com")   # the two test inboxes; nothing else
 QUERY_DAYS = 7
 FETCH_DAYS = 7                                   # the fetch step reads the INBOX mail of the last week
@@ -358,7 +357,7 @@ def _look(mail, message_id):
 def _parser():
     ap = argparse.ArgumentParser(prog="python -m doris smoke",
                                  description="Every live adapter call once, against the real servers.")
-    ap.add_argument("--env", default=DEFAULT_ENV, metavar="PATH", help="the env file (default %(default)s)")
+    ap.add_argument("--env", default=paths.LIVE_ENV, metavar="PATH", help="the env file (default %(default)s)")
     ap.add_argument("--send-to", metavar="ADDRESS",
                     help="also send one test message to %s" % " or ".join(SEND_TO_ALLOWED))
     return ap

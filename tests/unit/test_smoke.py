@@ -252,9 +252,10 @@ class SmokeTest(SmokeFixture):
         self.assertTrue(self.result("smtp login, nothing sent").startswith("MailError (smtp login check login"))
         self.assert_no_value()
 
-    def test_the_default_env_file_is_the_servers_secrets_file(self):
-        self.assertEqual(smoke.DEFAULT_ENV, "/root/doris-secrets/.env")
-        with mock.patch.object(smoke, "DEFAULT_ENV", self.env_path):
+    def test_the_default_env_file_is_the_one_a_live_run_reads_too(self):
+        """Without --env the smoke reads paths.LIVE_ENV, the one default `run --live` reads too."""
+        self.assertEqual(paths.LIVE_ENV, "/root/doris-secrets/.env")
+        with mock.patch.object(paths, "LIVE_ENV", self.env_path):
             self.assertEqual(smoke.main([], out=self.lines.append), 0)
 
 

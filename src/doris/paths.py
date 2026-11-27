@@ -14,6 +14,9 @@ TRACES = os.path.join(REPO, "traces")         # committed real runs
 TESTS = os.path.join(REPO, "tests")
 TRAP_PACK = os.path.join(REPO, "tests", "trap-pack", "pack")   # the organizers' traps/ folder, as shipped
 STATE = os.path.join(REPO, "state")           # gitignored: ledgers, locks, run folders
+# The env file `run --live` and `smoke` read unless --env names another: one default for both.
+# It lives only on the server, never in the repository.
+LIVE_ENV = "/root/doris-secrets/.env"
 
 MODES = ("sandbox", "live", "throwaway")
 

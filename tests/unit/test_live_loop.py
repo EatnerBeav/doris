@@ -619,9 +619,16 @@ class RunCommandTest(LiveFixture):
         self.assertNotIn("env file", out)
         self.assertEqual(self.started, [])
 
-    def test_the_default_env_file_is_the_smokes(self):
-        self.assertEqual(cli.LIVE_ENV, smoke.DEFAULT_ENV)
-        self.assertEqual(cli.LIVE_ENV, "/root/doris-secrets/.env")
+    def test_without_env_a_live_start_reads_the_one_default_the_smoke_reads(self):
+        """paths.LIVE_ENV is the one default env file: `run --live` and `smoke` both read it."""
+        self.assertEqual(paths.LIVE_ENV, "/root/doris-secrets/.env")
+        with mock.patch.object(paths, "LIVE_ENV", self.env_path):
+            code, out = self.cli("run", "--live", "--fresh")
+        self.assertEqual(code, 0, out)
+        (started,) = self.started
+        with open(started["argv"][4], encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["env_path"], self.env_path)
+        self.assertIn(self.env_path, out)
 
     def test_a_live_start_writes_a_config_that_names_the_env_file_and_holds_no_setting(self):
         code, out = self.cli("run", "--live", "--fresh", "--env", os.path.relpath(self.env_path))
