@@ -5,6 +5,7 @@
     verify   recompute a run's receipt chain (the latest sandbox run by default)
     stop     halt Doris now, in the sandbox and live; she stays halted until resume
     resume   clear a halt (only here, on the command line)
+    smoke    every live adapter call once against the real servers, before a live run
 
 run (live), redteam, replay and watch are not built yet: each says so and exits 2.
 """
@@ -206,7 +207,13 @@ def _display(path):
     return path if rel.startswith("..") else rel
 
 
-COMMANDS = {"demo": demo, "traps": traps_cmd, "verify": verify, "stop": stop, "resume": resume, WORKER: worker}
+def smoke_cmd(argv):
+    from . import smoke                   # live adapters load only when asked for
+    return smoke.main(argv)
+
+
+COMMANDS = {"demo": demo, "traps": traps_cmd, "verify": verify, "stop": stop, "resume": resume,
+            "smoke": smoke_cmd, WORKER: worker}
 COMMANDS.update({name: later(name) for name in LATER})
 
 

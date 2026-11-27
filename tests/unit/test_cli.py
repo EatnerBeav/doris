@@ -163,6 +163,20 @@ class Verify(Isolated):
         self.assertIn("no closing line", out)
 
 
+class Smoke(unittest.TestCase):
+    def test_smoke_is_a_command_and_contacts_nothing_without_its_env_file(self):
+        tmp = tempfile.mkdtemp(prefix="doris-cli-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        with mock.patch("socket.create_connection", side_effect=AssertionError("contacted a server")):
+            code, out = run_cli(["smoke", "--env", os.path.join(tmp, "missing.env")])
+        self.assertEqual(code, 2, out)
+        self.assertIn("env file", out)
+
+    def test_the_help_names_smoke(self):
+        code, out = run_cli(["--help"])
+        self.assertIn("smoke", out)
+
+
 class NotYet(unittest.TestCase):
     def test_commands_not_built_yet_say_so(self):
         for name in ("run", "redteam", "replay", "watch"):
