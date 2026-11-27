@@ -18,8 +18,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from doris import ics, netguard, smoke
+from doris import ics, netguard, smoke, templates
 from doris.adapters import live
+from doris.shapes import Slot
 from tests.unit.test_live import COLLECTION, DORIS, PASSWORD, Box, FakeCalDAV, FakeIMAP, FakeSMTP, eml, u
 
 ENV_TEXT = ("# a test env file: every host is the fakes' 127.0.0.1\n"
@@ -30,8 +31,8 @@ ENV_TEXT = ("# a test env file: every host is the fakes' 127.0.0.1\n"
             "DORIS_CALDAV_URL=https://127.0.0.1" + COLLECTION + "\n")
 
 STEPS = ["imap login and inbox count", "sent folder found by its special-use flag", "smtp login, nothing sent",
-         "caldav query, next 7 days", "caldav create test event", "caldav read test event back, times match",
-         "caldav delete test event", "caldav read after delete, gone"]
+         "caldav query, next 7 days", "caldav test event left by an earlier run", "caldav create test event",
+         "caldav read test event back, times match", "caldav delete test event", "caldav read after delete, gone"]
 SEND_STEPS = ["smtp send one test message", "sent copy, look 1 (at once)", "sent copy, look 2 (after a short wait)"]
 READ_ONLY_IMAP = {"CAPABILITY", "LOGIN", "LOGOUT", "EXAMINE", "LIST", "UID SEARCH", "UID FETCH"}
 
@@ -56,7 +57,8 @@ class SmokeFixture(unittest.TestCase):
                     "127.0.0.1", self.smtp.port, local_hostname="[127.0.0.1]", timeout=timeout)),
                 mock.patch.object(live, "_https", lambda host, port, timeout: http.client.HTTPConnection(
                     "127.0.0.1", self.dav.port, timeout=timeout)),
-                mock.patch.object(smoke, "SENT_LOOK_WAIT_S", 0.0)):
+                mock.patch.object(smoke, "SENT_LOOK_WAIT_S", 0.0),
+                mock.patch.object(smoke, "CLEANUP_WAIT_S", 0.0)):
             patch.start()
             self.addCleanup(patch.stop)
 
@@ -102,20 +104,81 @@ class SmokeTest(SmokeFixture):
         self.assertFalse({"MAIL", "RCPT", "DATA"} & set(self.smtp.verbs()))
         self.assertLessEqual(set(self.imap.verbs()), READ_ONLY_IMAP)
 
-    def test_the_test_event_is_far_ahead_under_a_new_real_format_booking_id_and_gone_after(self):
+    def test_the_test_event_is_far_ahead_under_one_fixed_booking_id_and_gone_after(self):
+        """One fixed ID, so a run that leaves its event behind is cleaned up by the next one."""
         before = dt.datetime.now(dt.timezone.utc)
-        self.run_smoke()
-        self.run_smoke()
-        # the last GET's 404 is confirmed by a UID query on the collection
-        self.assertEqual(self.dav.methods(), ["REPORT", "PUT", "GET", "GET", "DELETE", "GET", "REPORT"] * 2)
+        for _ in range(2):
+            self.lines.clear()
+            self.assertEqual(self.run_smoke(), 0)
+            self.assertEqual(self.result("caldav test event left by an earlier run"), "ok (none)")
+        self.assertTrue(ics.is_booking_id(smoke.SMOKE_BOOKING_ID))
+        # leftover check (a 404, confirmed by a UID query), create, read back, delete, read again
+        self.assertEqual(self.dav.methods(), ["REPORT", "GET", "REPORT", "PUT", "GET", "GET", "DELETE", "GET",
+                                              "REPORT"] * 2)
         puts = [r for r in self.dav.requests if r[0] == "PUT"]
-        names = [path[len(COLLECTION):-len(".ics")] for _, path, _, _ in puts]
-        for name, (_, _, _, body) in zip(names, puts):
-            self.assertRegex(name, r"^doris-[0-9a-f]{24}$")
-            self.assertTrue(ics.fields_ok(body, booking_id=name))
+        for _, path, _, body in puts:
+            self.assertEqual(path, COLLECTION + smoke.SMOKE_BOOKING_ID + ".ics")
+            self.assertTrue(ics.fields_ok(body, booking_id=smoke.SMOKE_BOOKING_ID))
             self.assertGreater(ics.read_event(body).start_utc, before + dt.timedelta(days=300))
-        self.assertNotEqual(names[0], names[1])            # a run cut short leaves nothing in the next one's way
         self.assertEqual(self.dav.resources, {})
+
+    def leftover(self):
+        start = u(2027, 12, 1, 11)
+        self.dav.put(smoke.SMOKE_BOOKING_ID + ".ics", ics.build_event(
+            smoke.SMOKE_BOOKING_ID, Slot(start, start + dt.timedelta(minutes=30)), templates.PLACEHOLDER_MEETING_LINK,
+            "CONFIRMED", 0, u(2026, 11, 27), None))
+
+    def test_a_test_event_left_by_an_earlier_run_is_removed_first(self):
+        self.leftover()
+        self.assertEqual(self.run_smoke(), 0)
+        self.assertEqual(self.result("caldav test event left by an earlier run"), "ok (removed one)")
+        self.assertEqual(self.result("caldav create test event"), "ok")
+        self.assertEqual(self.dav.resources, {})
+        self.assert_no_value()
+
+    def test_a_delete_refused_once_is_tried_again(self):
+        refusals = []
+
+        def refuse_the_first_delete(method, name):
+            if method == "DELETE":
+                if refusals:
+                    self.dav.status.pop("DELETE", None)
+                else:
+                    refusals.append(name)
+                    self.dav.status["DELETE"] = 503
+        self.dav.on_request = refuse_the_first_delete
+        self.assertEqual(self.run_smoke(), 0)
+        self.assertEqual(self.result("caldav delete test event"), "ok (on try 2)")
+        self.assertEqual(self.result("caldav read after delete, gone"), "ok")
+        self.assertEqual(self.dav.resources, {})
+
+    def test_an_event_that_may_remain_is_named_by_its_booking_id_and_the_next_run_removes_it(self):
+        self.dav.status["DELETE"] = 503
+        self.assertEqual(self.run_smoke(), 1)
+        self.assertEqual(self.result("caldav delete test event"),
+                         "CalendarError (caldav delete: 503), on each of %d tries" % smoke.CLEANUP_TRIES)
+        self.assertEqual(self.result("caldav read after delete, gone"), "FAILED (still there)")
+        self.assertIn(smoke.SMOKE_BOOKING_ID, self.result("caldav test event may remain"))
+        self.assertEqual(self.result("smoke"), "FAILED")
+        del self.dav.status["DELETE"]
+        self.lines.clear()
+        self.assertEqual(self.run_smoke(), 0)
+        self.assertEqual(self.result("caldav test event left by an earlier run"), "ok (removed one)")
+        self.assertEqual(self.dav.resources, {})
+
+    def test_an_interrupt_after_the_create_still_deletes_the_test_event(self):
+        real_create = live.LiveCalendar.create_only
+
+        def create_then_interrupt(cal, booking_id, data):
+            real_create(cal, booking_id, data)
+            raise KeyboardInterrupt
+        with mock.patch.object(live.LiveCalendar, "create_only", create_then_interrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_smoke()
+        self.assertEqual(self.result("caldav delete test event"), "ok")
+        self.assertEqual(self.result("caldav read after delete, gone"), "ok")
+        self.assertEqual(self.dav.resources, {})
+        self.assertIsNone(netguard.active())
 
     def test_a_failing_step_names_its_class_and_status_the_rest_still_run_and_it_exits_1(self):
         self.dav.status["PUT"] = 403

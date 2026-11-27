@@ -9,19 +9,24 @@ Usage: python -m doris smoke [--env PATH] [--send-to ADDRESS]
 Each step prints one plain line: its name, then ok (with a count where it counts something), or
 the failure's class name with the adapter's own text, which carries a step, a status code or an
 exception's class name and never a value. No line names an address, a password, a folder, a
-calendar or an event.
+calendar or an event, with one exception: when the test event may still be on the calendar, a
+line names its booking ID (a fixed one, SMOKE_BOOKING_ID) so a person can find it.
 
 Steps, in order; each runs whatever the one before it did:
   imap login and inbox count                 LiveMail.inbox_count (read-only)
   sent folder found by its special-use flag  LiveMail.sent_folders (the \\Sent flag, never a name)
   smtp login, nothing sent                   LiveMail.check_smtp_login
   caldav query, next 7 days                  LiveCalendar.query, counted
+  caldav test event left by an earlier run   a test event an earlier smoke left (cut short, or its
+                                             delete failed) is deleted first
   caldav create test event                   30 minutes about 400 days ahead, at 11:00 UTC (the
-                                             small hours in Pacific time), under a real-format
-                                             booking ID made from a one-off smoke key
+                                             small hours in Pacific time), always under the one
+                                             fixed booking ID SMOKE_BOOKING_ID
   caldav read test event back, times match   LiveCalendar.get, start and end compared
-  caldav delete test event                   LiveCalendar.delete
+  caldav delete test event                   LiveCalendar.delete, up to CLEANUP_TRIES times; it runs
+                                             in a finally, so a failed step or Ctrl-C still deletes
   caldav read after delete, gone             LiveCalendar.get is None
+  caldav test event may remain               only when it was not seen gone: names the booking ID
 With --send-to:
   smtp send one test message                 LiveMail.send: signed, Auto-Submitted, no Bcc
   sent copy, look 1 (at once)                LiveMail.find_in_sent, as the loop looks right after a send
@@ -41,7 +46,7 @@ import email.utils
 import secrets
 import time
 
-from . import compose, envfile, ics, loop, netguard, templates
+from . import caps, compose, envfile, ics, netguard, templates
 from .adapters import live
 from .shapes import CalendarError, MailError, Slot
 
@@ -52,6 +57,11 @@ QUERY_DAYS = 7
 TEST_EVENT_AHEAD = _dt.timedelta(days=400)       # far past any booking horizon (caps.MAX_HORIZON)
 TEST_EVENT_UTC_HOUR = 11
 TEST_EVENT_LENGTH = _dt.timedelta(minutes=30)
+# One fixed booking ID (it passes ics.is_booking_id; no real booking's "doris-" + 24 hex can be it):
+# a run that leaves its test event behind is cleaned up by the next run, which deletes it first.
+SMOKE_BOOKING_ID = "doris-smoke-test"
+CLEANUP_TRIES = 3                                # the test event's delete, a short wait apart
+CLEANUP_WAIT_S = caps.CALENDAR_RETRY_WAIT_S
 SENT_LOOK_WAIT_S = 5.0                           # between the two looks in Sent
 TEST_TEXT = "A test message from Doris's live smoke check. Nothing to do and nothing to answer."
 
@@ -115,13 +125,22 @@ def _query(calendar, now):
 
 
 def _calendar_round_trip(calendar, out, now):
-    """Create a test event far ahead, read it back, delete it, and read again to see it gone."""
-    key = "smoke:%s:%s" % (now.strftime("%Y%m%dT%H%M%SZ"), secrets.token_hex(8))
+    """Delete any test event an earlier run left, create one far ahead, read it back; then, in a
+    finally (a failed step or Ctrl-C included), delete it with retries and read again to see it
+    gone. Unless it was seen gone, one more line names its booking ID."""
+    booking_id = SMOKE_BOOKING_ID
     day = (now + TEST_EVENT_AHEAD).date()
     start = _dt.datetime(day.year, day.month, day.day, TEST_EVENT_UTC_HOUR, tzinfo=UTC)
     slot = Slot(start, start + TEST_EVENT_LENGTH)
-    booking_id = loop.booking_id(key, slot)
     event = ics.build_event(booking_id, slot, templates.PLACEHOLDER_MEETING_LINK, "CONFIRMED", 0, now, None)
+
+    def leftover():
+        if calendar.get(booking_id) is None:
+            return "none"
+        calendar.delete(booking_id)
+        if calendar.get(booking_id) is not None:
+            raise _Failed("still there")
+        return "removed one"
 
     def read_back():
         ev = calendar.get(booking_id)
@@ -134,10 +153,35 @@ def _calendar_round_trip(calendar, out, now):
         if calendar.get(booking_id) is not None:
             raise _Failed("still there")
 
-    return [_step(out, "caldav create test event", lambda: calendar.create_only(booking_id, event)),
-            _step(out, "caldav read test event back, times match", read_back),
-            _step(out, "caldav delete test event", lambda: calendar.delete(booking_id)),
-            _step(out, "caldav read after delete, gone", gone)]
+    passed, seen_gone = [], False
+    try:
+        passed.append(_step(out, "caldav test event left by an earlier run", leftover))
+        passed.append(_step(out, "caldav create test event", lambda: calendar.create_only(booking_id, event)))
+        passed.append(_step(out, "caldav read test event back, times match", read_back))
+    finally:
+        try:
+            passed.append(_delete_with_retries(calendar, out, booking_id))
+            seen_gone = _step(out, "caldav read after delete, gone", gone)
+            passed.append(seen_gone)
+        finally:
+            if not seen_gone:
+                out("caldav test event may remain: booking ID %s (the next smoke deletes it first)" % booking_id)
+    return passed
+
+
+def _delete_with_retries(calendar, out, booking_id):
+    """The test event's delete, tried up to CLEANUP_TRIES times a short wait apart. One line."""
+    for attempt in range(1, CLEANUP_TRIES + 1):
+        try:
+            calendar.delete(booking_id)
+        except Exception as exc:
+            if attempt < CLEANUP_TRIES:
+                _sleep(CLEANUP_WAIT_S)
+                continue
+            out("caldav delete test event: %s, on each of %d tries" % (_why(exc), CLEANUP_TRIES))
+            return False
+        out("caldav delete test event: ok" + ("" if attempt == 1 else " (on try %d)" % attempt))
+        return True
 
 
 def _test_message(doris_addr, to_addr, message_id, now):
