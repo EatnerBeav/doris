@@ -1,7 +1,8 @@
-"""The command line: python -m doris demo, stop, resume, verify, traps.
+"""The command line: python -m doris demo, run, stop, resume, verify, traps.
 
-The demo runs the real worker as a child process under the kill switch, on a copy of the sandbox
-and a throwaway state folder, so the repository's own sandbox/ and state/ are never touched.
+The demo and `run` start the real worker as a child process under the kill switch, on a copy of the
+sandbox and a throwaway state folder, so the repository's own sandbox/ and state/ are never touched.
+`run --live` is tested against fake servers in test_live_loop.
 """
 
 import contextlib
@@ -10,11 +11,14 @@ import json
 import os
 import shutil
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
 from doris import __main__ as cli
 from doris import caps, paths, receipts, supervisor
+from tests.unit.test_restart import mini_sandbox
 
 
 def fresh_sandbox(tmp):
@@ -163,6 +167,102 @@ class Verify(Isolated):
         self.assertIn("no closing line", out)
 
 
+def whole_lines(path):
+    """The receipt lines written so far, read while the worker writes: whole lines only."""
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return []
+    lines = []
+    for raw in data.split(b"\n")[:-1]:
+        try:
+            lines.append(json.loads(raw.decode("utf-8")))
+        except ValueError:
+            pass
+    return lines
+
+
+def closed(lines):
+    return [l for l in lines if l["kind"] in ("decided", "held") and "outcome" in l["payload"]]
+
+
+class Run(Isolated):
+    """`python -m doris run`: the sandbox under the same kill switch, pass after pass, each after a
+    wait for her next cycle, until stopped."""
+
+    def setUp(self):
+        super().setUp()
+        with open(os.path.join(self.sandbox, "inbox", "02-marcus-request.eml"), "rb") as fh:
+            self.judge_mail = b"".join(l for l in fh.read().splitlines(True) if not l.lower().startswith(b"date:"))
+        root = mini_sandbox(os.path.join(self.tmp, "mini"), ("01-priya-request.eml",))
+        for target, name, value in ((paths, "SANDBOX", root), (cli, "RUN_CYCLE_S", 0.2)):
+            patcher = mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.inbox = os.path.join(root, "inbox")
+
+    def judge(self, failures):
+        """Once her first pass has closed Priya's request, a judge drops an email (no Date) into the
+        inbox; once that one is closed too, a stop from the command line."""
+        deadline, dropped = time.time() + 60, False
+        while time.time() < deadline:
+            runs = os.path.join(self.state, "sandbox", "runs")
+            names = sorted(os.listdir(runs)) if os.path.isdir(runs) else []
+            done = closed(whole_lines(os.path.join(runs, names[-1], "receipts.jsonl"))) if names else []
+            if not dropped and len(done) == 1:
+                with open(os.path.join(self.inbox, "14-judge.eml"), "wb") as fh:
+                    fh.write(self.judge_mail)
+                dropped = True
+            elif dropped and len(done) == 2:
+                break
+            time.sleep(0.05)
+        else:
+            failures.append("gave up waiting (dropped=%s)" % dropped)
+        supervisor.request_stop("sandbox", "cli")
+
+    def test_run_reads_the_inbox_each_cycle_until_a_stop_and_the_halt_closes_the_chain(self):
+        failures = []
+        judge = threading.Thread(target=self.judge, args=(failures,))
+        judge.start()
+        try:
+            code, out = run_cli(["run"])
+        finally:
+            judge.join()
+        self.assertEqual(failures, [])
+        self.assertEqual(code, supervisor.EXIT_HALTED, out)
+        self.assertTrue(out.startswith("Sandbox. "), out)
+        self.assertIn("until `python -m doris stop`", out.splitlines()[1])
+        (run,) = self.runs()
+        self.assertTrue(os.path.basename(run).startswith("model-stub-sandbox-"), run)
+        path = os.path.join(run, "receipts.jsonl")
+        self.assertTrue(receipts.verify(path, finished=True).ok)
+        lines = receipts.read_lines(path)
+        self.assertEqual((lines[-1]["kind"], lines[-1]["payload"]["cause"]), ("halted", "cli"))
+        observed = [l["payload"]["clock"] for l in lines if l["kind"] == "observed" and "from_addr" in l["payload"]]
+        self.assertEqual(observed, ["2026-12-01T16:10:00Z", "2026-12-01T16:20:00Z"])   # the judge's: a cycle on
+        self.assertEqual([l["payload"]["outcome"] for l in closed(lines)], ["book", "offer"])
+        with open(os.path.join(run, "config.json"), encoding="utf-8") as fh:
+            config = json.load(fh)
+        self.assertEqual((config["mode"], config["cycles"], config["cycle_s"], config["digest"], config["clock_mode"]),
+                         ("sandbox", None, 0.2, False, "advance"))
+
+    def test_fresh_and_env_belong_to_a_live_run(self):
+        for argv in (["run", "--fresh"], ["run", "--env", "some.env"]):
+            with self.subTest(argv=argv):
+                code, out = run_cli(argv)
+                self.assertEqual(code, 2, out)
+                self.assertEqual(len(out.strip().splitlines()), 1, out)
+                self.assertIn("--live", out)
+        self.assertFalse(os.path.exists(os.path.join(self.state, "sandbox", "runs")))
+
+    def test_a_halt_in_force_refuses_the_run(self):
+        supervisor.request_stop("sandbox", "cli")
+        code, out = run_cli(["run"])
+        self.assertEqual(code, supervisor.EXIT_REFUSED_HALT, out)
+        self.assertFalse(os.path.exists(os.path.join(self.state, "sandbox", "runs")))
+
+
 class Smoke(unittest.TestCase):
     def test_smoke_is_a_command_and_contacts_nothing_without_its_env_file(self):
         tmp = tempfile.mkdtemp(prefix="doris-cli-")
@@ -176,10 +276,16 @@ class Smoke(unittest.TestCase):
         code, out = run_cli(["--help"])
         self.assertIn("smoke", out)
 
+    def test_the_help_names_run_and_its_live_flags(self):
+        code, out = run_cli(["--help"])
+        for words in ("run ", "--live", "--fresh", "--env"):
+            self.assertIn(words, out)
+        self.assertNotIn("run (live)", out)
+
 
 class NotYet(unittest.TestCase):
     def test_commands_not_built_yet_say_so(self):
-        for name in ("run", "redteam", "replay", "watch"):
+        for name in ("redteam", "replay", "watch"):
             code, out = run_cli([name])
             self.assertEqual(code, 2, (name, out))
             self.assertIn("not built yet", out)

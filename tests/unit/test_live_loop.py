@@ -5,22 +5,26 @@ The real LiveMail and LiveCalendar talk to test_live's fake IMAP, SMTP and CalDA
 127.0.0.1 (the adapters' default transports swapped for plain connections to them), as in
 test_smoke. No test reads a real env file or reaches a real server.
 """
+import contextlib
 import email
 import email.policy
 import http.client
 import imaplib
+import io
 import json
 import os
 import re
 import shutil
 import smtplib
+import sys
 import tempfile
 import traceback
 import unittest
 from unittest import mock
 
+from doris import __main__ as cli
 from doris import caps, ledger as ledger_mod
-from doris import loop, model as model_mod, netguard, receipts, templates
+from doris import loop, model as model_mod, netguard, paths, receipts, smoke, supervisor, templates
 from doris.adapters import live
 from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, FakeSMTP, u
 
@@ -538,6 +542,145 @@ class LongRunTest(LiveFixture):
         for extra in ({"cycles": 0}, {"cycle_s": 0}, {"cycle_s": -1.0}):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
                 self.go(fresh=True, **extra)
+
+
+class RunCommandTest(LiveFixture):
+    """`python -m doris run --live`: a start that cannot go says why in one line before anything is
+    made; one that can writes a config naming the env file and holding no setting, for the worker
+    under the kill switch, which loads the env file itself."""
+
+    def setUp(self):
+        super().setUp()
+        self.started = []
+        for patch in (mock.patch.object(paths, "STATE", os.path.join(self.dir, "state")),
+                      mock.patch.object(supervisor, "run_supervised", self.supervised)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def supervised(self, mode, run_name, worker_argv, receipts_path, ledger_path, **kw):
+        self.started.append({"mode": mode, "run_name": run_name, "argv": worker_argv,
+                             "receipts": receipts_path, "ledger": ledger_path})
+        return 0
+
+    def cli(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cli.main(list(argv))
+        return code, out.getvalue()
+
+    def test_a_live_start_that_cannot_go_says_why_in_one_line_and_makes_nothing(self):
+        ledger_path = os.path.join(self.state, "ledger.sqlite")
+
+        def no_env():
+            return ["--env", os.path.join(self.dir, "absent.env"), "--fresh"]
+
+        def no_owner():
+            return ["--env", self.write_env(DORIS_OWNER_ADDRESS=None), "--fresh"]
+
+        def no_key():
+            return ["--env", self.write_env(ANTHROPIC_API_KEY=None), "--fresh"]
+
+        def no_proof():
+            self.prove_smoke(None)
+            return ["--env", self.write_env(), "--fresh"]
+
+        def no_ledger():
+            return ["--env", self.write_env()]
+
+        def fresh_over_a_ledger():
+            ledger_mod.start_fresh(ledger_path, u(2026, 11, 30, 12, 0))
+            return ["--env", self.write_env(), "--fresh"]
+
+        cases = ((no_env, "absent.env"), (no_owner, "DORIS_OWNER_ADDRESS"), (no_key, "ANTHROPIC_API_KEY"),
+                 (no_proof, loop.SMOKE_REFUSAL), (no_ledger, loop.NO_LIVE_LEDGER),
+                 (fresh_over_a_ledger, loop.FRESH_OVER_LEDGER))
+        for setup, said in cases:
+            with self.subTest(case=setup.__name__):
+                self.prove_smoke('{"sent_copy_found": true}')
+                code, out = self.cli("run", "--live", *setup())
+                self.assertEqual(code, 2, out)
+                self.assertEqual(len(out.strip().splitlines()), 1, out)
+                self.assertTrue(out.startswith("Not started: "), out)
+                if said.startswith("Not started: "):        # one of the fixed lines, word for word
+                    self.assertEqual(out.strip(), said)
+                else:
+                    self.assertIn(said, out)
+                    self.assert_no_value(out)
+                self.assertEqual(self.started, [])
+                self.assertFalse(os.path.exists(os.path.join(self.state, "runs")))
+                if setup is not fresh_over_a_ledger:
+                    self.assertFalse(os.path.exists(ledger_path))
+        self.nothing_contacted()
+
+    def test_a_halt_in_force_refuses_before_the_env_file_is_read(self):
+        supervisor.request_stop("live", "cli")
+        code, out = self.cli("run", "--live", "--fresh", "--env", os.path.join(self.dir, "absent.env"))
+        self.assertEqual(code, supervisor.EXIT_REFUSED_HALT, out)
+        self.assertNotIn("env file", out)
+        self.assertEqual(self.started, [])
+
+    def test_the_default_env_file_is_the_smokes(self):
+        self.assertEqual(cli.LIVE_ENV, smoke.DEFAULT_ENV)
+        self.assertEqual(cli.LIVE_ENV, "/root/doris-secrets/.env")
+
+    def test_a_live_start_writes_a_config_that_names_the_env_file_and_holds_no_setting(self):
+        code, out = self.cli("run", "--live", "--fresh", "--env", os.path.relpath(self.env_path))
+        self.assertEqual(code, 0, out)
+        (started,) = self.started
+        self.assertEqual(started["mode"], "live")
+        self.assertRegex(started["run_name"], r"^model-live-live-\d{8}T\d{6}Z$")
+        self.assertEqual(started["argv"][:4], [sys.executable, "-m", "doris", cli.WORKER])
+        self.assertEqual(started["ledger"], os.path.join(self.state, "ledger.sqlite"))
+        run_dir = os.path.join(self.state, "runs", started["run_name"])
+        self.assertEqual(started["receipts"], os.path.join(run_dir, "receipts.jsonl"))
+        with open(started["argv"][4], encoding="utf-8") as fh:
+            text = fh.read()
+        config = json.loads(text)
+        self.assertEqual({k: config.get(k) for k in ("mode", "state_dir", "env_path", "fresh", "model_source",
+                                                     "clock_mode", "digest", "cycles", "cycle_s")},
+                         {"mode": "live", "state_dir": self.state, "env_path": self.env_path, "fresh": True,
+                          "model_source": "live", "clock_mode": "fixed", "digest": False, "cycles": None,
+                          "cycle_s": loop.CYCLE.total_seconds()})
+        for name in ("sandbox_root", "owner_addr", "doris_addr", "model_id", "answers_path"):
+            self.assertIsNone(config.get(name), name)
+        self.assert_no_value(text)
+        self.assertTrue(out.startswith("Live. "), out)
+        self.assertIn(model_mod.DEFAULT_MODEL, out)
+        self.assertIn("until `python -m doris stop`", out)
+        self.assert_no_value(out)
+        self.assertFalse(os.path.exists(os.path.join(self.state, "ledger.sqlite")))   # the worker starts it
+        self.nothing_contacted()
+
+    def test_the_worker_runs_that_config_live_and_waits_for_each_next_cycle_until_stopped(self):
+        self.cli("run", "--live", "--fresh", "--env", self.env_path)
+        (started,) = self.started
+        arrived, stopped = [], []
+
+        def tick():                # her first wait: Priya writes; the wait after her reply: a stop
+            if not arrived:
+                arrived.append(self.inbox.add(request(1), u(2026, 12, 1, 16, 2)))
+                self.clock = u(2026, 12, 1, 16, 10)
+            elif self.smtp.delivered and not stopped:
+                stopped.append(supervisor.request_stop("live", "cli"))
+
+        fake = FakeTime(1199.0, tick)
+        for patch in (mock.patch.object(loop, "_time", fake.time), mock.patch.object(loop, "_sleep", fake.sleep)):
+            patch.start()
+            self.addCleanup(patch.stop)
+        code, out = self.cli(cli.WORKER, started["argv"][4])
+        self.assertEqual(code, supervisor.WORKER_EXIT_HALTED, out)
+        self.assertEqual(len(stopped), 1)
+        self.assertEqual([rcpts[0] for _, rcpts, _ in self.smtp.delivered], [PROSPECT])
+        (url, headers, body), = self.posts
+        self.assertEqual((headers["x-api-key"], body["model"]), (API_KEY, model_mod.DEFAULT_MODEL))
+        self.assertEqual(self.ledger_start(), u(2026, 12, 1, 16, 0))
+        lines = receipts.read_lines(started["receipts"])
+        (start,) = [l["payload"] for l in lines if l["kind"] == "observed" and l["payload"].get("step") == "start"]
+        self.assertEqual((start["mode"], start["fresh_start"], start["model"]), ("live", True, model_mod.DEFAULT_MODEL))
+        fetches = [l for l in lines if l["kind"] == "called" and l["payload"]["call"] == "mail_fetch"]
+        self.assertGreaterEqual(len(fetches), 2)
+        self.assertTrue(receipts.verify(started["receipts"]).ok)     # the parent writes the halted line
+        self.assert_no_value(out)
 
 
 if __name__ == "__main__":

@@ -49,6 +49,10 @@ ENV_OWNER = "DORIS_OWNER_ADDRESS"      # live: the owner's own address, from the
 SMOKE_PROOF = "smoke-sent.json"        # live state: `smoke --send-to` writes it when it finds its copy in Sent
 SMOKE_REFUSAL = ("Not started: no smoke check has found her sent copy in Sent yet. "
                  "Run `python -m doris smoke --send-to wolf.whizz@fastmail.com` first.")
+FRESH_OVER_LEDGER = ("Not started: the live ledger is already there, and --fresh only starts a new one. "
+                     "Run without --fresh to go on from it.")
+NO_LIVE_LEDGER = ("Not started: there is no live ledger yet. `python -m doris run --live --fresh` starts one, "
+                  "and she then reads only mail that arrives after it.")
 ENV_KEY = "ANTHROPIC_API_KEY"
 ENV_NAMES = (ENV_KEY, "DORIS_MODEL", templates.MEETING_LINK_ENV, ENV_OWNER)   # names only ever reach a receipt
 
@@ -218,6 +222,21 @@ def live_settings(env_path, model_source):
     except live.ConfigError as exc:
         raise Refused("Not started: %s (env file %s)." % (exc, env_path), 2) from None
     return LiveSettings(env, owner_addr, doris_addr, link, hosts, model_id)
+
+
+def live_preflight(state_dir, env_path, fresh):
+    """`run --live`'s checks in the worker's own order, for the command line to make before it makes
+    anything: the env file's settings (the model live), the smoke's proof, then the ledger against
+    --fresh. Refused (exit 2) in one plain line; the worker makes every check again under its lock."""
+    settings = live_settings(env_path, "live")
+    if not smoke_proof_ok(state_dir):
+        raise Refused(SMOKE_REFUSAL, 2)
+    there = os.path.exists(os.path.join(state_dir, "ledger.sqlite"))
+    if fresh and there:
+        raise Refused(FRESH_OVER_LEDGER, 2)
+    if not fresh and not there:
+        raise Refused(NO_LIVE_LEDGER, 2)
+    return settings
 
 
 # ------------------------------------------------------------------------------------------
@@ -439,11 +458,9 @@ class _Run:
             try:
                 ledger_mod.start_fresh(path, self.now())
             except FileExistsError:
-                raise Refused("Not started: the live ledger is already there, and --fresh only starts a new one. "
-                              "Run without --fresh to go on from it.", 2) from None
+                raise Refused(FRESH_OVER_LEDGER, 2) from None
         elif not os.path.exists(path):
-            raise Refused("Not started: there is no live ledger yet. `python -m doris run --live --fresh` starts "
-                          "one, and she then reads only mail that arrives after it.", 2)
+            raise Refused(NO_LIVE_LEDGER, 2)
         led = ledger_mod.Ledger(path, create=False)
         self.mail_since = led.fresh_start()
         if self.mail_since is None:

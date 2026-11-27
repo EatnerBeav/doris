@@ -1,13 +1,17 @@
 """python -m doris <command>: the one way in.
 
     demo     the sandbox day under the kill switch: no install, no key
+    run      the long run under the kill switch: a pass over the inbox every ten minutes until
+             `python -m doris stop`; the sandbox by default (no key), or with --live her own
+             mailbox and the owner's calendar from the env file (--env PATH, default
+             /root/doris-secrets/.env; --fresh starts the live ledger, once)
     traps    the Trap Pack, one file at a time on fresh throwaway state
     verify   recompute a run's receipt chain (the latest sandbox run by default)
     stop     halt Doris now, in the sandbox and live; she stays halted until resume
     resume   clear a halt (only here, on the command line)
     smoke    every live adapter call once against the real servers, before a live run
 
-run (live), redteam, replay and watch are not built yet: each says so and exits 2.
+redteam, replay and watch are not built yet: each says so and exits 2.
 """
 
 import argparse
@@ -21,8 +25,10 @@ from . import caps, loop, paths, receipts, supervisor
 SANDBOX_OWNER = loop.SANDBOX_OWNER
 SANDBOX_DORIS = loop.SANDBOX_DORIS
 STOP_MODES = ("sandbox", "live")
-LATER = ("run", "redteam", "replay", "watch")
+LATER = ("redteam", "replay", "watch")
 WORKER = "_worker"
+RUN_CYCLE_S = loop.CYCLE.total_seconds()   # `run`: the wall-clock wait from one pass to her next cycle
+LIVE_ENV = "/root/doris-secrets/.env"      # `run --live`: the env file unless --env names another (smoke's too)
 
 
 def answers_path():
@@ -62,41 +68,114 @@ def first_line(source, model_id):
             "every receipt says stub. Add ANTHROPIC_API_KEY to call the model.")
 
 
-# --- demo ------------------------------------------------------------------------------------
+# --- demo and run --------------------------------------------------------------------------------
 def demo(argv):
     argparse.ArgumentParser(prog="python -m doris demo",
                             description="The sandbox day under the kill switch.").parse_args(argv)
-    from . import model as model_mod
-    source = demo_source(os.environ, os.path.exists(answers_path()))
-    model_id = model_mod.default_model_id(os.environ) if source == "live" else None
     refusal = supervisor._halt_refusal("sandbox")
     if refusal:
         print(refusal)
         return supervisor.EXIT_REFUSED_HALT
+    source, model_id = sandbox_source()
     state = paths.state_dir("sandbox")
-    base = name = run_name(source, "sandbox")
-    for n in range(2, 100):                  # two runs in one second each get their own folder
+    name, run_dir = new_run_dir(state, run_name(source, "sandbox"))
+    _say(first_line(source, model_id))
+    return supervise("sandbox", state, name, run_dir,
+                     sandbox_config(name, state, run_dir, source, model_id, digest=True))
+
+
+def run_cmd(argv):
+    ap = argparse.ArgumentParser(
+        prog="python -m doris run",
+        description="The long run under the kill switch: a pass over the inbox every ten minutes until "
+                    "`python -m doris stop`. The sandbox by default; --live for her own mailbox.")
+    ap.add_argument("--live", action="store_true",
+                    help="her own mailbox and the owner's shared calendar, every setting from the env file")
+    ap.add_argument("--fresh", action="store_true",
+                    help="live: start the live ledger (once); she reads only mail that arrives after it")
+    ap.add_argument("--env", metavar="PATH", help="live: the env file (default %s)" % LIVE_ENV)
+    args = ap.parse_args(argv)
+    if not args.live and (args.fresh or args.env is not None):
+        print("Not started: --fresh and --env are for a live run, so they need --live.")
+        return 2
+    mode = "live" if args.live else "sandbox"
+    refusal = supervisor._halt_refusal(mode)
+    if refusal:
+        print(refusal)
+        return supervisor.EXIT_REFUSED_HALT
+    state = paths.state_dir(mode)
+    every = "every %s until `python -m doris stop`" % _span(RUN_CYCLE_S)
+    if not args.live:
+        source, model_id = sandbox_source()
+        name, run_dir = new_run_dir(state, run_name(source, "sandbox"))
+        _say(first_line(source, model_id))
+        _say("She reads the sandbox inbox %s; a new .eml dropped in waits for her next cycle." % every)
+        return supervise("sandbox", state, name, run_dir, sandbox_config(
+            name, state, run_dir, source, model_id, digest=False, cycles=None, cycle_s=RUN_CYCLE_S))
+    env_path = os.path.abspath(args.env or LIVE_ENV)
+    try:                                     # the worker makes every check again, under its lock
+        settings = loop.live_preflight(state, env_path, args.fresh)
+    except loop.Refused as refused:
+        print(refused)
+        return refused.exit_code
+    name, run_dir = new_run_dir(state, run_name("live", "live"))
+    _say("Live. Every setting from the env file %s; model called live (%s). She reads her own inbox %s.%s"
+         % (env_path, settings.model_id, every,
+            " A fresh live ledger: she reads only mail that arrives from now on." if args.fresh else ""))
+    # No setting goes in the config: the worker loads the env file itself.
+    return supervise("live", state, name, run_dir, {
+        "mode": "live", "run_name": name, "state_dir": state, "env_path": env_path, "fresh": args.fresh,
+        "model_source": "live", "record_path": os.path.join(run_dir, "recorded-answers.jsonl"),
+        "clock_mode": "fixed", "digest": False, "cycles": None, "cycle_s": RUN_CYCLE_S})
+
+
+def sandbox_source():
+    """(model source, model ID) for a sandbox run: see demo_source; the ID only when called live."""
+    from . import model as model_mod
+    source = demo_source(os.environ, os.path.exists(answers_path()))
+    return source, model_mod.default_model_id(os.environ) if source == "live" else None
+
+
+def sandbox_config(name, state, run_dir, source, model_id, **more):
+    config = {"mode": "sandbox", "run_name": name, "state_dir": state, "sandbox_root": paths.SANDBOX,
+              "owner_addr": SANDBOX_OWNER, "doris_addr": SANDBOX_DORIS, "model_source": source,
+              "model_id": model_id, "answers_path": answers_path() if source == "replayed" else None,
+              "record_path": os.path.join(run_dir, "recorded-answers.jsonl") if source == "live" else None,
+              "clock_mode": "advance", "calendar_timeout_s": caps.CALENDAR_TIMEOUT_S,
+              "retry_wait_s": caps.CALENDAR_RETRY_WAIT_S}
+    config.update(more)
+    return config
+
+
+def new_run_dir(state, base):
+    """(name, folder) for a new run under state/runs: two runs in one second each get their own."""
+    name = base
+    for n in range(2, 100):
         run_dir = os.path.join(state, "runs", name)
         try:
             os.makedirs(run_dir)
             break
         except FileExistsError:
             name = "%s-%d" % (base, n)
-    config = {"mode": "sandbox", "run_name": name, "state_dir": state, "sandbox_root": paths.SANDBOX,
-              "owner_addr": SANDBOX_OWNER, "doris_addr": SANDBOX_DORIS, "model_source": source,
-              "model_id": model_id, "answers_path": answers_path() if source == "replayed" else None,
-              "record_path": os.path.join(run_dir, "recorded-answers.jsonl") if source == "live" else None,
-              "clock_mode": "advance", "digest": True, "calendar_timeout_s": caps.CALENDAR_TIMEOUT_S,
-              "retry_wait_s": caps.CALENDAR_RETRY_WAIT_S}
+    return name, run_dir
+
+
+def supervise(mode, state, name, run_dir, config):
+    """The run's config.json, then its worker under the kill switch."""
     config_path = os.path.join(run_dir, "config.json")
     with open(config_path, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(config, fh, indent=1, sort_keys=True)
         fh.write("\n")
-    print(first_line(source, model_id))
-    sys.stdout.flush()
     return supervisor.run_supervised(
-        "sandbox", name, [sys.executable, "-m", "doris", WORKER, config_path],
+        mode, name, [sys.executable, "-m", "doris", WORKER, config_path],
         os.path.join(run_dir, "receipts.jsonl"), os.path.join(state, "ledger.sqlite"), cwd=paths.SRC, run_id=name)
+
+
+def _span(seconds):
+    if seconds >= 60 and seconds % 60 == 0:
+        minutes = int(seconds // 60)
+        return "minute" if minutes == 1 else "%d minutes" % minutes
+    return "%g seconds" % seconds
 
 
 def worker(argv):
@@ -212,7 +291,7 @@ def smoke_cmd(argv):
     return smoke.main(argv)
 
 
-COMMANDS = {"demo": demo, "traps": traps_cmd, "verify": verify, "stop": stop, "resume": resume,
+COMMANDS = {"demo": demo, "run": run_cmd, "traps": traps_cmd, "verify": verify, "stop": stop, "resume": resume,
             "smoke": smoke_cmd, WORKER: worker}
 COMMANDS.update({name: later(name) for name in LATER})
 
