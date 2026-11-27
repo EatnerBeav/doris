@@ -847,7 +847,8 @@ class LiveCalendar(CalendarAdapter):
 
     def delete(self, booking_id):
         """Delete her own event by booking ID: read the resource, refuse unless it holds her
-        event alone (NotHers), then DELETE exactly that resource If-Match its ETag. Absent
+        event alone (NotHers) and carries a strong ETag (without one the DELETE could not be
+        conditional), then DELETE exactly that resource If-Match that ETag. Absent
         (404, before or after the read, and the collection asked by UID holding no event of
         hers) is a no-op; the caller's read-back confirms it."""
         if not ics.is_booking_id(booking_id):
@@ -866,8 +867,9 @@ class LiveCalendar(CalendarAdapter):
             raise _failure(CalendarError, step, detail="the event cannot be read; not deleted") from None
         if uids != {booking_id}:
             raise _failure(NotHers, step, detail="the resource under her booking ID is not her event alone; not deleted")
-        strong = etag and not etag.startswith("W/")     # If-Match compares strong ETags only (RFC 7232)
-        status, _, _ = self._request(step, "DELETE", path, headers={"If-Match": etag} if strong else None)
+        if not isinstance(etag, str) or not _STRONG_ETAG.match(etag):
+            raise _failure(CalendarError, step, detail="no strong ETag to make the delete conditional; not deleted")
+        status, _, _ = self._request(step, "DELETE", path, headers={"If-Match": etag})
         if status in (200, 204):
             return
         if status == 404:
@@ -899,6 +901,7 @@ _UNREADABLE = (ValueError, OverflowError)     # what ics raises on an event it c
 _XML_UNREADABLE = (xml.parsers.expat.ExpatError, ET.ParseError, LookupError, ValueError)
 _DAV, _CALDAV = "{DAV:}", "{urn:ietf:params:xml:ns:caldav}"
 _STATUS_LINE = re.compile(r"^\s*HTTP/\d(?:\.\d)?\s+(\d{3})\b")
+_STRONG_ETAG = re.compile(r'^"[\x21\x23-\x7e\x80-\xff]*"\Z')   # RFC 7232 entity-tag, not W/: what If-Match compares
 QUERY_PAD = _dt.timedelta(days=2)
 READ_PROPS = ("UID", "DTSTART", "DTEND", "DURATION", "STATUS", "TRANSP", "RECURRENCE-ID", "RRULE", "RDATE")
 _QUERY_PROPS = "\n".join('          <C:prop name="%s"/>' % name for name in READ_PROPS)

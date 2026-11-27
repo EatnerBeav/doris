@@ -1269,7 +1269,8 @@ class CalDAVHandler(http.server.BaseHTTPRequestHandler):
         found = self.server.resources.get(self.name())
         if found is None:
             return self.answer(404)
-        self.answer(200, found[1], [("ETag", found[0]), ("Content-Type", "text/calendar; charset=utf-8")])
+        etag = [("ETag", found[0])] if found[0] is not None else []      # None: the server sends no ETag
+        self.answer(200, found[1], etag + [("Content-Type", "text/calendar; charset=utf-8")])
 
     def on_PUT(self, body):
         srv, name = self.server, self.name()
@@ -1701,11 +1702,14 @@ class DeleteTest(CalFixture):
         self.fails(CalendarTimeout, self.cal.delete, BID)
         self.assertIn(BID + ".ics", self.dav.resources)
 
-    def test_a_weak_etag_is_not_sent_as_a_condition(self):
-        self.dav.resources[BID + ".ics"] = ('W/"weak-1"', her_event())
-        self.cal.delete(BID)
-        self.assertNotIn("if-match", self.dav.requests[-1][2])
-        self.assertEqual(self.dav.resources, {})
+    def test_without_a_strong_etag_nothing_is_deleted(self):
+        """If-Match takes a strong ETag only; without one the DELETE would be unconditional."""
+        for etag in ('W/"weak-1"', None, "", "unquoted"):
+            self.dav.resources[BID + ".ics"] = (etag, her_event())
+            err = self.fails(CalendarError, self.cal.delete, BID)
+            self.assertIn("ETag", str(err), repr(etag))
+        self.assertNotIn("DELETE", self.dav.methods())
+        self.assertIn(BID + ".ics", self.dav.resources)
 
     def test_a_resource_gone_between_the_read_and_the_delete_is_a_no_op(self):
         self.cal.create_only(BID, her_event())
