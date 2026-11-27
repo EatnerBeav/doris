@@ -1659,8 +1659,29 @@ class _Run:
         self.send_digest(lines, verified, now)
 
     def digest_window(self):
-        """(receipt lines, verified) for the daily digest: this run's lines."""
-        return receipts.read_lines(self.receipts_path), receipts.verify(self.receipts_path).ok
+        """(receipt lines, verified) for the daily digest: every line this mode's runs wrote after the
+        last digest the server took (before the first, all of them), oldest first, so mail after one
+        digest is in the next and nothing falls between two. The run files are read back from this one
+        until that digest's send line turns up. verified only when every file read verifies; this run's,
+        still open, without its closing line. A file that cannot be read raises, never reads as empty."""
+        chunks, verified = [], True
+        for run in reversed(self.ledger.runs()):
+            path = os.path.join(self.cfg.state_dir, "runs", run["run_id"], "receipts.jsonl")
+            lines = receipts.read_lines(path)
+            verified = receipts.verify(path, finished=run["run_id"] != self.run_id).ok and verified
+            cut = next((i for i in range(len(lines) - 1, -1, -1) if self.digest_taken(lines[i])), None)
+            chunks.append(lines if cut is None else lines[cut + 1:])
+            if cut is not None:
+                break
+        return [line for chunk in reversed(chunks) for line in chunk], verified
+
+    def digest_taken(self, line):
+        """A digest's send line, for a digest the server took (one it refused is no boundary)."""
+        p = line.get("payload") or {}
+        if line.get("kind") != "called" or p.get("call") != "send" or p.get("target") != "S2":
+            return False
+        sent = self.ledger.send(p["message_id"])
+        return sent is not None and sent["state"] in ledger_mod.SENT_STATES
 
     def send_digest(self, lines, verified, now):
         """S2 to the owner, counted from these receipt lines (verified: the files they came from
