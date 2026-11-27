@@ -1154,12 +1154,11 @@ def _parse(own_text, sent_utc, now_utc, bookable, body_hash):
     vague_units = len(T.vague)
 
     # Build readings: each unit with its date, then dates with no time.
-    paired_dates = set()
-    for u in units:
-        dm = _date_for(T, u.main.start, T.sentence(u.main.start))
-        if dm is not None:
-            paired_dates.add(id(dm))
-        readings.extend(_unit_readings(T, u, dm, steer_zone, now_utc, bookable, length, excluded))
+    unit_dates = [(u, _date_for(T, u.main.start, T.sentence(u.main.start))) for u in units]
+    paired_dates = set(id(dm) for _, dm in unit_dates if dm is not None)
+    for u, dm in unit_dates:
+        readings.extend(_unit_readings(T, u, dm, steer_zone, now_utc, bookable, length, excluded,
+                                       paired=paired_dates))
     for dm in date_mentions:
         if id(dm) in paired_dates or getattr(dm, "as_time", False):
             continue
@@ -1277,7 +1276,23 @@ def _result_zone(unit, steer_zone):
     return steer_zone
 
 
-def _unit_readings(T, unit, dm, steer_zone, now, bookable, length, excluded, own_only=False):
+def _d5_weekdays(T, dm, paired):
+    """D5's weekdays for one unit's date: the weekday written with that date, and a weekday written
+    on its own (no date and no time of its own) that no written date falls on. A weekday written
+    with another date, or going with another time, belongs to that one only: it never moves this
+    unit's time to its day (Fable review of PR #3, finding 1)."""
+    dated = [d for d in T.dates if not (d.kind == "relative" and d.weekday is not None)]
+    out = []
+    for w, d in _weekday_names(T):
+        if d is dm:
+            out.append(w)
+        elif d.kind == "relative" and id(d) not in paired and \
+                not any(c.weekday() == w for d2 in dated for c in d2.cands):
+            out.append(w)
+    return out
+
+
+def _unit_readings(T, unit, dm, steer_zone, now, bookable, length, excluded, own_only=False, paired=()):
     out = []
     main = unit.main
     if dm is None:
@@ -1297,7 +1312,7 @@ def _unit_readings(T, unit, dm, steer_zone, now, bookable, length, excluded, own
         if any_bookable(dcands[0][0]) and not any_bookable(dcands[1][0]):
             dcands = [dcands[0], (dcands[1][0], False, "P2")]
     if not own_only:
-        names = [w for w, _ in _weekday_names(T)]
+        names = _d5_weekdays(T, dm, paired)
         base = [c for c, _, _ in dcands]
         for w in names:
             for c in list(base):

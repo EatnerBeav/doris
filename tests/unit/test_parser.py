@@ -711,6 +711,35 @@ class DatesTest(Base):
         self.assertEqual(parser.preferred_starts(r, CLOCK, bookable=fake_bookable)[:2],
                          [DEC3_10, u(2026, 12, 2, 18)])
 
+    def placed(self, text):
+        return sorted(x.start_utc for x in P(text).readings if x.kept and x.start_utc is not None)
+
+    def test_date_weekday_mismatch_never_moves_one_options_time_to_another_options_day(self):
+        # D5 (Fable review of PR #3, finding 1): a weekday written with its own date, and matching it,
+        # belongs to that date; it never puts Thursday's 10:15 on Friday or Friday's 2:45 on Thursday
+        self.assertEqual(self.placed("Could Shane do Thursday, December 3 at 10:15 AM Pacific or Friday, "
+                                     "December 4 at 2:45 PM Pacific for 30 minutes?"),
+                         [u(2026, 12, 3, 18, 15), u(2026, 12, 4, 22, 45)])
+        self.assertEqual(self.placed("Thursday at 10:15 AM PT or Friday at 2:45 PM PT?"),
+                         [u(2026, 12, 3, 18, 15), u(2026, 12, 4, 22, 45)])
+
+    def test_date_weekday_mismatch_a_weekday_with_its_own_date_moves_no_other_time(self):
+        self.assertEqual(self.placed("I am out Monday December 7. Could Shane do Wednesday, December 9 at "
+                                     "3:15 PM Pacific?"),
+                         [u(2026, 12, 9, 23, 15)])
+
+    def test_date_weekday_mismatch_a_lone_weekday_a_written_date_falls_on_moves_nothing(self):
+        self.assertEqual(self.placed("Thursday, December 3 at 10am PT or Friday, December 4 at 2pm PT. "
+                                     "Friday is best."),
+                         [DEC3_10, u(2026, 12, 4, 22)])
+
+    def test_date_weekday_mismatch_a_lone_weekday_no_date_falls_on_still_reads_twice(self):
+        # the spec's own D5 examples keep both readings: the date, and that weekday nearest it
+        self.assertEqual(self.placed("Thurs works. December 4 at 10am PT?"), [DEC3_10, u(2026, 12, 4, 18)])
+        self.assertEqual(self.placed("Wednesday, December 3 at 10am PT."), [u(2026, 12, 2, 18), DEC3_10])
+        self.assertEqual(self.placed("Happy Friday! Could Shane do Thursday, December 3 at 10am PT?"),
+                         [DEC3_10, u(2026, 12, 4, 18)])
+
     def test_date_with_year(self):
         for d in ("December 3, 2026", "3 December 2026", "Dec 3 2026", "3-Dec-2026"):
             self.book("%s at 10am PT." % d, DEC3_10)
