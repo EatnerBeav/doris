@@ -7,6 +7,14 @@ from unittest import mock
 from doris import caps, holds, mail, templates
 from tests.unit.voice_fakes import FakeZones, make_msg, utc
 
+# Second Fable review of PR #4, H1: one lowercase letter anywhere in a run (a prefix, a suffix, a URL
+# or an address around it) kept a code in capitals; so did a last part of digits, digits and a unit
+# or an ISO-like time. Made-up tokens in the canary's shape (none of them is in the pack).
+CAPS_TOKENS = ("AGW-CANARY-WQZX", "AGW-CANARY-3071", "AGW-CANARY-418F", "AGW-CANARY-15AM",
+               "AGW-CANARY-31ST", "AGW-CANARY-4T27")
+CAPS_CONTEXTS = ("see x/%s", "ref=%s", "Ref-%s", "%s-ok", "the_%s", "https://a.example/%s",
+                 "billing+%s@evil.example", "ID_%s=", "%s_v2", "re-%s", "a+%s")
+
 # Second Fable review of PR #4, M1: addresses the reader takes that a notice cannot show as written.
 # Each one lost the hold notice and the day's digest.
 ODD_ADDRESSES = (
@@ -129,6 +137,23 @@ class CodeTest(unittest.TestCase):
         # all capitals with no digit (finding 4), or one part mixing letters and digits
         self.assertEqual(holds.blank_codes("quote AGW-CANARY-WXQZ back"), "quote [redacted] back")
         self.assertEqual(holds.blank_codes("tag agw-canary-t002 here"), "tag [redacted] here")
+
+    def test_three_parts_in_capitals_are_blanked_whatever_is_around_them(self):
+        from doris import traps
+        self.assertEqual(holds.safe_excerpt("see x/AGW-CANARY-WQZX", 400), "see [redacted]")
+        self.assertEqual(holds.blank_codes("pay ref=AGW-CANARY-3071 today"), "pay [redacted] today")
+        for token in CAPS_TOKENS:
+            for context in CAPS_CONTEXTS:
+                text = context % token
+                self.assertTrue(traps.find_tokens(text), text)
+                for out in (holds.blank_codes(text), holds.safe_excerpt(text, 400), holds._name_line(text),
+                            holds.shown_address(text)):
+                    self.assertEqual(traps.find_tokens(out), [], (text, out))
+
+    def test_capitals_beside_lowercase_words_stay(self):
+        for text in ("pre-COVID-era", "x/AB/cd/EF", "the NASA-JPL-Caltech team", "UTF-8", "Q1-Q2-Q3 plan",
+                     "an AB-test-run", "state-of-the-art"):
+            self.assertEqual(holds.blank_codes(text), text)
 
     def test_codes_written_in_groups_are_blanked(self):
         self.assertEqual(holds.blank_codes("recovery AB12 CD34 EF56 thanks"), "recovery [redacted] thanks")
@@ -285,6 +310,20 @@ class NoticeSlotsTest(unittest.TestCase):
         slots = holds.notice_slots(msg, "hold.no_model", utc(2026, 12, 1, 21, 10), [])
         self.assertLessEqual(len(slots["first_name"]), 80)
         templates.render("S1", slots)
+
+    def test_a_code_in_capitals_reaches_no_part_of_the_notice(self):
+        # Second Fable review of PR #4, H1: the quote, the name, the address and the first name.
+        from doris import compose, traps
+        for token in CAPS_TOKENS:
+            for name in ("x/%s Jr" % token, ""):
+                msg = make_msg(from_name=name, from_addr="billing+%s@evil.example" % token,
+                               own_text="Pay ref=%s now, see https://a.example/%s" % (token, token))
+                slots = holds.notice_slots(msg, "hold.money", utc(2026, 12, 1, 21, 10), [])
+                raw, body = compose.owner_notice("S1", slots, "doris.htm@fastmail.com", "whizz@fastmail.com",
+                                                 "<x@fastmail.com>", utc(2026, 12, 1, 21, 11))
+                self.assertEqual(traps.find_tokens(body), [], body)
+                self.assertEqual(traps.find_tokens(raw.decode("latin-1")), [])
+                self.assertEqual(slots["first_name"], "[redacted]")
 
     def test_every_address_the_reader_takes_gets_its_notice(self):
         for addr in ODD_ADDRESSES:

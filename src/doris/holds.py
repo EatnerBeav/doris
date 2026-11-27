@@ -78,8 +78,10 @@ def clean(text):
 # A run is split into its parts (letters and digits only). A run is blanked whole when:
 #   - one part is code-shaped: 4 or more characters, letters and digits, starting with a digit or
 #     switching between letters and digits at least twice (7QXZ, Q7XX, a1b2c3, 9f86d081);
-#   - it has 3 or more parts and one mixes letters and digits (tag-abc-t002), or none has a
-#     lowercase letter and one has 2 letters or more (ABC-DEF-WXYZ);
+#   - it has 3 or more parts and one mixes letters and digits (tag-abc-t002), or any three parts in
+#     a row have no lowercase letter and one of them has 2 letters or more (ABC-DEF-WXYZ, and
+#     ref=ABC-DEF-1234 or x/ABC-DEF-WXYZ: the words around a code don't save it; second Fable
+#     review of PR #4, H1);
 # three or more mixed groups in a row are blanked together (AB12 CD34 EF56, A1B2:C3D4:E5F6); and the
 # word after password, passphrase, passcode, PIN, OTP, a named code or key (verification code, API
 # key), or after "code", "key", "token" or "secret" with ":", "=" or "is", is blanked when it holds a
@@ -122,13 +124,19 @@ def _code_shaped(part):
     return shifts >= 2 or part[0].isdigit()
 
 
+def _capitals(parts):
+    """Three parts in a row with no lowercase letter, one of them with 2 letters or more."""
+    upper = [not any(c.islower() for c in p) for p in parts]
+    wordy = [sum(c.isalpha() for c in p) >= 2 for p in parts]
+    return any(all(upper[i:i + 3]) and any(wordy[i:i + 3]) for i in range(len(parts) - 2))
+
+
 def _run(m):
     run = m.group(0)
     parts = [p for p in _PARTS.split(run) if p]
     if any(_code_shaped(p) for p in parts):
         return REDACTED
-    if len(parts) >= 3 and (any(_mixed(p) for p in parts) or (
-            not any(c.islower() for c in run) and any(sum(c.isalpha() for c in p) >= 2 for p in parts))):
+    if len(parts) >= 3 and (any(_mixed(p) for p in parts) or _capitals(parts)):
         return REDACTED
     return run
 

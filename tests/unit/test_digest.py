@@ -158,6 +158,30 @@ class BuildTest(unittest.TestCase):
         body = templates.render("S2", s)
         self.assertEqual(traps.find_tokens(body), [])
 
+    def test_a_code_in_capitals_reaches_no_line_of_the_digest(self):
+        # Second Fable review of PR #4, H1: the name, the address and the "Also asked" line.
+        from doris import traps
+        from tests.unit.test_holds import CAPS_TOKENS
+        for token in CAPS_TOKENS:
+            addr = "billing+%s@evil.example" % token
+            for name in ("", "Ann ref=" + token):
+                r = Receipts()
+                r.observed("1", addr, name)
+                r.add("held", "1", {}, "hold.no_model", ts="2026-12-01T21:10:00Z")
+                r.observed("2", addr, name)
+                r.add("decided", "2", {"dropped": 1}, "screen.stop", n=1)
+                r.observed("3", addr, name)
+                r.add("decided", "3", {}, "screen.sensitive_skip")
+                r.observed("4", addr, name)
+                r.add("decided", "4", {"question": "Also is x/%s still ok?" % token}, "policy.pick_plus_question")
+                r.observed("5", addr, name)
+                r.add("decided", "5", {}, "policy.file_injection")
+                r.observed("6", addr, name, "t-6")
+                r.add("decided", "6", {"thread": "t-6"}, "policy.offer_no_clear_time", cond="B5")
+                body = templates.render("S2", digest.build(r.lines, NOW, verified=True))
+                self.assertIn("Also asked: ", body)
+                self.assertEqual(traps.find_tokens(body), [], body)
+
     def test_every_address_the_reader_takes_reaches_the_digest(self):
         # Second Fable review of PR #4, M1: one such sender lost the whole digest.
         from tests.unit.test_holds import ODD_ADDRESSES, read_from

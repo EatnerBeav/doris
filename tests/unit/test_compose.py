@@ -143,6 +143,15 @@ class ReplyTest(Base):
         self.assertEqual(m["Subject"], "Re: Sync [redacted] next week?")
         self.assertEqual(traps.find_tokens(raw.decode("latin-1")), [])
 
+    def test_a_code_in_capitals_beside_lowercase_is_not_echoed(self):
+        # Second Fable review of PR #4, H1: "ref=", "x/" or a URL around the code kept it.
+        from doris import traps
+        self.inbound = make_msg(subject="Sync ref=AGW-CANARY-WQZX, see https://a.example/AGW-CANARY-418F?")
+        raw, _ = self.reply()
+        m = email.message_from_bytes(raw, policy=email.policy.default)
+        self.assertEqual(m["Subject"], "Re: Sync [redacted], see https://a.[redacted]?")
+        self.assertEqual(traps.find_tokens(raw.decode("latin-1")), [])
+
     def test_a_long_subject_is_read_only_so_far(self):
         # Second Fable review of PR #4, H2: a Subject of "The key is", 12,000 spaces and "!" took 3.6 s.
         self.inbound = make_msg(subject="The key is" + " " * 30000 + "!")
