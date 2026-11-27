@@ -622,6 +622,21 @@ class FetchTest(ImapFixture):
         with self.assertRaises(MailError):
             self.mail.fetch_new()
 
+    def test_an_internaldate_at_the_edge_of_time_is_a_mail_error_not_an_overflow(self):
+        for date in ("01-Jan-0001 00:00:00 +0100", "31-Dec-9999 23:30:00 -0100"):
+            self.inbox.messages.clear()
+            uid = self.inbox.add(eml(1), u(2026, 11, 27, 9, 0))
+            self.inbox.messages[uid]["date"] = date
+            err = self.fails_with(MailError, self.mail.fetch_new)
+            self.assertIn("INTERNALDATE", str(err), date)
+
+    def fails_with(self, cls, call, *args):
+        with self.assertRaises(Exception) as cm:
+            call(*args)
+        self.assertIsInstance(cm.exception, cls)
+        secret_free(self, cm.exception)
+        return cm.exception
+
     def test_a_body_left_out_of_the_answer_is_a_failure(self):
         self.inbox.add(eml(1), u(2026, 11, 27, 9, 0))
         self.imap.omit.add(1)
@@ -1456,6 +1471,21 @@ class QueryTest(CalFixture):
             self.dav.raw_answer = (207, "application/xml", data)
             err = self.fails(CalendarError, self.cal.query, S, E)
             self.assertIn("DOCTYPE", str(err), encoding)
+
+    def test_an_encoding_it_cannot_decode_is_a_calendar_error_not_a_raw_exception(self):
+        for name in ("x-no-such-encoding", "utf-7"):
+            body = ('<?xml version="1.0" encoding="%s"?><d:multistatus xmlns:d="DAV:"/>' % name).encode("ascii")
+            self.dav.raw_answer = (207, "application/xml", body)
+            with self.assertRaises(Exception) as cm:
+                self.cal.query(S, E)
+            self.assertIsInstance(cm.exception, CalendarError, name)
+            self.assertIn("cannot be read", str(cm.exception))
+
+    def test_an_href_that_is_not_a_url_is_a_calendar_error_not_a_raw_exception(self):
+        self.dav.report = [item("a.ics", vcal(timed("a", S, E)), href="//[")]
+        with self.assertRaises(Exception) as cm:
+            self.cal.query(S, E)
+        self.assertIsInstance(cm.exception, CalendarError)
 
     def test_a_server_that_hangs_is_a_calendar_timeout(self):
         self.dav.fault["REPORT"] = "hang"

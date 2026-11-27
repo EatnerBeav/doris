@@ -268,12 +268,10 @@ def _internaldate(match, step):
     try:
         local = _dt.datetime(int(year), MONTHS.index(month.decode("ascii").title()) + 1, int(day),
                              int(hh), int(mm), int(ss))
-    except ValueError:
+        offset = _dt.timedelta(hours=int(oh), minutes=int(om))
+        return (local + offset if sign == b"-" else local - offset).replace(tzinfo=UTC)
+    except (ValueError, OverflowError):            # OverflowError: year 1 or 9999 moved past the edge
         raise _failure(MailError, step, detail="an INTERNALDATE cannot be read") from None
-    offset = _dt.timedelta(hours=int(oh), minutes=int(om))
-    if sign == b"-":
-        offset = -offset
-    return (local - offset).replace(tzinfo=UTC)
 
 
 def server_id(uidvalidity, uid):
@@ -790,7 +788,10 @@ class LiveCalendar(CalendarAdapter):
         collection = urllib.parse.unquote(self.path).rstrip("/")
         out = []
         for resp in root.findall(_DAV + "response"):
-            href = urllib.parse.unquote(urllib.parse.urlsplit((resp.findtext(_DAV + "href") or "").strip()).path)
+            try:
+                href = urllib.parse.unquote(urllib.parse.urlsplit((resp.findtext(_DAV + "href") or "").strip()).path)
+            except ValueError:                         # e.g. "//[": not a URL
+                raise _failure(CalendarError, step, detail="an href cannot be read") from None
             code = _status_code(resp.findtext(_DAV + "status"))
             if href.rstrip("/") == collection:
                 if code is not None and not 200 <= code < 300:
@@ -877,6 +878,9 @@ class LiveCalendar(CalendarAdapter):
 # ------------------------------------------------------------------------------------------------
 _HTTP_FAILURES = (http.client.HTTPException, OSError, ValueError)
 _UNREADABLE = (ValueError, OverflowError)     # what ics raises on an event it cannot read (OverflowError: year 9999)
+# What expat and ElementTree raise on XML they cannot read: LookupError for an encoding Python does
+# not know, ValueError for one expat cannot take (a multi-byte one such as UTF-7).
+_XML_UNREADABLE = (xml.parsers.expat.ExpatError, ET.ParseError, LookupError, ValueError)
 _DAV, _CALDAV = "{DAV:}", "{urn:ietf:params:xml:ns:caldav}"
 _STATUS_LINE = re.compile(r"^\s*HTTP/\d(?:\.\d)?\s+(\d{3})\b")
 QUERY_PAD = _dt.timedelta(days=2)
@@ -928,11 +932,11 @@ def _xml(body, step):
         check.Parse(body, True)
     except _DTDRefused:
         raise _failure(CalendarError, step, detail="the answer carries a DOCTYPE; not read") from None
-    except xml.parsers.expat.ExpatError:
+    except _XML_UNREADABLE:
         raise _failure(CalendarError, step, detail="the answer cannot be read") from None
     try:
         return ET.fromstring(body)
-    except ET.ParseError:
+    except _XML_UNREADABLE:
         raise _failure(CalendarError, step, detail="the answer cannot be read") from None
 
 
