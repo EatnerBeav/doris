@@ -91,6 +91,7 @@ class Plan:
     offer_family: Optional[str] = None  # T2 | T3 | T4 | T18
     exclude_offered: bool = False       # times already offered on the thread never come back
     first: Tuple = ()                   # the sender's own bookable times, offered first
+    derived: Tuple = ()                 # D5's times on a weekday written apart from them: on her grid, after
     asked: Optional[_dt.datetime] = None  # T4's [asked time]
     length_min: int = 30
     side_question: Optional[str] = None  # ruling 14: code-copied text for the digest's "Also asked" line
@@ -107,10 +108,20 @@ def _length(parse):
 
 
 def _own_readings(parse):
-    """The sender's own placed readings that the parser kept, in order, for offering first."""
+    """The sender's own placed readings that the parser kept, in order, for offering first. A derived
+    reading (D5 moving a time onto a weekday written apart from it) is never the sender's own."""
     if parse is None:
         return ()
-    return tuple(r.start_utc for r in parse.readings if r.kept and r.start_utc is not None)
+    return tuple(r.start_utc for r in parse.readings
+                 if r.kept and r.start_utc is not None and not getattr(r, "derived", False))
+
+
+def _derived_readings(parse):
+    """D5's derived readings the parser kept: offered after the sender's own, on her own grid."""
+    if parse is None:
+        return ()
+    return tuple(r.start_utc for r in parse.readings
+                 if r.kept and r.start_utc is not None and getattr(r, "derived", False))
 
 
 def _offer(parse, model_agrees, cond=None):
@@ -121,7 +132,8 @@ def _offer(parse, model_agrees, cond=None):
         else:
             cond = (parse.failed_condition if parse is not None else None) or "B7"
     return Plan(action="offer", outcome="offer", why=_why("policy.offer_no_clear_time", cond=cond),
-                offer_family="T2", first=_own_readings(parse), length_min=_length(parse))
+                offer_family="T2", first=_own_readings(parse), derived=_derived_readings(parse),
+                length_min=_length(parse))
 
 
 def _new_request(f):
@@ -232,8 +244,8 @@ def _move(f):
     # Offering needs no B11 (that is for booking straight away): the parser's kept readings go
     # first, and the loop's slot search keeps them only if they are available.
     return Plan(action="move", outcome="move", why=_why("policy.move_cancel_offer"), offer_family="T18",
-                booking_id=b["booking_id"], first=_own_readings(f.parse), exclude_offered=False,
-                length_min=_length(f.parse))
+                booking_id=b["booking_id"], first=_own_readings(f.parse), derived=_derived_readings(f.parse),
+                exclude_offered=False, length_min=_length(f.parse))
 
 
 # The closing word for a message whose reply already went out (its template says what it did).

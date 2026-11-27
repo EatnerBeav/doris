@@ -993,11 +993,13 @@ def _bookable_fn(bookable):
     return slots.bookable
 
 
-def _is_bookable(bookable, start, length, now):
+def _is_bookable(bookable, start, length, now, written=True):
+    """G9 for one start: a time the sender wrote may sit on any quarter hour (written), one of hers
+    on the hour or half hour only."""
     try:
         if start is None or start.minute % 15 or start.second:
             return False
-        ok, _ = bookable(Slot(start, start + _dt.timedelta(minutes=length)), now, True)
+        ok, _ = bookable(Slot(start, start + _dt.timedelta(minutes=length)), now, written)
         return bool(ok)
     except Exception:
         return False
@@ -1206,8 +1208,8 @@ def _parse(own_text, sent_utc, now_utc, bookable, body_hash):
     zone_pair = None
     if unit is not None and unit.pair:
         zone_pair = tuple(t.zone.zid for t in unit.times[:2])
-    kept_dates = [r.date for r in readings if r.kept and r.date is not None]
-    any_dates = [r.date for r in readings if r.date is not None]
+    kept_dates = [r.date for r in readings if r.kept and not r.derived and r.date is not None]
+    any_dates = [r.date for r in readings if not r.derived and r.date is not None]     # a derived day never steers
     steer_day = kept_dates[0] if kept_dates else (any_dates[0] if any_dates else None)
     if steer_day is None:
         for d in date_mentions:
@@ -1277,18 +1279,20 @@ def _result_zone(unit, steer_zone):
 
 
 def _d5_weekdays(T, dm, paired):
-    """D5's weekdays for one unit's date: the weekday written with that date, and a weekday written
-    on its own (no date and no time of its own) that no written date falls on. A weekday written
-    with another date, or going with another time, belongs to that one only: it never moves this
-    unit's time to its day (Fable review of PR #3, finding 1)."""
+    """D5's weekdays for one unit's date, as (weekday, the mention it was written in): the weekday
+    written with that date, and a weekday written on its own (no date and no time of its own) that
+    no written date falls on. A weekday written with another date, or going with another time,
+    belongs to that one only: it never moves this unit's time to its day (Fable review of PR #3,
+    finding 1). A time moved to a weekday written on its own is derived, never one the sender
+    wrote: the caller marks it (Fable review 2 of PR #3, finding A)."""
     dated = [d for d in T.dates if not (d.kind == "relative" and d.weekday is not None)]
     out = []
     for w, d in _weekday_names(T):
         if d is dm:
-            out.append(w)
+            out.append((w, d))
         elif d.kind == "relative" and id(d) not in paired and \
                 not any(c.weekday() == w for d2 in dated for c in d2.cands):
-            out.append(w)
+            out.append((w, d))
     return out
 
 
@@ -1311,16 +1315,19 @@ def _unit_readings(T, unit, dm, steer_zone, now, bookable, length, excluded, own
                 k and _is_bookable(fn, i, length[0], now) for i, _, k, _ in _time_readings(main, d, steer_zone))
         if any_bookable(dcands[0][0]) and not any_bookable(dcands[1][0]):
             dcands = [dcands[0], (dcands[1][0], False, "P2")]
+    moved = {}      # a day D5 reads off a weekday written on its own -> that mention: its readings are derived
     if not own_only:
         names = _d5_weekdays(T, dm, paired)
         base = [c for c, _, _ in dcands]
-        for w in names:
+        for w, src in sorted(names, key=lambda n: n[1] is not dm):     # the date's own weekday first
             for c in list(base):
                 if c.weekday() != w:
                     delta = (w - c.weekday()) % 7
                     near = c + _dt.timedelta(days=delta if delta <= 3 else delta - 7)
                     if near not in [x[0] for x in dcands]:
                         dcands.append((near, True, "D5"))
+                        if src is not dm:
+                            moved[near] = src
     neg = qten = False
     for tm in unit.times:
         n, q = _sentence_flags(T, tm.start)
@@ -1330,6 +1337,9 @@ def _unit_readings(T, unit, dm, steer_zone, now, bookable, length, excluded, own
         neg, qten = neg or n, qten or q
     times = unit.times
     for d, dkept, drule in dcands:
+        src = moved.get(d)
+        # a weekday written on its own and negated or marked as something else (Q5, Q10) moves no time
+        dneg, dqten = _sentence_flags(T, src.start) if src is not None else (False, False)
         any_clock = False
         for tm in times:
             if getattr(tm, "range_end", False):
@@ -1344,11 +1354,13 @@ def _unit_readings(T, unit, dm, steer_zone, now, bookable, length, excluded, own
                     if neg and inst is not None:
                         excluded.append(inst)
                         k, r = False, "Q5"
-                    elif qten:
+                    elif dneg:
+                        k, r = False, "Q5"
+                    elif qten or dqten:
                         k, r = False, "Q10"
-                out.append(Reading(start_utc=inst, date=d, zone=zid, kept=k, rule=r))
+                out.append(Reading(start_utc=inst, date=d, zone=zid, kept=k, rule=r, derived=src is not None))
         if not any_clock:
-            out.append(Reading(start_utc=None, date=d, zone=None, kept=dkept, rule=drule))
+            out.append(Reading(start_utc=None, date=d, zone=None, kept=dkept, rule=drule, derived=src is not None))
     return out
 
 
@@ -1410,7 +1422,10 @@ def preferred_starts(parse, now_utc, bookable: Optional[Callable] = None) -> Lis
     """The sender's apparent times that are bookable, in the order the offer should put them first.
 
     Kept readings only, never a time the sender negated (Q5), never one marked as something
-    other than the meeting (Q10). The calendar's busy check is the caller's.
+    other than the meeting (Q10). The times the sender wrote come first, on any quarter hour. A
+    D5 cross-pair (a derived reading) follows them on her grid only, and never leads: with none
+    of the sender's own bookable, none is put first (Fable review 2 of PR #3, finding A). The
+    calendar's busy check is the caller's.
     """
     out = []
     try:
@@ -1418,11 +1433,15 @@ def preferred_starts(parse, now_utc, bookable: Optional[Callable] = None) -> Lis
     except Exception:
         return out
     excluded = set(getattr(parse, "excluded_utc", []) or [])
-    for r in getattr(parse, "readings", []) or []:
-        if not r.kept or r.start_utc is None or r.start_utc in excluded or r.start_utc in out:
-            continue
-        if _is_bookable(fn, r.start_utc, parse.length_min, now_utc):
-            out.append(r.start_utc)
+    kept = [r for r in getattr(parse, "readings", []) or []
+            if r.kept and r.start_utc is not None and r.start_utc not in excluded]
+    for derived in (False, True):
+        if derived and not out:
+            break
+        for r in kept:
+            if bool(getattr(r, "derived", False)) is derived and r.start_utc not in out and \
+                    _is_bookable(fn, r.start_utc, parse.length_min, now_utc, written=not derived):
+                out.append(r.start_utc)
     return out
 
 

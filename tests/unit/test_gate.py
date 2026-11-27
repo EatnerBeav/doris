@@ -856,6 +856,19 @@ class G9Test(GateTest):
         self.check(reply("T2"), parse=parse(readings=set_aside))
         self.assertEqual([c.args[2] for c in self.bookable().call_args_list], [False, False, False])
 
+    def test_g9_a_derived_reading_is_not_a_time_the_sender_wrote(self):
+        # a D5 cross-pair (Fable review 2 of PR #3, finding A): a time written with another day, read on a
+        # weekday written on its own, is checked on her own grid, and the receipt never calls it written
+        derived = [Reading(SLOT.start_utc, dt.date(2026, 12, 3), "Pacific", True, "H1", derived=True)]
+        g9 = self.one(self.check(reply("T2"), parse=parse(readings=derived)), "G9")
+        self.assertEqual((g9.status, g9.detail), ("pass", {"checked": 3, "written": False}))
+        self.assertEqual([c.args[2] for c in self.bookable().call_args_list], [False, False, False])
+        self.bookable().return_value = (False, "not_quarter_hour")
+        result = self.check(reply("T2"), parse=parse(readings=derived))
+        self.assertBlocked(result, "G9")
+        self.assertEqual(self.one(result, "G9").detail,
+                         {"rule": "not_quarter_hour", "start": "2026-12-03T18:00:00Z", "written": False})
+
     def test_g9_checks_each_offered_time_at_the_length_the_offer_states(self):
         self.check(reply("T2", slots={"duration": 60}))
         self.assertEqual([c.args[0] for c in self.bookable().call_args_list],

@@ -740,6 +740,61 @@ class DatesTest(Base):
         self.assertEqual(self.placed("Happy Friday! Could Shane do Thursday, December 3 at 10am PT?"),
                          [DEC3_10, u(2026, 12, 4, 18)])
 
+    def written(self, text):
+        """The kept readings the sender wrote with their own day: the times G9 reads as written."""
+        return sorted(x.start_utc for x in P(text).readings if x.kept and not x.derived and x.start_utc is not None)
+
+    def derived(self, text):
+        """The kept D5 readings that put a time on a weekday written apart from it (a cross-pair)."""
+        return sorted(x.start_utc for x in P(text).readings if x.kept and x.derived and x.start_utc is not None)
+
+    def test_date_weekday_mismatch_a_lone_weekday_never_makes_a_time_the_sender_wrote(self):
+        # A time counts as written only for the day it was written with (Fable review 2 of PR #3, finding A).
+        # D5 still reads a weekday written on its own, but a time it moves there is derived: never one the
+        # sender wrote, never on a quarter hour, and never offered ahead of the sender's own times.
+        cases = (
+            ("I am out Monday. Could Shane do Wednesday, December 9 at 3:15 PM Pacific?",
+             [u(2026, 12, 9, 23, 15)], [u(2026, 12, 7, 23, 15)]),
+            ("I can't do Thursday. Friday at 10:15 AM Pacific works.",          # Thursday is negated (Q5)
+             [u(2026, 12, 4, 18, 15)], []),
+            ("Tuesday is bad, Wednesday December 9 at 3:15 PM Pacific or Thursday at 9:45 AM Pacific.",
+             [u(2026, 12, 3, 17, 45), u(2026, 12, 9, 23, 15)], [u(2026, 12, 1, 17, 45), u(2026, 12, 8, 23, 15)]),
+            ("I am travelling Thursday and Friday. Monday December 7 at 1:15 PM Pacific?",
+             [u(2026, 12, 7, 21, 15)], [u(2026, 12, 4, 21, 15), u(2026, 12, 10, 21, 15)]),
+        )
+        offered_first = ([u(2026, 12, 9, 23, 15)], [u(2026, 12, 4, 18, 15)],
+                         [u(2026, 12, 9, 23, 15), u(2026, 12, 3, 17, 45)], [u(2026, 12, 7, 21, 15)])
+        for (text, written, derived), first in zip(cases, offered_first):
+            with self.subTest(text=text):
+                self.assertEqual(self.written(text), written)
+                self.assertEqual(self.derived(text), derived)
+                self.assertEqual(parser.preferred_starts(P(text), CLOCK, bookable=fake_bookable), first)
+
+    def test_date_weekday_mismatch_a_negated_lone_weekday_gets_no_reading(self):
+        # Q5 touches the weekday's own sentence, so no time is read on it, even one on her grid
+        r = P("I can't do Thursday. Friday at 10am PT works.")
+        self.assertEqual(self.written("I can't do Thursday. Friday at 10am PT works."), [u(2026, 12, 4, 18)])
+        (thursday,) = [x for x in r.readings if x.start_utc == DEC3_10]
+        self.assertEqual((thursday.kept, thursday.rule, thursday.derived), (False, "Q5", True))
+        self.assertEqual(parser.preferred_starts(r, CLOCK, bookable=fake_bookable), [u(2026, 12, 4, 18)])
+
+    def test_date_weekday_mismatch_a_derived_time_never_leads_the_offer(self):
+        # Saturday's 3:00 PM can't be offered, so Monday's never goes first in its place; with a written time
+        # that can be offered, a derived one on her grid follows it (the spec's D5: "the date first")
+        r = P("I am out Monday. Could Shane do Saturday, December 5 at 3:00 PM Pacific?")
+        self.assertEqual(self.derived("I am out Monday. Could Shane do Saturday, December 5 at 3:00 PM Pacific?"),
+                         [u(2026, 12, 7, 23)])
+        self.assertEqual(parser.preferred_starts(r, CLOCK, bookable=fake_bookable), [])
+        r = P("I am out Monday. Could Shane do Wednesday, December 9 at 3:00 PM Pacific?")
+        self.assertEqual(parser.preferred_starts(r, CLOCK, bookable=fake_bookable),
+                         [u(2026, 12, 9, 23), u(2026, 12, 7, 23)])
+
+    def test_date_weekday_mismatch_with_its_own_date_stays_a_time_the_sender_wrote(self):
+        # "Wednesday, December 3 at 10:15am": the time was written with that day, whichever reading of it
+        self.assertEqual(self.written("Wednesday, December 3 at 10:15am PT."),
+                         [u(2026, 12, 2, 18, 15), u(2026, 12, 3, 18, 15)])
+        self.assertEqual(self.derived("Wednesday, December 3 at 10:15am PT."), [])
+
     def test_date_with_year(self):
         for d in ("December 3, 2026", "3 December 2026", "Dec 3 2026", "3-Dec-2026"):
             self.book("%s at 10am PT." % d, DEC3_10)

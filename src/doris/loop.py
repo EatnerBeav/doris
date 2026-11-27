@@ -996,7 +996,7 @@ class _Run:
         p = f.parse
         return slots.find_slots(events, now, plan.length_min, count=caps.SLOTS_PER_OFFER, exclude_starts=exclude,
                                 first=plan.first, steer_day=p.steer_day, steer_window=p.steer_window,
-                                steer_zone=p.zone or slots.PACIFIC)
+                                steer_zone=p.zone or slots.PACIFIC, derived=plan.derived)
 
     def resend(self, e, f, plan):
         """T12: the same open offer again, in both zones; no new offer record. T12 states no length,

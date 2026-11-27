@@ -13,7 +13,7 @@ from doris import ledger as ledger_mod
 from doris import receipts
 from doris.adapters import sandbox as sandbox_mod
 from doris.shapes import Slot
-from tests.unit.test_restart import OWNER, Restart, add, expire_offers
+from tests.unit.test_restart import OWNER, Restart, add, expire_offers, owner_busy
 
 UTC = dt.timezone.utc
 
@@ -241,6 +241,100 @@ class AWeekdayWithItsOwnDate(Written):
         slots = self.offered()
         self.assertEqual(slots[0], Slot(at(2026, 12, 9, 23, 15), at(2026, 12, 9, 23, 45)))
         self.assertNotIn(at(2026, 12, 7, 23, 15), [s.start_utc for s in slots])
+
+
+def answer_her(sender, key, offer_id, mid, text):
+    """The sender answers her message offer_id on their thread."""
+    name, addr = sender
+    return ("From: %s <%s>\r\n"
+            "To: Doris <doris.htm@fastmail.com>\r\n"
+            "Subject: Re: Call next week?\r\n"
+            "Date: Tue, 01 Dec 2026 09:30:00 -0800\r\n"
+            "Message-ID: <%s>\r\n"
+            "In-Reply-To: %s\r\n"
+            "References: <%s> %s\r\n"
+            "MIME-Version: 1.0\r\n"
+            "Content-Type: text/plain; charset=\"utf-8\"\r\n"
+            "Content-Transfer-Encoding: 7bit\r\n\r\n%s\r\n\r\n%s\r\n"
+            % (name, addr, mid, offer_id, key, offer_id, text, name.split()[0])).encode("ascii")
+
+
+class AWeekdayWrittenOnItsOwn(Written):
+    """A time counts as written only for the day it was written with (Fable review 2 of PR #3, finding
+    A): "I am out Monday" never gets Wednesday's 3:15 PM, offered or booked. The calendar is empty but
+    for Wed Dec 9, 3:00 to 4:00 PM Pacific."""
+    key = "20261201.0830.omar.call@tidewater.example"
+    sender = ("Omar Diaz", "omar@tidewater.example")
+    text = "I am out Monday. Could Shane do Wednesday, December 9 at 3:15 PM Pacific?"
+
+    def setUp(self):
+        super().setUp()
+        cal = os.path.join(self.root, "calendar")
+        for name in os.listdir(cal):
+            os.remove(os.path.join(cal, name))
+        owner_busy(self.root, "owner-wed", "20261209T230000Z", "20261210T000000Z")
+
+    def test_monday_never_gets_the_written_quarter_hour_offered_or_booked(self):
+        s = self.run_once()
+        self.assertEqual(self.templates_sent(self.sender[1]), ["T2"])
+        # Wednesday's 3:15 PM is busy: the day he named fills the offer, on her grid
+        self.assertEqual([sl.start_utc for sl in self.offered()],
+                         [at(2026, 12, 9, 17, 0), at(2026, 12, 9, 17, 30), at(2026, 12, 9, 18, 0)])
+        lines = receipts.read_lines(s.receipts_path)
+        (checked,) = [l["payload"] for l in lines if l["kind"] == "checked" and l["payload"]["template"] == "T2"]
+        self.assertEqual(checked["checks"]["G9"], {"status": "pass", "checked": 3, "written": False})
+        (t2,) = [m for t, m in self.sent(self.sender[1]) if t == "T2"]
+        add(self.root, "21-omar-pick.eml",
+            answer_her(self.sender, self.key, t2["Message-ID"], "20261201.0930.omar.pick@tidewater.example",
+                       "The first one works."), {"forwarded": "no"})
+        s = self.run_once()
+        self.assertEqual(self.templates_sent(self.sender[1]), ["T2", "T1"])
+        self.assertEqual(self.closing(s, "omar.pick"), ["book"])
+        (event,) = self.events()
+        with open(os.path.join(self.root, "calendar", event), "rb") as fh:
+            ics = fh.read().decode("ascii")
+        self.assertIn("DTSTART:20261209T170000Z", ics)
+        self.assertNotIn("20261207T231500Z", ics)
+
+
+class FourWeekdaysWrittenOnTheirOwn(Restart):
+    """The review's four mails on an empty calendar (finding A): each offer leads with the time the sender
+    wrote, on the day they wrote it with, and a weekday written on its own never gets that quarter hour."""
+    MAILS = (
+        (("Omar Diaz", "omar@tidewater.example"), "20261201.0830.omar.call@tidewater.example",
+         "I am out Monday. Could Shane do Wednesday, December 9 at 3:15 PM Pacific?",
+         [at(2026, 12, 9, 23, 15), at(2026, 12, 9, 17, 0), at(2026, 12, 9, 17, 30)]),
+        (("Ruth Okafor", "ruth@fernhill.example"), "20261201.0831.ruth.call@fernhill.example",
+         "I can't do Thursday. Friday at 10:15 AM Pacific works.",
+         [at(2026, 12, 4, 18, 15), at(2026, 12, 4, 17, 0), at(2026, 12, 4, 17, 30)]),
+        (("Theo Grant", "theo@quarrylane.example"), "20261201.0832.theo.call@quarrylane.example",
+         "Tuesday is bad, Wednesday December 9 at 3:15 PM Pacific or Thursday at 9:45 AM Pacific.",
+         [at(2026, 12, 9, 23, 15), at(2026, 12, 3, 17, 45), at(2026, 12, 9, 17, 0)]),
+        (("Ines Moreau", "ines@saltmarsh.example"), "20261201.0833.ines.call@saltmarsh.example",
+         "I am travelling Thursday and Friday. Monday December 7 at 1:15 PM Pacific?",
+         [at(2026, 12, 7, 21, 15), at(2026, 12, 7, 17, 0), at(2026, 12, 7, 17, 30)]),
+    )
+
+    def setUp(self):
+        super().setUp()
+        cal = os.path.join(self.root, "calendar")
+        for name in os.listdir(cal):
+            os.remove(os.path.join(cal, name))
+        for i, (sender, key, text, _) in enumerate(self.MAILS):
+            add(self.root, "2%d-request.eml" % i, request(sender, key, text), {"forwarded": "yes"})
+
+    def test_each_offer_leads_with_the_senders_own_time_and_no_other_day_gets_it(self):
+        self.run_once()
+        led = ledger_mod.Ledger(os.path.join(self.state, "ledger.sqlite"))
+        try:
+            for sender, key, text, expected in self.MAILS:
+                with self.subTest(text=text):
+                    self.assertEqual(self.templates_sent(sender[1]), ["T2"])
+                    (offer,) = led.open_offers("<%s>" % key, at(2026, 12, 1, 17, 0))
+                    self.assertEqual([s.start_utc for s in offer["slots"]], expected)
+        finally:
+            led.close()
+        self.assertEqual(self.events(), [])
 
 
 if __name__ == "__main__":

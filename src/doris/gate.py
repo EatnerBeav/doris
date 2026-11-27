@@ -426,11 +426,13 @@ def _open_offer_slots(action, ctx):
 def _written_starts(ctx, open_pairs):
     """The starts G9 reads as times the sender wrote: the parser's kept readings of the message
     being answered, and every start of an open offer to that sender on the thread (each passed G9
-    when offered)."""
+    when offered). A derived reading (D5 moving a time onto a weekday written apart from it) is no
+    time the sender wrote; a reading that does not say it is not derived counts as derived."""
     starts = {start for start, _ in open_pairs}
     parse = _field(ctx, "parse")
     if parse is not None:
-        starts.update(r.start_utc for r in parse.readings if r.kept is True and _aware(r.start_utc))
+        starts.update(r.start_utc for r in parse.readings
+                      if r.kept is True and getattr(r, "derived", None) is False and _aware(r.start_utc))
     return starts
 
 
@@ -438,7 +440,8 @@ def _g9_bookable_interval(action, ctx):
     """G9. Bookable interval (rulings 3, 5, 6): start and end inside Mon to Fri 9:00 AM to 5:00 PM
     Pacific, start 24 hours to 30 days from now, not on the holiday list, length allowed. A time the
     sender wrote may start on any quarter hour: a direct booking, the parser's kept readings offered
-    back to them, and a start an open offer to them on the thread already holds. A slot she offers on
+    back to them (never a derived one: a time a weekday written on its own took from another day), and
+    a start an open offer to them on the thread already holds. A slot she offers on
     her own starts on the hour or half hour. A pick (any booking not marked direct) books only a slot
     an open offer to its sender on its thread holds, exactly as offered, and keeps the grid it was
     offered on. Every offered slot is checked, not just the first. The receipt says written for a

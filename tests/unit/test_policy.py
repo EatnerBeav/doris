@@ -87,6 +87,19 @@ class MeetingRequest(WhyIsListed):
         p = policy.decide(facts(parse=parse("offer", failed="B7", instant=WED_11)))
         self.assertEqual(p.first, (WED_11,))
 
+    def test_a_derived_reading_is_never_one_of_the_senders_own_times(self):
+        # D5's cross-pair (Fable review 2 of PR #3, finding A): it follows the sender's own times, never
+        # among them, in an offer and in a move's fresh times
+        mon = WED_11 + dt.timedelta(days=5)
+        readings = [Reading(start_utc=WED_11, date=None, zone="Pacific", kept=True, rule="H1"),
+                    Reading(start_utc=mon, date=None, zone="Pacific", kept=True, rule="H1", derived=True)]
+        p = parse("offer", failed="B2")
+        p.readings = readings
+        offer_ = policy.decide(facts(parse=p))
+        self.assertEqual((offer_.offer_family, offer_.first, offer_.derived), ("T2", (WED_11,), (mon,)))
+        move = policy.decide(facts("move", parse=p, thread=thread(live_booking=booking())))
+        self.assertEqual((move.offer_family, move.first, move.derived), ("T18", (WED_11,), (mon,)))
+
     def test_longer_than_an_hour_holds(self):
         for rule in ("over_60", "open_ended"):
             p = policy.decide(facts(parse=parse(length_rule=rule)))
