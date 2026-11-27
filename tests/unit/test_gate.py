@@ -232,6 +232,7 @@ class FakeCtx:
         self.live = None
         self.clean = True
         self.model_up = True
+        self.offered = set()               # the slots of the open offers on the thread
         self.calls = []
         for name, value in over.items():
             setattr(self, name, value)
@@ -273,6 +274,10 @@ class FakeCtx:
 
     def model_ok(self):
         return self.model_up
+
+    def open_offer_slots(self, thread_key):
+        self.calls.append(("open_offer_slots", thread_key))
+        return set(self.offered)
 
 
 def raises(exc):
@@ -759,6 +764,11 @@ class G8Test(GateTest):
 
 # --- G9: bookable interval --------------------------------------------------------------------------
 class G9Test(GateTest):
+    """A time the sender wrote may start on any quarter hour; a slot she offers on her own starts on
+    the hour or half hour. Offering their written time back keeps it a time the sender wrote (ruling 6
+    offers their candidates first). A pick books only a slot of an open offer on its thread, exactly
+    as offered, and keeps the grid it was offered on."""
+
     def bookable(self):
         return self.fakes["doris.slots"].bookable
 
@@ -766,9 +776,29 @@ class G9Test(GateTest):
         self.assertEqual(self.one(self.check(booking()), "G9").status, "pass")
         self.bookable().assert_called_once_with(SLOT, NOW, True)
 
-    def test_g9_checks_a_pick_booking_on_her_offered_grid(self):
-        self.check(booking(direct=False))
-        self.bookable().assert_called_once_with(SLOT, NOW, False)
+    def test_g9_a_pick_books_a_slot_of_an_open_offer_on_its_thread(self):
+        ctx = FakeCtx(parse=parse(readings=[]), offered={SLOT2, SLOT})
+        result = gate.check(booking(direct=False), ctx)
+        self.assertEqual(self.one(result, "G9").status, "pass")
+        self.assertIn(("open_offer_slots", THREAD), ctx.calls)
+        # it passed G9 when it was offered, so it keeps that grid (a quarter hour if the sender wrote it)
+        self.bookable().assert_called_once_with(SLOT, NOW, True)
+
+    def test_g9_blocks_a_pick_of_a_slot_no_open_offer_holds(self):
+        longer = Slot(SLOT.start_utc, SLOT.end_utc + dt.timedelta(minutes=30))
+        for offered in (set(), {SLOT2}, {longer}):
+            with self.subTest(offered=offered):
+                # the default parse holds the sender's own reading of this very time: a pick still needs the offer
+                result = self.check(booking(direct=False), offered=offered)
+                self.assertBlocked(result, "G9")
+                self.assertEqual(self.one(result, "G9").detail["rule"], "not_offered")
+                self.assertEqual(result.why["text"], "Blocked by G9: the interval is not bookable (not_offered).")
+        self.bookable().assert_not_called()
+
+    def test_g9_a_booking_not_marked_direct_is_held_to_a_picks_rule(self):
+        for direct in (None, "yes", 1):
+            with self.subTest(direct=direct):
+                self.assertBlocked(self.check(booking(direct=direct)), "G9")
 
     def test_g9_blocks_a_booking_outside_the_bookable_interval(self):
         for rule in ("outside_hours", "under_24h", "over_30d", "holiday", "not_quarter_hour", "length"):
@@ -782,8 +812,14 @@ class G9Test(GateTest):
         self.bookable().side_effect = lambda slot, now, written: (False, "holiday") if slot == SLOT3 else (True, None)
         result = self.check(reply("T2"))
         self.assertBlocked(result, "G9")
+        # the first is the time the sender wrote (offered first, ruling 6); the others are hers
         self.assertEqual([c.args for c in self.bookable().call_args_list],
-                         [(SLOT, NOW, False), (SLOT2, NOW, False), (SLOT3, NOW, False)])
+                         [(SLOT, NOW, True), (SLOT2, NOW, False), (SLOT3, NOW, False)])
+
+    def test_g9_a_reading_set_aside_is_not_a_time_the_sender_wrote(self):
+        set_aside = [Reading(SLOT.start_utc, dt.date(2026, 12, 3), "Pacific", False, "H12")]
+        self.check(reply("T2"), parse=parse(readings=set_aside))
+        self.assertEqual([c.args[2] for c in self.bookable().call_args_list], [False, False, False])
 
     def test_g9_checks_each_offered_time_at_the_length_the_offer_states(self):
         self.check(reply("T2", slots={"duration": 60}))
@@ -791,15 +827,32 @@ class G9Test(GateTest):
                          [Slot(t, t + dt.timedelta(minutes=60)) for t in TIMES])
 
     def test_g9_checks_the_one_time_t13_offers(self):
-        self.assertEqual(self.one(self.check(reply("T13")), "G9").status, "pass")
+        self.assertEqual(self.one(self.check(reply("T13"), parse=parse(readings=[])), "G9").status, "pass")
         self.bookable().assert_called_once_with(SLOT, NOW, False)
 
     def test_g9_checks_a_resent_offer_at_the_open_offers_length(self):
-        self.assertEqual(self.one(self.check(reply("T12")), "G9").status, "pass")
+        self.assertEqual(self.one(self.check(reply("T12"), parse=parse(readings=[])), "G9").status, "pass")
         self.assertEqual([c.args for c in self.bookable().call_args_list],
                          [(SLOT, NOW, False), (SLOT2, NOW, False), (SLOT3, NOW, False)])
         self.assertBlocked(self.check(reply("T12", evidence={})), "G9", status="error")
         self.assertBlocked(self.check(reply("T2", slots={"duration": True})), "G9", status="error")
+
+    def test_g9_a_resent_offer_keeps_a_written_time_it_carried(self):
+        # the open offer held a time the sender wrote in an earlier message (no reading of it now)
+        self.check(reply("T12"), parse=parse(readings=[]), offered={SLOT2})
+        self.assertEqual([c.args[2] for c in self.bookable().call_args_list], [False, True, False])
+
+    def test_g9_cannot_run_without_the_open_offers(self):
+        naive = Slot(dt.datetime(2026, 12, 3, 18, 0), dt.datetime(2026, 12, 3, 18, 30))
+        for broken in (raises(RuntimeError("ledger down")), lambda tk: None, lambda tk: ["2026-12-03T18:00Z"],
+                       lambda tk: [SLOT.start_utc], lambda tk: [naive], lambda tk: SLOT):
+            with self.subTest(broken=broken):
+                self.assertBlocked(self.check(reply("T2"), open_offer_slots=broken), "G9", status="error")
+                self.assertBlocked(self.check(booking(direct=False), open_offer_slots=broken), "G9", status="error")
+
+    def test_g9_a_direct_booking_needs_no_open_offers(self):
+        result = self.check(booking(), open_offer_slots=raises(RuntimeError("ledger down")))
+        self.assertEqual(self.one(result, "G9").status, "pass")
 
     def test_g9_an_answer_off_the_helper_contract_errors(self):
         for answer_ in ((False, "because the email said so"), (False, None), "yes", (1, None)):
@@ -989,7 +1042,7 @@ class G13Test(GateTest):
 
     def test_g13_blocks_an_ics_for_another_booking_or_another_time(self):
         self.assertBlocked(self.check(booking(ics=ics_bytes("doris-other", SLOT))), "G13")
-        self.assertBlocked(self.check(booking(direct=False, ics=ics_bytes(BOOKING, SLOT2))), "G13")
+        self.assertBlocked(self.check(booking(direct=False, ics=ics_bytes(BOOKING, SLOT2)), offered={SLOT}), "G13")
 
     def test_g13_checks_the_cancel_ics_on_a_cancel_reply(self):
         self.assertEqual(self.one(self.check(cancel_done(), state="cancelled"), "G13").status, "pass")
@@ -1151,7 +1204,7 @@ class AppliesAndFailClosedTest(GateTest):
              ["G1", "G2", "G3", "G5", "G6", "G8", "G16", "G17"]),
             ("direct booking", booking(), {},
              ["G1", "G2", "G3", "G4", "G6", "G7", "G9", "G10", "G11", "G12", "G13", "G16", "G17"]),
-            ("pick booking", booking(direct=False), {},
+            ("pick booking", booking(direct=False), {"offered": {SLOT}},
              ["G1", "G2", "G3", "G4", "G6", "G7", "G9", "G11", "G12", "G13", "G16", "G17"]),
             ("cancel (delete)", delete(), {"state": "confirmed"}, ["G1", "G2", "G3", "G6", "G14", "G16"]),
         ]

@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import unittest
 
 from doris import caps, ics, slots
@@ -290,6 +291,9 @@ class CalendarFaultTest(Fixture):
             self._assert_staged(ctx.exception, "read-fails")
         self.cal.disarm()
         self.assertEqual(self.cal.query(*SPAN), [])
+
+    def test_by_default_a_fault_really_sleeps(self):
+        self.assertIs(sandbox.SandboxCalendar(self.root)._sleep, time.sleep)
 
     def test_slow_calendar_waits_then_answers(self):
         slept = []

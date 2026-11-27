@@ -407,21 +407,53 @@ def _g8_approved_template(action, ctx):
 
 
 # --- G9 to G13: what goes on the calendar ------------------------------------------------------
+def _open_offer_slots(action, ctx):
+    """The slots of the open offers on the action's thread, from the ledger, as (start, end) pairs.
+    Anything but a collection of Slots with aware times is off contract: the check cannot run."""
+    answer = _need(ctx, "open_offer_slots")(action.thread_key)
+    if not isinstance(answer, (set, frozenset, list, tuple)):
+        raise _OffContract("open_offer_slots")
+    pairs = set()
+    for slot in answer:
+        if not isinstance(slot, Slot) or not _aware(slot.start_utc) or not _aware(slot.end_utc):
+            raise _OffContract("open_offer_slots")
+        pairs.add((slot.start_utc, slot.end_utc))
+    return pairs
+
+
+def _written_starts(ctx, open_pairs):
+    """The starts G9 reads as times the sender wrote: the parser's kept readings of the message
+    being answered, and every start of an open offer on the thread (each passed G9 when offered)."""
+    starts = {start for start, _ in open_pairs}
+    parse = _field(ctx, "parse")
+    if parse is not None:
+        starts.update(r.start_utc for r in parse.readings if r.kept is True and _aware(r.start_utc))
+    return starts
+
+
 def _g9_bookable_interval(action, ctx):
-    """G9. Bookable interval (rulings 3, 5): start and end inside Mon to Fri 9:00 AM to 5:00 PM
+    """G9. Bookable interval (rulings 3, 5, 6): start and end inside Mon to Fri 9:00 AM to 5:00 PM
     Pacific, start 24 hours to 30 days from now, not on the holiday list, length allowed. A time the
-    sender wrote (a direct booking) may start on any quarter hour; a slot she offers, and a pick of
-    one, starts on the hour or half hour. Every offered slot is checked, not just the first."""
+    sender wrote may start on any quarter hour: a direct booking, the parser's kept readings offered
+    back to them, and a start an open offer on the thread already holds. A slot she offers on her own
+    starts on the hour or half hour. A pick (any booking not marked direct) books only a slot an open
+    offer on its thread holds, exactly as offered, and keeps the grid it was offered on. Every offered
+    slot is checked, not just the first."""
     slots = _helper("slots")
     now = _now(ctx)
     if action.kind == "calendar_create":
-        to_check = [(_span(action), action.direct is True)]
+        span = _span(action)
+        if action.direct is not True:
+            if (span.start_utc, span.end_utc) not in _open_offer_slots(action, ctx):
+                return _fail(rule="not_offered", start=_iso(span.start_utc), written=False)
+        to_check = [(span, True)]
     else:
         offered = _offered_times(action)
         if not _times_ok(offered):
             raise _Missing("offered_times")
         length = _dt.timedelta(minutes=_offer_length(action))
-        to_check = [(Slot(start, start + length), False) for start in offered]
+        written = _written_starts(ctx, _open_offer_slots(action, ctx))
+        to_check = [(Slot(start, start + length), start in written) for start in offered]
     for slot, written in to_check:
         ok, rule = slots.bookable(slot, now, written)
         if ok is True:

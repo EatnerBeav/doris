@@ -14,7 +14,7 @@ import re
 
 # Words a slot may take when it is not a number, a time or an id.
 RULE_WORDS = frozenset({
-    "overlap", "outside_hours", "under_24h", "over_30d", "holiday", "not_quarter_hour", "length",
+    "overlap", "outside_hours", "under_24h", "over_30d", "holiday", "not_quarter_hour", "length", "not_offered",
     "over_60", "open_ended", "all_day", "recurring", "multiple", "zero",
     "calendar_receipt", "bounce", "list", "auto", "self",
     "cc_only", "bcc", "direct_new_thread", "forged_thread",

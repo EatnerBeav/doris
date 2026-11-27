@@ -873,9 +873,15 @@ class _Run:
         if b is not None and b["state"] == "intent":
             self.ledger.set_booking_state(bid, "blocked")
 
+    def open_offer_slots(self, thread_key):
+        """Every slot of the thread's open offers, as G9 reads them."""
+        return [s for o in self.ledger.open_offers(thread_key, self.now()) for s in o["slots"]]
+
     def book_fresh(self, e, f, plan, bid):
         now, slot, msg = self.now(), plan.slot, e.msg
-        ok, rule = slots.bookable(slot, now, written=plan.direct)
+        # a pick keeps the grid its slot was offered on (G9): a time the sender wrote may sit on a quarter hour
+        written = plan.direct is True or slot in self.open_offer_slots(e.thread)
+        ok, rule = slots.bookable(slot, now, written=written)
         if not ok:
             self.drop_booking(bid)
             return self.act(e, f, policy.on_unavailable(plan, rule, f.thread))
@@ -1140,6 +1146,7 @@ class _Run:
             spend_usd=lambda: led.spend(self.run_id), silenced=led.is_silenced,
             counts=lambda thread_key: self.counts(thread_key, action),
             fresh_read=lambda slot: self.read(e, slot.start_utc, slot.end_utc), booking=led.booking,
+            open_offer_slots=lambda thread_key: self.open_offer_slots(thread_key),
             live_booking_for_thread=led.live_booking_for_thread,
             readback_clean=lambda bid: bid in self.clean_readbacks, model_ok=lambda: not self.model_down,
             meeting_link=self.link())
