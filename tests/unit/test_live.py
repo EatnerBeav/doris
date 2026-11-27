@@ -24,7 +24,7 @@ import xml.etree.ElementTree as ET
 from unittest import mock
 from xml.sax.saxutils import escape
 
-from doris import caps, ics, mail as mail_mod, screens, slots
+from doris import caps, compose, ics, mail as mail_mod, screens, slots
 from doris.adapters import live
 from doris.adapters.base import CalendarAdapter, MailAdapter
 from doris.adapters.sandbox import NotHers
@@ -1031,6 +1031,28 @@ def reply_bytes(mid=MID, sender=DORIS, extra=b""):
             b"\r\nHello.\r\n.a line that starts with a dot\r\n..and one with two\r\n")
 
 
+def mime(*parts, kind="multipart/mixed"):
+    """A message from her: the (part headers, part body) pairs inside one multipart of this kind,
+    or (kind None) one part alone."""
+    head = (b"From: " + DORIS.encode() + b"\r\nTo: " + PROSPECT.encode() + b"\r\nSubject: Re: hello\r\n"
+            b"Date: Fri, 27 Nov 2026 18:00:00 +0000\r\nMessage-ID: " + MID.encode() + b"\r\nMIME-Version: 1.0\r\n")
+    if kind is None:
+        (headers, body), = parts
+        return head + headers + b"\r\n" + body
+    out = head + b'Content-Type: ' + kind.encode() + b'; boundary="b0"\r\n\r\n'
+    for headers, body in parts:
+        out += b"--b0\r\n" + headers + b"\r\n" + body + b"\r\n"
+    return out + b"--b0--\r\n"
+
+
+TEXT_PART = (b'Content-Type: text/plain; charset="utf-8"\r\n', b"Hello.\r\n")
+
+
+def ics_part(data, content_type=b'text/calendar; charset="utf-8"; method=PUBLISH'):
+    return (b"Content-Type: " + content_type + b'\r\nContent-Disposition: attachment; filename="call.ics"\r\n'
+            b"Content-Transfer-Encoding: base64\r\n", base64.encodebytes(data).replace(b"\n", b"\r\n"))
+
+
 class SmtpFixture(unittest.TestCase):
 
     def setUp(self):
@@ -1099,6 +1121,39 @@ class SendTest(SmtpFixture):
         self.refused(b"", [PROSPECT], MID)
         self.refused("text, not bytes", [PROSPECT], MID)
         self.assertEqual(self.smtp.sessions, [])
+
+    def test_a_part_other_than_text_or_her_own_ics_is_refused_before_connecting(self):
+        """The only-her-.ics rule holds here too, not only upstream: text/plain and her own .ics."""
+        attendee = her_event(method="PUBLISH").replace(b"STATUS:CONFIRMED",
+                                                       b"STATUS:CONFIRMED\r\nATTENDEE:mailto:x@example.com")
+        for raw in (
+                mime(TEXT_PART, (b'Content-Type: application/pdf\r\nContent-Disposition: attachment; filename="a.pdf"'
+                                 b"\r\nContent-Transfer-Encoding: base64\r\n", base64.encodebytes(b"%PDF-1.4"))),
+                mime(TEXT_PART, (b'Content-Type: text/html; charset="utf-8"\r\n', b"<p>Hello.</p>"),
+                     kind="multipart/alternative"),
+                mime(TEXT_PART, ics_part(attendee)),
+                mime(TEXT_PART, ics_part(b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n")),
+                mime(TEXT_PART, (b"Content-Type: message/rfc822\r\n", eml(1))),
+                mime(TEXT_PART, (b'Content-Type: text/plain\r\nContent-Disposition: attachment; filename="notes.txt"\r\n',
+                                 b"a file, not her words")),
+                mime(TEXT_PART, (b'Content-Type: multipart/mixed; boundary="b1"\r\n',
+                                 b"--b1\r\nContent-Type: text/plain\r\n\r\nnested\r\n--b1--")),
+                mime((b"Content-Type: text/html\r\n", b"<p>Hello.</p>\r\n"), kind=None),
+                mime((b"Content-Type: application/octet-stream\r\n", b"\x00\x01"), kind=None)):
+            err = self.refused(raw, [PROSPECT], MID)
+            self.assertIn("refused before connecting", str(err))
+        self.assertEqual(self.smtp.sessions, [])
+
+    def test_her_reply_with_her_own_ics_goes_as_the_composer_builds_it(self):
+        headers = [("From", DORIS), ("To", PROSPECT), ("Subject", "Re: hello"),
+                   ("Date", "Fri, 27 Nov 2026 18:00:00 +0000"), ("Message-ID", MID), ("Auto-Submitted", "auto-replied")]
+        for method, status in (("PUBLISH", "CONFIRMED"), ("CANCEL", "CANCELLED")):
+            data = ics.build_event(BID, SLOT, LINK, status, 1, u(2026, 11, 27, 12), method)
+            raw = compose._build(headers, compose.with_signature("Booked."), data, method, MID)
+            self.mail.send(raw, [PROSPECT, OWNER], MID)
+            self.assertEqual(self.smtp.delivered[-1][2], raw)
+        self.mail.send(mime(TEXT_PART, ics_part(her_event(method="PUBLISH"))), [PROSPECT], MID)
+        self.assertEqual(len(self.smtp.delivered), 3)
 
     def test_a_bad_envelope_is_refused_before_connecting(self):
         for bad in ([], PROSPECT, ["not an address"], [PROSPECT + "\r\nRCPT TO:<x@example.com>"], [None],

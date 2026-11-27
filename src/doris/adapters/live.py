@@ -26,6 +26,7 @@ import base64
 import contextlib
 import datetime as _dt
 import email.parser
+import email.policy
 import email.utils
 import http.client
 import imaplib
@@ -88,6 +89,7 @@ _IMAP_FAILURES = (imaplib.IMAP4.error, OSError, EOFError, ValueError)
 _SMTP_FAILURES = (smtplib.SMTPException, OSError, ValueError)
 _HEADER_FIELD = re.compile(rb"([!-9;-~]+)[ \t]*:")  # a field name; RFC 5322's obsolete syntax allows blanks before the colon
 _NEVER_HEADERS = ("bcc", "resent-bcc")             # the owner's copy rides on the envelope, never in a header
+_MIME_HEADERS = ("Content-Type", "Content-Transfer-Encoding", "Content-Disposition")
 EHLO_NAME = "[127.0.0.1]"                           # an address literal: the EHLO never names this machine
 
 
@@ -372,6 +374,36 @@ def _dot_stuffed(message):
     return payload + b".\r\n"
 
 
+def _parts_ok(message):
+    """True when every part of the message is inline text/plain (no file name) or her own .ics
+    (text/calendar whose content is her fixed form, ics.fields_ok), alone or inside one
+    multipart/mixed, and the MIME structure reads without a defect or a doubled Content-* header
+    (two readers could see two different messages). Never raises: what it cannot read is False."""
+    try:
+        root = email.parser.BytesParser(policy=email.policy.compat32).parsebytes(message)
+        if root.is_multipart():
+            if root.get_content_type() != "multipart/mixed":
+                return False
+            leaves = root.get_payload()
+        else:
+            leaves = [root]
+        for part in [root] + list(leaves):
+            if part.defects or any(len(part.get_all(name) or ()) > 1 for name in _MIME_HEADERS):
+                return False
+        for part in leaves:
+            kind = part.get_content_type()
+            if part.is_multipart() or kind not in ("text/plain", "text/calendar"):
+                return False
+            if kind == "text/plain" and (part.get_filename() is not None
+                                         or part.get_content_disposition() == "attachment"):
+                return False
+            if kind == "text/calendar" and not ics.fields_ok(part.get_payload(decode=True)):
+                return False
+        return True
+    except Exception:          # a check that cannot run fails closed
+        return False
+
+
 def _message_ids(header_bytes):
     headers = email.parser.BytesHeaderParser().parsebytes(bytes(header_bytes))
     return {_norm_mid(str(value)) for value in headers.get_all("Message-ID") or ()}
@@ -649,7 +681,8 @@ class LiveMail(MailAdapter):
     def _checked(self, raw, envelope_to, message_id, step):
         """(the message with CRLF line ends, the recipients), or a MailError before any connection:
         bytes only; no Bcc or Resent-Bcc header; exactly one From, hers; exactly one Message-ID,
-        the one the caller recorded (find_in_sent looks for it); every recipient one bare address."""
+        the one the caller recorded (find_in_sent looks for it); every recipient one bare address;
+        every part text/plain or her own .ics (_parts_ok)."""
         def refuse(why):
             return _failure(MailError, step, detail="refused before connecting: " + why)
         if not isinstance(raw, (bytes, bytearray)) or not raw:
@@ -669,6 +702,8 @@ class LiveMail(MailAdapter):
         mids = [_norm_mid(value.decode("ascii", "replace")) for name, value in fields if name == "message-id"]
         if not _MESSAGE_ID.match(target) or mids != [target]:
             raise refuse("the message does not carry exactly the Message-ID given")
+        if not _parts_ok(message):
+            raise refuse("a part is not text/plain or her own .ics")
         if (not isinstance(envelope_to, (list, tuple)) or not envelope_to
                 or not all(isinstance(addr, str) and _ADDRESS.match(addr) for addr in envelope_to)):
             raise refuse("the envelope is not a list of bare addresses")
