@@ -40,7 +40,7 @@ from . import why as why_mod
 from .shapes import UTC, Action, AlreadyExists, CalendarError, CalendarTimeout, MailError, SendUnknown, Slot
 
 CYCLE = _dt.timedelta(minutes=10)
-DIGEST_AT = _dt.time(17, 0)            # Pacific: the demo's digest goes at 5:00 PM (or after the last cycle)
+DIGEST_AT = _dt.time(17, 0)            # Pacific: the digest goes at 5:00 PM (the demo's, or after its last cycle)
 SANDBOX_OWNER = "whizz@fastmail.com"   # the sandbox's owner and Doris addresses (sandbox/README.md)
 SANDBOX_DORIS = "doris.htm@fastmail.com"
 WINDOW = caps.MAX_HORIZON + _dt.timedelta(days=1)    # the span an offer reads
@@ -92,7 +92,8 @@ class RunConfig:
     record_path: Optional[str] = None       # live: where answers are recorded
     clock_mode: str = "fixed"               # fixed: stays at clock.txt; advance: steps cycle by cycle
     budget_usd: float = caps.BUDGET_USD_PER_RUN
-    digest: bool = False                    # send S2 when the run ends (the demo does)
+    digest: bool = False                    # S2: when a finite run ends (the demo), or each day from 5:00 PM
+                                            # Pacific in a run until stopped (`run`)
     supervised: bool = False                # the worker under the kill switch: a halt exits, the parent records it
     retry_wait_s: Optional[float] = None    # None: caps.CALENDAR_RETRY_WAIT_S
     calendar_timeout_s: Optional[float] = None   # sandbox calendar's wait: None the adapter's own; demo caps'
@@ -599,8 +600,10 @@ class _Run:
     def passes(self):
         """cfg.cycles passes over the inbox (None: until stopped), each after a wait for her next
         cycle. On the sandbox's advancing clock a later pass first steps her clock to her next cycle
-        and reads what is in by then (a judge's new email), before any later arrival."""
+        and reads what is in by then (a judge's new email), before any later arrival. In a run until
+        stopped with the digest on (`run`), each pass ends with the day's digest once it is due."""
         self.drain()
+        self.daily_digest()
         done = 1
         while self.cfg.cycles is None or done < self.cfg.cycles:
             self.wait_for_cycle()
@@ -608,6 +611,7 @@ class _Run:
                 self.t = next_cycle(self.t + _dt.timedelta(seconds=1))
                 self.batch(self.fetch())
             self.drain()
+            self.daily_digest()
             done += 1
 
     def wait_for_cycle(self):
@@ -1628,14 +1632,40 @@ class _Run:
                                          cost)
 
     # --- the digest ----------------------------------------------------------------------------
-    def send_digest(self):
-        """S2 at the end of the run, counted from this run's receipts only, at 5:00 PM Pacific or later."""
+    def end_of_run_digest(self):
+        """The demo's S2 at the end of the run, counted from this run's receipts only, at 5:00 PM
+        Pacific or later."""
         if self.t is not None:
             day = zones.to_local(self.t, "Pacific").date()
             self.t = max(self.t, zones.to_utc(_dt.datetime.combine(day, DIGEST_AT), "Pacific"))
         now = self.now()
         lines = receipts.read_lines(self.receipts_path)
-        ds = digest.build(lines, now, verified=receipts.verify(self.receipts_path).ok)
+        self.send_digest(lines, receipts.verify(self.receipts_path).ok, now)
+
+    def daily_digest(self):
+        """A run until stopped (`run`): at her first pass at or after 5:00 PM Pacific, that Pacific
+        date's S2, once. The ledger answers first: once the server took the date's digest (handed_over
+        or confirmed, decision 76), a pass reads, writes and sends nothing more for it, whatever
+        restarts or kills came between."""
+        if not (self.cfg.digest and self.cfg.cycles is None):
+            return
+        now = self.now()                # one instant: the date she checks is the date she sends
+        if zones.to_local(now, "Pacific").time() < DIGEST_AT:
+            return
+        sent = self.ledger.send(compose.new_message_id(self.cfg.doris_addr, compose.digest_key(now), "S2", 1))
+        if sent is not None and sent["state"] in ledger_mod.SENT_STATES:
+            return
+        lines, verified = self.digest_window()
+        self.send_digest(lines, verified, now)
+
+    def digest_window(self):
+        """(receipt lines, verified) for the daily digest: this run's lines."""
+        return receipts.read_lines(self.receipts_path), receipts.verify(self.receipts_path).ok
+
+    def send_digest(self, lines, verified, now):
+        """S2 to the owner, counted from these receipt lines (verified: the files they came from
+        verify), dated `now`: through the gate, to the owner only, sent once. The one way a digest goes."""
+        ds = digest.build(lines, now, verified=verified)
         mid = compose.new_message_id(self.cfg.doris_addr, compose.digest_key(now), "S2", 1)
         try:
             raw, body = compose.owner_notice("S2", ds, self.cfg.doris_addr, self.cfg.owner_addr, mid, now)
@@ -1676,8 +1706,8 @@ def run(cfg):
         try:
             r.start()
             r.passes()
-            if cfg.digest:
-                r.send_digest()
+            if cfg.digest:              # a finite run (the demo); a run until stopped sends each day's in passes()
+                r.end_of_run_digest()
         except Halted as h:
             r.summary.halted = h.cause
             if cfg.supervised:

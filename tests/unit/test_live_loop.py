@@ -24,7 +24,7 @@ import unittest
 from unittest import mock
 
 from doris import __main__ as cli
-from doris import caps, ledger as ledger_mod
+from doris import caps, compose, ledger as ledger_mod
 from doris import loop, model as model_mod, netguard, paths, receipts, sentrecord, smoke, supervisor, templates
 from doris.adapters import live
 from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, FakeSMTP, u
@@ -596,6 +596,47 @@ class LongRunTest(LiveFixture):
         kinds = [l["kind"] for l in receipts.read_lines(s.receipts_path)]
         self.assertEqual(kinds[-2:], ["halted", "summary"])
         self.assertTrue(s.verify_ok)
+
+    def owner_mail(self):
+        return [email.message_from_bytes(data, policy=email.policy.default)
+                for _, rcpts, data in self.smtp.delivered if rcpts == [OWNER]]
+
+    def test_the_days_digest_goes_at_her_first_cycle_from_five_pacific_on_the_wall_clock(self):
+        from doris import supervisor
+        self.go(fresh=True)                                  # Tue Dec 1, 8:00 AM Pacific
+        self.clock = u(2026, 12, 2, 0, 40)                   # 4:40 PM Pacific
+        waits = []
+
+        def ten_minutes_on():
+            waits.append(True)
+            self.clock += dt.timedelta(minutes=10)
+            if len(waits) == 4:
+                supervisor.request_stop("live", "cli", state_dir=self.state)
+
+        self.use(FakeTime(1000.0, ten_minutes_on))
+        s = self.go(cycles=None, cycle_s=1.0, digest=True)  # her cycles at 4:40, 4:50, 5:00, 5:10 PM
+        self.assertEqual(s.halted, "cli")
+        self.assertEqual([(str(m["Date"]), str(m["Subject"])) for m in self.owner_mail()],
+                         [("Wed, 02 Dec 2026 01:00:00 +0000", "Handled 0, held 0, human approvals 0. Tue Dec 1")])
+
+    def test_a_digest_due_just_before_midnight_keeps_its_date_when_it_goes_after(self):
+        from doris import supervisor
+        self.go(fresh=True)
+        self.clock = u(2026, 12, 2, 7, 59, 59)               # Tue Dec 1, 11:59:59 PM Pacific: due, none sent
+        real, turned = receipts.read_lines, []
+
+        def slow_read(path):                                 # her receipts take two seconds: Wednesday now
+            if not turned:
+                turned.append(path)
+                self.clock = u(2026, 12, 2, 8, 0, 1)
+            return real(path)
+
+        self.use(FakeTime(1000.0, lambda: supervisor.request_stop("live", "cli", state_dir=self.state)))
+        with mock.patch.object(receipts, "read_lines", slow_read):
+            self.go(cycles=None, cycle_s=1.0, digest=True)
+        self.assertEqual([(str(m["Subject"]), str(m["Message-ID"])) for m in self.owner_mail()],
+                         [("Handled 0, held 0, human approvals 0. Tue Dec 1",
+                           compose.new_message_id(DORIS, "digest:2026-12-01", "S2", 1))])
 
     def test_a_run_needs_at_least_one_pass_and_a_positive_cycle(self):
         for extra in ({"cycles": 0}, {"cycle_s": 0}, {"cycle_s": -1.0}):
