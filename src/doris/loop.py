@@ -210,6 +210,7 @@ class _Entry:
         self.cost = None
         self.action_id = None
         self.closed = False          # its closing line is written: one per message, never two
+        self.offers_superseded = 0   # the sender's earlier open offers its own offer closed
 
     def settled_by(self):
         for r in self.results:
@@ -807,7 +808,8 @@ class _Run:
             return self.move(e, f, plan)
         if a == "hold":
             return self.hold(e, plan.hold_code, plan.why, f)
-        if a == "replied":                      # its reply went out before a kill: nothing more to do
+        if a == "replied":                      # its reply went out before a kill: nothing more to send
+            self.supersede(e, plan.template)    # the kill may have come before its offer closed the earlier one
             return self.close(e, "decided", plan.outcome, plan.why, template=plan.template)
         if a == "thread_held":
             return self.close(e, "held", plan.outcome, plan.why)
@@ -1262,8 +1264,22 @@ class _Run:
                             compose.reply_envelope(msg, self.cfg.owner_addr), tslots, before_send=write_offer_down):
             self.hold(e, "hold.send_unconfirmed", why_mod.why("hold.send_unconfirmed"), f)
             return False
+        self.supersede(e, template)
         self.summary.sends += 1
         return True
+
+    def supersede(self, e, template):
+        """An offer this message's reply carries, found in Sent, closes the sender's earlier open offers
+        on the thread ("superseded"), so "the first one" means the newest offer's first (Fable review of
+        PR #3, finding 4). Not at write-down: a kill before the send is confirmed leaves the offer the
+        message answered open for the restart, which plans the same reply again. The thread's count
+        keeps every offer, so a third set of times is still a hold."""
+        if template not in NEW_OFFER_TEMPLATES:
+            return
+        newest = self.ledger.offer_for_send(compose.new_message_id(self.cfg.doris_addr, e.key, template, 1))
+        if newest is not None:
+            e.offers_superseded += self.ledger.close_offers(e.thread, "superseded", sender=newest["sender"],
+                                                            before=newest["id"])
 
     def deliver(self, e, mid, kind, template, to_addr, raw, body, envelope, tslots, before_send=None):
         """Recorded before it is sent; sent once; found in Sent after (one more look); never resent blind.
@@ -1387,6 +1403,8 @@ class _Run:
         payload = {"outcome": outcome, "template": template, "injection_seen": e.injection_seen,
                    "retried": e.retried, "recovered": e.recovered, "screen": r.screen if r is not None else None,
                    "wrapped": e.facts.get("wrapped"), "thread": e.subject if e.sensitive else e.thread}
+        if e.offers_superseded:
+            payload["offers_superseded"] = e.offers_superseded
         payload.update(extra)
         self.write(kind, payload, subject=e.subject, why=why_)
         e.closed = True

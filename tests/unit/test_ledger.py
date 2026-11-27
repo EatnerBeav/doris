@@ -397,6 +397,33 @@ class Offers(Base):
         self.assertEqual(self.db.close_offers("t2@x.example", "stop"), 1)
         self.assertEqual([o["id"] for o in self.db.open_offers(TH, T0)], [a, b])
 
+    def test_a_newer_offer_to_the_sender_closes_their_older_ones_only(self):
+        # a re-offer supersedes the sender's earlier offer: never itself, and the thread still counts both
+        # (Fable review of PR #3, finding 4)
+        first = self.offer(slots=[slot(2, 18)])
+        second = self.offer(slots=[slot(3, 18)])
+        self.assertEqual(self.db.close_offers(TH, "superseded", sender=" Priya@Northwind.example ", before=second), 1)
+        self.assertEqual([o["id"] for o in self.db.open_offers(TH, T0)], [second])
+        self.assertEqual(self.db.close_offers(TH, "superseded", sender=PRIYA, before=second), 0)
+        self.assertEqual(self.db.offer_count(TH), 2)
+        self.assertEqual(self.raw("SELECT id, closed_reason FROM offers ORDER BY id"),
+                         [(first, "superseded"), (second, None)])
+        for bad in (True, str(second), 1.0):
+            with self.assertRaises(ValueError):
+                self.db.close_offers(TH, "superseded", sender=PRIYA, before=bad)
+
+    def test_closing_one_senders_offers_leaves_another_senders_open(self):
+        # an offer is one sender's (same sender, same thread)
+        mine = self.offer(slots=[slot(2, 18)])
+        theirs = self.db.create_offer(TH, "sam@contoso.example", [slot(3, 18)], 30, T0, T0 + dt.timedelta(days=7))
+        self.assertEqual(self.db.close_offers(TH, "superseded", sender="lee@x.example"), 0)
+        self.assertEqual(self.db.close_offers(TH, "superseded", sender=PRIYA), 1)
+        self.assertEqual([o["id"] for o in self.db.open_offers(TH, T0)], [theirs])
+        self.assertEqual(self.raw("SELECT id, closed_reason FROM offers ORDER BY id"),
+                         [(mine, "superseded"), (theirs, None)])
+        with self.assertRaises(ValueError):
+            self.db.close_offers(TH, "superseded", sender=" ")
+
     def test_offered_starts_cover_every_offer_ever(self):
         first = self.offer(slots=[slot(2, 18), slot(3, 19)])
         self.db.use_offer(first)

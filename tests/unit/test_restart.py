@@ -15,6 +15,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from doris import compose
 from doris import ledger as ledger_mod
 from doris import loop, paths, receipts, supervisor
 from doris.adapters import sandbox as sandbox_mod
@@ -80,6 +81,34 @@ def cover_her_event(root):
             "DTEND:" + end, "SUMMARY:Busy", "STATUS:CONFIRMED", "TRANSP:OPAQUE", "END:VEVENT", "END:VCALENDAR")
     with open(os.path.join(cal, "owner-on-top.ics"), "wb") as fh:
         fh.write(("\r\n".join(body) + "\r\n").encode("ascii"))
+
+
+def owner_busy(root, uid, start, end):
+    """The owner puts an event of his own on the calendar: start and end as 20261203T170000Z."""
+    body = ("BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Team Whizz//Doris sandbox fixtures//EN",
+            "BEGIN:VEVENT", "UID:" + uid, "DTSTAMP:20261127T180000Z", "DTSTART:" + start,
+            "DTEND:" + end, "SUMMARY:Busy", "STATUS:CONFIRMED", "TRANSP:OPAQUE", "END:VEVENT", "END:VCALENDAR")
+    with open(os.path.join(root, "calendar", uid + ".ics"), "wb") as fh:
+        fh.write(("\r\n".join(body) + "\r\n").encode("ascii"))
+
+
+MARCUS = "marcus@brightlane.example"
+MARCUS_KEY = "20261201.0810.intro.marcus@brightlane.example"
+
+
+def from_marcus(mid, date, irt, text):
+    """Marcus answers her message irt on his thread."""
+    return ("From: Marcus Lee <marcus@brightlane.example>\r\n"
+            "To: Doris <doris.htm@fastmail.com>\r\n"
+            "Subject: Re: Intro call\r\n"
+            "Date: %s\r\n"
+            "Message-ID: <%s>\r\n"
+            "In-Reply-To: %s\r\n"
+            "References: <%s> %s\r\n"
+            "MIME-Version: 1.0\r\n"
+            "Content-Type: text/plain; charset=\"utf-8\"\r\n"
+            "Content-Transfer-Encoding: 7bit\r\n\r\n%s\r\n\r\nMarcus\r\n"
+            % (date, mid, irt, MARCUS_KEY, irt, text)).encode("ascii")
 
 
 class Restart(unittest.TestCase):
@@ -328,6 +357,132 @@ class SecondOffer(Restart):
         self.assertEqual(self.templates_sent(self.MARCUS), ["T2", "T3"])
         self.assertEqual(self.offers(), 2)
         self.assertEqual(self.closing(s2, "marcus"), ["reoffer"])
+
+
+class Superseded(Restart):
+    """A second offer to the sender closes the first (reason "superseded") once it is in Sent, so
+    "the first one" means the newest offer's first; the thread still counts both offers, so a third
+    set of times is a hold (Fable review of PR #3, finding 4)."""
+    names = ("02-marcus-request.eml",)
+    FIRST = "20261201.1030.marcus.first@brightlane.example"
+
+    def answer(self, key, template, text):
+        """Marcus answers the template her reply to message `key` carried; then one run."""
+        add(self.root, "40-marcus-answer.eml",
+            from_marcus(self.FIRST, "Tue, 01 Dec 2026 10:30:00 -0800", compose.new_message_id(DORIS, key, template, 1),
+                        text), {"forwarded": "no"})
+        return self.run_once()
+
+    def booked(self):
+        (event,) = self.events()
+        with open(os.path.join(self.root, "calendar", event), "rb") as fh:
+            return [l for l in fh.read().decode("ascii").split("\r\n") if l.startswith(("DTSTART:", "DTEND:"))]
+
+    def offer_rows(self):
+        led = ledger_mod.Ledger(os.path.join(self.state, "ledger.sqlite"))
+        try:
+            rows = led._all("SELECT used, closed_reason FROM offers ORDER BY id")
+            return [(r["used"], r["closed_reason"]) for r in rows]
+        finally:
+            led.close()
+
+    def superseded_on_closing(self, summary, outcome):
+        return [l["payload"].get("offers_superseded") for l in receipts.read_lines(summary.receipts_path)
+                if l["kind"] == "decided" and l["payload"].get("outcome") == outcome]
+
+
+class SupersededByASecondOffer(Superseded):
+    DECLINE = "20261201.0902.marcus.none-work@brightlane.example"
+
+    def setUp(self):
+        super().setUp()
+        add(self.root, "02b-marcus-decline.eml", SecondOffer.DECLINE, {"forwarded": "no"})
+
+    def assert_books_the_second_offers_first(self, s):
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T3", "T1"])
+        self.assertEqual(self.closing(s, "marcus.first"), ["book"])
+        self.assertEqual(self.booked(), ["DTSTART:20261202T193000Z", "DTEND:20261202T200000Z"])
+        self.assertEqual(self.offer_rows(), [(0, "superseded"), (1, None)])
+
+    def test_the_first_one_books_the_second_offers_first(self):
+        s1 = self.run_once()
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T3"])
+        self.assertEqual(self.superseded_on_closing(s1, "reoffer"), [1])
+        self.assertEqual(self.superseded_on_closing(s1, "offer"), [None])
+        self.assertEqual(self.offer_rows(), [(0, "superseded"), (0, None)])
+        self.assert_books_the_second_offers_first(self.answer(self.DECLINE, "T3", "The first one works."))
+
+    def test_a_time_only_the_first_offer_held_gets_the_second_offer_again(self):
+        # T4 would be a third set of times (a hold): she sends the open offer again (T12)
+        self.run_once()
+        s = self.answer(self.DECLINE, "T3", "Wednesday at 11:00 AM Pacific works for me.")
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T3", "T12"])
+        self.assertEqual(self.closing(s, "marcus.first"), ["offer"])
+        self.assertEqual(self.events(), [])
+        lines = receipts.read_lines(s.receipts_path)
+        (send,) = [l["payload"] for l in lines if l["kind"] == "called" and l["payload"]["call"] == "send"]
+        self.assertEqual(send["slots"]["slots"], ["2026-12-02T19:30:00Z", "2026-12-03T17:30:00Z",
+                                                  "2026-12-04T18:30:00Z"])
+
+    def test_a_second_decline_is_still_a_third_set_of_times(self):
+        self.run_once()
+        s = self.answer(self.DECLINE, "T3", "Sorry, none of those work for me either. Do you have other times?")
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T3"])
+        self.assertEqual(self.closing(s, "marcus.first"), ["hold:third_offer"])
+        self.assertEqual(self.offers(), 2)
+
+    def test_killed_before_the_second_offer_was_sent(self):
+        self.crash_then_run(sandbox_mod.SandboxMail, "send",
+                            lambda cal, raw, envelope, mid, template=None: template == "T3")
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T3"])
+        self.assert_books_the_second_offers_first(self.answer(self.DECLINE, "T3", "The first one works."))
+
+    def test_killed_after_the_second_offer_was_sent_before_it_was_found_in_sent(self):
+        s2 = self.crash_then_run(loop._Run, "look_in_sent", lambda self_, e, mid, template: template == "T3")
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T3"])
+        self.assertEqual(self.superseded_on_closing(s2, "reoffer"), [1])
+        self.assert_books_the_second_offers_first(self.answer(self.DECLINE, "T3", "The first one works."))
+
+
+class SupersededByFreshTimes(Superseded):
+    """A pick whose slot went busy gets fresh times (T4: Thu Dec 3 17:30, 20:00 and 20:30 UTC), which
+    close the first offer the same way: "the first one" was its Wed Dec 2 19:00 UTC before."""
+    PICK = "20261201.0940.marcus.thursday@brightlane.example"
+
+    def setUp(self):
+        super().setUp()
+        self.run_once()                                                     # T2: Thu Dec 3 17:00 UTC is its second
+        owner_busy(self.root, "owner-late", "20261203T170000Z", "20261203T173000Z")
+        add(self.root, "30-marcus-pick.eml",
+            from_marcus(self.PICK, "Tue, 01 Dec 2026 09:40:00 -0800",
+                        compose.new_message_id(DORIS, MARCUS_KEY, "T2", 1), "Thursday at noon Eastern works for me."),
+            {"forwarded": "no"})
+
+    def assert_books_the_fresh_times_first(self, s):
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T4", "T1"])
+        self.assertEqual(self.closing(s, "marcus.first"), ["book"])
+        self.assertEqual(self.booked(), ["DTSTART:20261203T173000Z", "DTEND:20261203T180000Z"])
+        self.assertEqual(self.offer_rows(), [(0, "superseded"), (1, None)])
+
+    def test_the_first_one_books_the_fresh_times_first(self):
+        s2 = self.run_once()
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T4"])
+        self.assertEqual(self.closing(s2, "marcus.thursday"), ["reoffer"])
+        self.assertEqual(self.superseded_on_closing(s2, "reoffer"), [1])
+        self.assert_books_the_fresh_times_first(self.answer(self.PICK, "T4", "The first one works."))
+
+    def test_killed_before_the_fresh_times_were_sent(self):
+        self.crash_then_run(sandbox_mod.SandboxMail, "send",
+                            lambda cal, raw, envelope, mid, template=None: template == "T4")
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T4"])
+        self.assert_books_the_fresh_times_first(self.answer(self.PICK, "T4", "The first one works."))
+
+    def test_killed_after_the_fresh_times_were_sent_before_the_first_offer_was_closed(self):
+        s3 = self.crash_then_run(loop._Run, "supersede", lambda self_, e, template: template == "T4")
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T4"])
+        self.assertEqual(self.closing(s3, "marcus.thursday"), ["offer"])     # a T4 found in Sent closes as an offer
+        self.assertEqual(self.superseded_on_closing(s3, "offer"), [1])
+        self.assert_books_the_fresh_times_first(self.answer(self.PICK, "T4", "The first one works."))
 
 
 class DirectAtATimeOnceOffered(Restart):

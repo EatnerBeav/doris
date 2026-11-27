@@ -514,10 +514,22 @@ class Ledger:
                 raise ValueError("offer %s is already %s" % (offer_id, "used" if row["used"] else "closed"))
             con.execute("UPDATE offers SET used = 1 WHERE id = ?", (offer_id,))
 
-    def close_offers(self, thread_key, reason) -> int:
-        """Close every open offer on the thread (a plain no, a stop, a move...). Returns how many."""
-        return self._con.execute("UPDATE offers SET closed_reason = ? WHERE thread_norm = ? AND used = 0 "
-                                 "AND closed_reason IS NULL", (_text(reason, "reason"), norm_id(thread_key))).rowcount
+    def close_offers(self, thread_key, reason, sender=None, before=None) -> int:
+        """Close every open offer on the thread (a plain no, a stop, a move...). Returns how many.
+        sender keeps it to the offers that went to that address, and before to offers older than that
+        offer id: a newer offer to the sender supersedes their earlier ones (Fable review of PR #3,
+        finding 4). Closed offers still count against the thread."""
+        sql = "UPDATE offers SET closed_reason = ? WHERE thread_norm = ? AND used = 0 AND closed_reason IS NULL"
+        args = [_text(reason, "reason"), norm_id(thread_key)]
+        if sender is not None:
+            sql += " AND sender = ?"
+            args.append(_addr(sender))
+        if before is not None:
+            if type(before) is not int:
+                raise ValueError("before must be an offer id, not %r" % (before,))
+            sql += " AND id < ?"
+            args.append(before)
+        return self._con.execute(sql, args).rowcount
 
     def offer_holding(self, thread_key, slot) -> Optional[int]:
         """The offer on the thread that held exactly this slot, used, closed or expired (the first one),
