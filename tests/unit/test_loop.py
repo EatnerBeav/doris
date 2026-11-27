@@ -158,6 +158,26 @@ class TheMeetingLink(unittest.TestCase):
         self.assertEqual((summary["handled"], summary["held"]), (13, 2))   # G13 passed every booking
 
 
+class TheSentLooks(unittest.TestCase):
+    def test_the_sandbox_looks_twice_with_no_wait_between(self):
+        from tests.unit.test_restart import DORIS, OWNER, mini_sandbox
+        tmp = tempfile.mkdtemp(prefix="doris-loop-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = mini_sandbox(tmp, ("01-priya-request.eml",))
+        with open(os.path.join(root, "inbox", "facts.json"), "w", encoding="utf-8") as fh:
+            fh.write('{"01-priya-request.eml": {"fault": "sent-unconfirmed"}}')
+        waits = []
+        cfg = loop.RunConfig(mode="throwaway", run_name="model-stub-sandbox-test", state_dir=os.path.join(tmp, "state"),
+                             sandbox_root=root, owner_addr=OWNER, doris_addr=DORIS, clock_mode="advance")
+        with mock.patch.object(loop, "_sleep", waits.append):
+            s = loop.run(cfg)
+        self.assertEqual(waits, [])
+        lines = receipts.read_lines(s.receipts_path)
+        looks = [l["payload"] for l in lines if l["kind"] == "called" and l["payload"]["call"] == "sent_lookup"]
+        self.assertEqual([l["target"] for l in looks], ["T1", "T1", "S1"])   # the hidden T1 twice; its notice once
+        self.assertFalse([l for l in looks if "after_wait_s" in l])
+
+
 class TheTerminalLines(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.mkdtemp(prefix="doris-loop-")

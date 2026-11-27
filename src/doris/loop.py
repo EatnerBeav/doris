@@ -56,6 +56,9 @@ RESUMABLE_BOOKING_STATES = ("intent", "unconfirmed", "written", "confirmed", "co
 NOTICE_WITHOUT_TIMES = frozenset({"hold.owner_mail", "hold.calendar_down", "hold.unknown_result", "hold.no_slot",
                                   "hold.remove_failed", "hold.internal_error"})
 
+_sleep = time.sleep                    # her waits go through here, so a test can stand in for the wall clock
+
+
 def _wall_now():
     """The wall clock, aware UTC to the second: a live run's clock."""
     return _dt.datetime.now(UTC).replace(microsecond=0)
@@ -1418,14 +1421,20 @@ class _Run:
             self.result(seq, subject=subject, ok=False, state="refused")
             self.ledger.set_send_state(mid, "unknown")
             return False
-        found = self.look_in_sent(e, mid, template) or self.look_in_sent(e, mid, template)
+        found = self.look_in_sent(e, mid, template)
+        if not found:                       # one more look; live gives the server time to file her copy
+            wait = caps.SENT_LOOK_WAIT_S if self.live else 0.0
+            if wait > 0:
+                _sleep(wait)
+            found = self.look_in_sent(e, mid, template, after_wait_s=wait or None)
         self.ledger.set_send_state(mid, "confirmed" if found else "unknown")
         return bool(found)
 
-    def look_in_sent(self, e, mid, template):
+    def look_in_sent(self, e, mid, template, after_wait_s=None):
         """True found, False confirmed absent, None the lookup failed (never read as "not sent")."""
         subject = e.subject if e is not None else ""
-        seq = self.called("sent_lookup", target=template, subject=subject, message_id=mid)
+        extra = {} if after_wait_s is None else {"after_wait_s": after_wait_s}
+        seq = self.called("sent_lookup", target=template, subject=subject, message_id=mid, **extra)
         try:
             found = self.mail.find_in_sent(mid) is True
         except MailError:

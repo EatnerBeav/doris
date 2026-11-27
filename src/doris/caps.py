@@ -58,6 +58,7 @@ MAIL_TIMEOUT_S = 30.0
 MODEL_TIMEOUT_S = 60.0
 MODEL_RETRY_WAIT_S = 2.0
 RULING17_REREAD_WAIT_S = 2.0             # "missing on two reads a short wait apart"
+SENT_LOOK_WAIT_S = 5.0                   # live: between her two looks in Sent after a send (ruling 8)
 
 # --- Hold notices (S1) ---------------------------------------------------------------------
 HOLD_QUOTE_CHARS = 400

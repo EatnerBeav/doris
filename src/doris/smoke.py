@@ -97,7 +97,7 @@ TEST_EVENT_LENGTH = _dt.timedelta(minutes=30)
 SMOKE_BOOKING_ID = "doris-smoke-test"
 CLEANUP_TRIES = 3                                # the test event's delete, a short wait apart
 CLEANUP_WAIT_S = caps.CALENDAR_RETRY_WAIT_S
-SENT_LOOK_WAIT_S = 5.0                           # between the two looks in Sent
+SENT_LOOK_WAIT_S = caps.SENT_LOOK_WAIT_S         # between the two looks in Sent, as a live run waits
 DISPLAY_NAME_MAX = 120                           # characters of the calendar's display name a line shows
 SEND_NOT_RUN = "smtp send one test message, then its copy in Sent"   # its line when there is no --send-to
 SENT_RECORD = "smoke-sent.json"                  # in state/live: what a live run needs before it starts

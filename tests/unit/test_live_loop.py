@@ -18,7 +18,7 @@ import traceback
 import unittest
 from unittest import mock
 
-from doris import ledger as ledger_mod
+from doris import caps, ledger as ledger_mod
 from doris import loop, model as model_mod, netguard, receipts, templates
 from doris.adapters import live
 from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, FakeSMTP, u
@@ -302,6 +302,65 @@ class LiveRunTest(LiveFixture):
             self.go(model_source="live")
         self.assertEqual(installed, [("127.0.0.1",)] * 2 + [("127.0.0.1", "api.anthropic.com")])
         self.assertIsNone(netguard.active())
+
+
+def sent_lookups(summary):
+    """(the wait before it, found) for each look in Sent, in order."""
+    lines = receipts.read_lines(summary.receipts_path)
+    calls = {l["seq"]: l["payload"] for l in lines if l["kind"] == "called" and l["payload"]["call"] == "sent_lookup"}
+    return [(calls[l["payload"]["call_seq"]].get("after_wait_s"), l["payload"].get("found"))
+            for l in lines if l["kind"] == "result" and l["payload"].get("call_seq") in calls]
+
+
+def send_states(state_dir):
+    with ledger_mod.Ledger(os.path.join(state_dir, "ledger.sqlite"), create=False) as db:
+        return [row[0] for row in db._all("SELECT state FROM sends ORDER BY rowid")]
+
+
+class SentLookTest(LiveFixture):
+    """Ruling 8: after a send she looks for her copy in Sent, and once more; live waits
+    caps.SENT_LOOK_WAIT_S between the two. Absent both times, the send is unknown."""
+
+    def setUp(self):
+        super().setUp()
+        self.waits, self.held, self.file_late = [], [], False
+        self.smtp.on_deliver = lambda sender, rcpts, message: self.held.append(message)
+        patch = mock.patch.object(loop, "_sleep", self.wait)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def wait(self, seconds):
+        self.waits.append(seconds)
+        if self.file_late:                      # the server files her copy while she waits
+            for message in self.held:
+                self.sent.add(message, self.clock)
+            del self.held[:]
+
+    def test_the_wait_is_five_seconds(self):
+        self.assertEqual(caps.SENT_LOOK_WAIT_S, 5.0)
+
+    def test_a_copy_filed_late_is_found_on_the_second_look_after_the_wait(self):
+        self.file_late = True
+        s = self.started_fresh_then_asked()
+        self.assertEqual(self.waits, [caps.SENT_LOOK_WAIT_S])
+        self.assertEqual(sent_lookups(s), [(None, False), (caps.SENT_LOOK_WAIT_S, True)])
+        self.assertEqual(send_states(self.state), ["confirmed"])
+        self.assertEqual((s.handled, s.held, s.sends), (1, 0, 1))
+
+    def test_a_copy_never_filed_is_unknown_after_both_looks_and_held_as_before(self):
+        s = self.started_fresh_then_asked()
+        # the T1 and then the hold notice (S1) it leads to: each looked for twice, a wait between
+        self.assertEqual(self.waits, [caps.SENT_LOOK_WAIT_S] * 2)
+        self.assertEqual(sent_lookups(s), [(None, False), (caps.SENT_LOOK_WAIT_S, False)] * 2)
+        self.assertEqual(send_states(self.state), ["unknown", "unknown"])
+        (held,) = [l["payload"] for l in receipts.read_lines(s.receipts_path) if l["kind"] == "held"]
+        self.assertEqual(held["outcome"], "hold:send_unconfirmed")
+
+    def test_a_copy_found_at_once_needs_no_wait(self):
+        self.smtp.on_deliver = lambda sender, rcpts, message: self.sent.add(message, self.clock)
+        s = self.started_fresh_then_asked()
+        self.assertEqual(self.waits, [])
+        self.assertEqual(sent_lookups(s), [(None, True)])
 
 
 if __name__ == "__main__":
