@@ -402,6 +402,17 @@ class SecondOffer(Restart):
         self.assertEqual(self.offers(), 2)
         self.assertEqual(self.closing(s2, "marcus"), ["reoffer"])
 
+    def test_after_the_restart_her_own_offer_is_no_time_the_sender_wrote(self):
+        # The T3 written down before the kill is the send's own offer, not one already open to Marcus: G9
+        # reads its slots as hers, as it did before the kill (Fable review 2 of PR #3, finding E)
+        s2 = self.crash_then_run(sandbox_mod.SandboxMail, "send",
+                                 lambda cal, raw, envelope, mid, template=None: template == "T3")
+        self.assertEqual(self.templates_sent(self.MARCUS), ["T2", "T3"])
+        lines = receipts.read_lines(s2.receipts_path)
+        (g9,) = [l["payload"]["checks"]["G9"] for l in lines
+                 if l["kind"] == "checked" and l["payload"]["template"] == "T3"]
+        self.assertEqual(g9, {"status": "pass", "checked": 3, "written": False})
+
 
 class Superseded(Restart):
     """A second offer to the sender closes the first (reason "superseded") once it is in Sent, so

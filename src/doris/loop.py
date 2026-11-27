@@ -880,15 +880,19 @@ class _Run:
         if b is not None and b["state"] == "intent":
             self.ledger.set_booking_state(bid, "blocked")
 
-    def open_offers_to(self, thread_key, sender):
+    def open_offers_to(self, thread_key, sender, e=None):
         """The thread's open offers that went to this address, oldest first. An offer is one sender's
-        (ruling 6: same sender, same thread), so another sender's is nothing to pick from or resend."""
+        (ruling 6: same sender, same thread), so another sender's is nothing to pick from or resend.
+        With e, the offer e's own reply carries (written down before a kill) is left out: it is not one
+        already open to them (Fable review 2 of PR #3, finding E)."""
         addr = sender.strip().lower()
-        return [o for o in self.ledger.open_offers(thread_key, self.now()) if o["sender"] == addr]
+        mine = set(o["id"] for o in self.own_offers(e)) if e is not None else set()
+        return [o for o in self.ledger.open_offers(thread_key, self.now()) if o["sender"] == addr
+                and o["id"] not in mine]
 
-    def open_offer_slots(self, thread_key, sender):
+    def open_offer_slots(self, thread_key, sender, e=None):
         """Every slot of the open offers to this sender on the thread, as G9 reads them."""
-        return [s for o in self.open_offers_to(thread_key, sender) for s in o["slots"]]
+        return [s for o in self.open_offers_to(thread_key, sender, e) for s in o["slots"]]
 
     def book_fresh(self, e, f, plan, bid):
         now, slot, msg = self.now(), plan.slot, e.msg
@@ -896,7 +900,7 @@ class _Run:
         # offer expired or closed while she was down gets fresh times before any booking is made (Fable
         # review of PR #3, finding 6). Past that, the slot is a time the sender wrote or one she offered
         # them, so a quarter hour stays bookable.
-        if plan.direct is not True and slot not in self.open_offer_slots(e.thread, msg.from_addr):
+        if plan.direct is not True and slot not in self.open_offer_slots(e.thread, msg.from_addr, e):
             self.drop_booking(bid)
             return self.act(e, f, policy.on_unavailable(plan, "not_offered", f.thread))
         ok, rule = slots.bookable(slot, now, written=True)
@@ -1166,7 +1170,7 @@ class _Run:
             spend_usd=lambda: led.spend(self.run_id), silenced=led.is_silenced,
             counts=lambda thread_key: self.counts(thread_key, action),
             fresh_read=lambda slot: self.read(e, slot.start_utc, slot.end_utc), booking=led.booking,
-            open_offer_slots=lambda thread_key, sender: self.open_offer_slots(thread_key, sender),
+            open_offer_slots=lambda thread_key, sender: self.open_offer_slots(thread_key, sender, e),
             live_booking_for_thread=led.live_booking_for_thread,
             readback_clean=lambda bid: bid in self.clean_readbacks, model_ok=lambda: not self.model_down,
             meeting_link=self.link())

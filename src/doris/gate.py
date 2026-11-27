@@ -410,7 +410,9 @@ def _g8_approved_template(action, ctx):
 def _open_offer_slots(action, ctx):
     """The slots of the open offers on the action's thread that went to the sender of the message
     being answered (an offer is one sender's: same sender, same thread), from the ledger, as (start,
-    end) pairs. Anything but a collection of Slots with aware times is off contract: the check cannot run."""
+    end) pairs. The offer the action's own send carries is not one of them: the loop leaves it out, so
+    a restart that sends it again reads it as a new offer. Anything but a collection of Slots with
+    aware times is off contract: the check cannot run."""
     sender = _address(_need(ctx, "message").from_addr)
     answer = _need(ctx, "open_offer_slots")(action.thread_key, sender)
     if not isinstance(answer, (set, frozenset, list, tuple)):
