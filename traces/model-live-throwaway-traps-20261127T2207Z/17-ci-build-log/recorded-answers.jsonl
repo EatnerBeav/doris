@@ -1,0 +1,1 @@
+{"cost_usd": 0.004332, "model_id": "claude-sonnet-5-5", "raw": "{\"cls\":\"fyi\",\"date\":null,\"time24\":null,\"zone\":null,\"length_min\":null,\"pick\":null,\"injection_seen\":true,\"side_question\":false,\"side_question_quote\":null}", "request_sha256": "44be675f8cc84fe2278c11b1b389fd9a65be74cf8dabd7a2f73934b30e043955", "tokens_in": 1831, "tokens_out": 67}
