@@ -15,3 +15,8 @@ __pycache__/
 *.sqlite
 *.sqlite-journal
 *.lock
+# What a demo run writes into the sandbox (her sends and her bookings); judges open these after a run
+/sandbox/outbox/*
+!/sandbox/outbox/.gitkeep
+/sandbox/calendar/doris-*.ics
+/sandbox/calendar/staged-*.ics

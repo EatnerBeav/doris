@@ -59,7 +59,7 @@ class Attachment:
 
 @dataclass
 class Message:
-    key: str                          # ledger key: the Message-ID as written (with <>), else "sha256:<raw sha256>"
+    key: str                          # ledger key: the Message-ID without its angle brackets, case kept; else "sha256:<raw sha256>"
     raw_sha256: str
     raw_size: int
     message_id: Optional[str]
@@ -126,6 +126,8 @@ class ModelAnswer:
     tokens_out: int = 0
     cost_usd: float = 0.0             # live: measured now; replayed: measured when recorded
     ok: bool = True                   # False: no usable answer (down after one retry, or no recording) -> no-model hold
+    side_question_text: Optional[str] = None  # ruling 14: the side question, copied by code from own_text (<= 200 chars,
+                                              # defanged) when the model's exact quote occurs there verbatim; else None
 
 
 # ---------------------------------------------------------------------------------------

@@ -107,6 +107,7 @@ CODES = {
     "halt.stop_file": "Halted: a STOP file was found.",
     "halt.watch_button": "Halted: Stop pressed on the watch page.",
     "halt.budget_cap": "Halted: model spend reached the cap of the run.",
+    "halt.unreadable": "Halted: a halt file is there but can't be read, so she stops (fail closed).",
 }
 
 HALT_CAUSES = ("cli", "stop_file", "watch_button", "budget_cap")
