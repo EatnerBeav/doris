@@ -56,7 +56,8 @@ beside a live run and no live run starts while it runs.
 A live run starts only after a smoke found its --send-to copy in Sent: that smoke, and only
 that one, writes state/live/smoke-sent.json, whole (a temp file, then os.replace), holding
 exactly {"ts": UTC time, "sent_copy_found": true, "look": 1 or 2, "waited_s": seconds from the
-end of the send to the end of the look that found it}: no address, ID or setting. Every smoke
+end of the send to the end of the look that found it}: no address, ID or setting. The file and
+its format are sentrecord's, which the live run's preflight reads, so the two agree. Every smoke
 that runs removes the old record first, so one that does not find its copy, runs without
 --send-to or is cut short leaves none; an old record it cannot remove stops it before it
 contacts anything (exit 1). A smoke refused for a halt or the lock leaves the record alone.
@@ -71,13 +72,11 @@ import datetime as _dt
 import email.message
 import email.policy
 import email.utils
-import json
 import os
 import secrets
-import tempfile
 import time
 
-from . import caps, compose, envfile, ics, netguard, paths, supervisor, templates
+from . import caps, compose, envfile, ics, netguard, paths, sentrecord, supervisor, templates
 from .adapters import live
 from .shapes import CalendarError, MailError, Slot
 
@@ -99,7 +98,6 @@ CLEANUP_WAIT_S = caps.CALENDAR_RETRY_WAIT_S
 SENT_LOOK_WAIT_S = caps.SENT_LOOK_WAIT_S         # between the two looks in Sent, as a live run waits
 DISPLAY_NAME_MAX = 120                           # characters of the calendar's display name a line shows
 SEND_NOT_RUN = "smtp send one test message, then its copy in Sent"   # its line when there is no --send-to
-SENT_RECORD = "smoke-sent.json"                  # in state/live: what a live run needs before it starts
 TEST_TEXT = "A test message from Doris's live smoke check. Nothing to do and nothing to answer."
 
 _OWN_ERRORS = (MailError, CalendarError, live.ConfigError, envfile.EnvFileError)   # texts built never to hold a value
@@ -316,31 +314,11 @@ def _record_step(out, path, found):
         out(name + ": not written (the copy was not found)")
         return True
     look, waited = found
-    record = {"ts": _dt.datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), "sent_copy_found": True,
-              "look": look, "waited_s": round(waited, 1)}
 
     def write():
-        _write_whole(path, json.dumps(record, sort_keys=True).encode("ascii") + b"\n")
+        sentrecord.write(path, look, waited, _dt.datetime.now(UTC))     # whole, in the one format
         return "written"
     return _step(out, name, write)
-
-
-def _write_whole(path, data):
-    """Write data to path whole or not at all: a temp file beside it, flushed to disk, then
-    os.replace. On any failure no temp file is left and the error is raised."""
-    fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", suffix=".tmp", dir=os.path.dirname(path))
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise
 
 
 def _look(mail, message_id):
@@ -408,7 +386,7 @@ def main(argv, out=None) -> int:
         out("smoke: refused: " + supervisor.LOCK_REFUSAL)
         return supervisor.EXIT_LOCKED
     try:
-        record = os.path.join(state, SENT_RECORD)
+        record = sentrecord.path(state)
         try:
             os.remove(record)                  # an old record never outlives the smoke that follows it
         except FileNotFoundError:

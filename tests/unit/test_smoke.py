@@ -21,10 +21,10 @@ import tempfile
 import unittest
 from unittest import mock
 
-from doris import ics, netguard, paths, smoke, supervisor, templates
+from doris import ics, loop, netguard, paths, sentrecord, smoke, supervisor, templates
 from doris.adapters import live
 from doris.shapes import MailError, Slot
-from tests.unit.test_live import COLLECTION, DORIS, PASSWORD, Box, FakeCalDAV, FakeIMAP, FakeSMTP, eml, u
+from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, FakeSMTP, eml, u
 
 ENV_TEXT = ("# a test env file: every host is the fakes' 127.0.0.1\n"
             "DORIS_MAIL_ADDRESS=" + DORIS + "\n"
@@ -478,17 +478,39 @@ class SentRecordTest(SmokeFixture):
     """state/live/smoke-sent.json, which a live run needs before it starts: written whole (a temp
     file, then os.replace) only by a smoke whose --send-to copy was found in Sent, and holding
     nothing but when, that it was found, by which look and after how long. Any other smoke that
-    runs removes an old one first; a smoke refused before it runs leaves it alone."""
+    runs removes an old one first; a smoke refused before it runs leaves it alone. The file and
+    its format are sentrecord's, which the live preflight reads too."""
 
     KEYS = {"ts", "sent_copy_found", "look", "waited_s"}
 
     def path(self):
-        return os.path.join(paths.state_dir("live"), "smoke-sent.json")
+        return sentrecord.path(paths.state_dir("live"))
 
     def old_record(self):
         os.makedirs(paths.state_dir("live"), exist_ok=True)
-        with open(self.path(), "w", encoding="utf-8") as fh:
-            json.dump({"ts": "2026-11-01T00:00:00Z", "sent_copy_found": True, "look": 1, "waited_s": 0.1}, fh)
+        sentrecord.write(self.path(), 1, 0.1, dt.datetime(2026, 11, 1, tzinfo=dt.timezone.utc))
+
+    def preflight(self):
+        """`run --live`'s checks before it makes anything (loop.live_preflight, as the command line
+        makes them), on what this smoke left in the live state folder, with a whole live env file."""
+        env = self.write_env(ENV_TEXT + "DORIS_OWNER_ADDRESS=" + OWNER + "\n"
+                             "DORIS_MEETING_LINK=https://meet.example/smoke-room\n"
+                             "ANTHROPIC_API_KEY=dummy-key-for-the-preflight\n")
+        return loop.live_preflight(paths.state_dir("live"), env, True)
+
+    def test_the_record_this_smoke_writes_is_one_a_live_run_takes(self):
+        self.smtp.on_deliver = self.deliver_to_sent
+        self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 0)
+        self.assertIsNone(loop.smoke_refusal(paths.state_dir("live")))
+        self.assertEqual(self.preflight().doris_addr, DORIS)      # not refused
+
+    def test_after_a_smoke_that_did_not_find_its_copy_a_live_run_is_refused(self):
+        self.old_record()
+        self.assertIsNone(loop.smoke_refusal(paths.state_dir("live")))
+        self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 1)
+        with self.assertRaises(loop.Refused) as cm:
+            self.preflight()
+        self.assertEqual(str(cm.exception), loop.SMOKE_REFUSAL)
 
     def record(self):
         with open(self.path(), encoding="utf-8") as fh:

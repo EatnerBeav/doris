@@ -24,7 +24,7 @@ from unittest import mock
 
 from doris import __main__ as cli
 from doris import caps, ledger as ledger_mod
-from doris import loop, model as model_mod, netguard, paths, receipts, smoke, supervisor, templates
+from doris import loop, model as model_mod, netguard, paths, receipts, sentrecord, smoke, supervisor, templates
 from doris.adapters import live
 from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, FakeSMTP, u
 
@@ -154,7 +154,7 @@ class LiveFixture(EnvFolder):
         self.sent = self.imap.boxes["Sent Items"] = Box(1700000002, special=("\\Sent",))
         self.smtp.on_deliver = lambda sender, rcpts, message: self.sent.add(message, self.clock)
         self.state = os.path.join(self.dir, "state", "live")
-        self.prove_smoke('{"ts": "2026-12-01T15:00:00Z", "sent_copy_found": true, "look": 1, "waited_s": 0}')
+        self.prove_smoke(self.smoke_record())
         self.clock = u(2026, 12, 1, 16, 0)
         self.said, self.runs, self.posts = [], 0, []
         for patch in (
@@ -170,15 +170,20 @@ class LiveFixture(EnvFolder):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def prove_smoke(self, text):
-        """What `smoke --send-to` leaves in the live state folder when it finds its copy in Sent."""
+    def smoke_record(self):
+        """The record `smoke --send-to` writes when it finds its copy in Sent: the smoke's own
+        writer's bytes (sentrecord.encode), from an hour before her first cycle here."""
+        return sentrecord.encode(1, 0.4, u(2026, 12, 1, 15, 0))
+
+    def prove_smoke(self, data):
+        """Leave data (bytes, or text as UTF-8) where the smoke writes its record; None: no record."""
         os.makedirs(self.state, exist_ok=True)
-        path = os.path.join(self.state, "smoke-sent.json")
-        if text is None:
+        path = sentrecord.path(self.state)
+        if data is None:
             os.remove(path)
             return
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(text)
+        with open(path, "wb") as fh:
+            fh.write(data.encode("utf-8") if isinstance(data, str) else data)
 
     def post(self, url, headers, body, timeout):
         self.posts.append((url, dict(headers), json.loads(body.decode("utf-8"))))
@@ -271,8 +276,44 @@ class LiveStartTest(LiveFixture):
                 self.assertIn("`python -m doris smoke --send-to wolf.whizz@fastmail.com` first", str(cm.exception))
                 self.assertFalse(os.path.exists(os.path.join(self.state, "ledger.sqlite")))
                 self.nothing_contacted()
-        self.prove_smoke('{"sent_copy_found": true}')
+        self.prove_smoke(self.smoke_record())
         self.assertTrue(self.go(fresh=True).verify_ok)
+
+    def test_only_the_record_as_the_smoke_writes_it_lets_a_live_run_start(self):
+        """One format, the smoke's (sentrecord): a looser or other record is refused in one line
+        naming what is wrong, before any ledger or connection."""
+        good = self.smoke_record()
+        cases = [
+            ('{"sent_copy_found": true}', "its keys are not exactly look, sent_copy_found, ts, waited_s"),
+            ('{"ts": "2026-12-01T15:00:00Z", "sent_copy_found": true, "look": 1, "waited_s": 0}', "not as the smoke"),
+            (good.replace(b'"waited_s": 0.4', b'"waited_s": 0'), "waited_s is not seconds to 0.1"),
+            (good.replace(b'"look": 1', b'"look": 3'), "look is not 1 or 2"),
+            (good.replace(b'"sent_copy_found": true', b'"sent_copy_found": false'), "sent_copy_found is not true"),
+            (good.replace(b'15:00:00Z', b'15:00:00'), "ts is not a UTC time to the second"),
+            (good[:-2] + b', "to": "%s"}\n' % OWNER.encode("ascii"), "its keys are"),
+            (good[:-1], "not as the smoke writes it"),
+        ]
+        for data, why in cases:
+            with self.subTest(data=data):
+                self.prove_smoke(data)
+                with self.assertRaises(loop.Refused) as cm:
+                    self.go(fresh=True)
+                said = str(cm.exception)
+                self.assertEqual(cm.exception.exit_code, 2)
+                self.assertRegex(said, r"^Not started: the smoke check's record \(smoke-sent\.json\) is not as the "
+                                       r"smoke writes it: [^\n]*\. Run `python -m doris smoke --send-to "
+                                       r"wolf\.whizz@fastmail\.com` first\.\Z")
+                self.assertIn(why, said)
+                self.assert_no_value(said[:-len(loop.SMOKE_FIRST)])     # its last words name the test inbox
+                self.assertFalse(os.path.exists(os.path.join(self.state, "ledger.sqlite")))
+                self.nothing_contacted()
+        self.prove_smoke(None)
+        os.makedirs(sentrecord.path(self.state))                 # a record that cannot be read
+        with self.assertRaises(loop.Refused) as cm:
+            self.go(fresh=True)
+        self.assertRegex(str(cm.exception), r"^Not started: the smoke check's record \(smoke-sent\.json\) "
+                                            r"cannot be read: \w+\. Run `python -m doris smoke")
+        self.nothing_contacted()
 
     def test_a_live_config_carries_no_addresses_and_no_sandbox(self):
         for extra in ({"owner_addr": OWNER}, {"doris_addr": DORIS}, {"sandbox_root": self.dir}, {"env_path": None}):
@@ -584,6 +625,10 @@ class RunCommandTest(LiveFixture):
             self.prove_smoke(None)
             return ["--env", self.write_env(), "--fresh"]
 
+        def loose_proof():
+            self.prove_smoke('{"sent_copy_found": true}')
+            return ["--env", self.write_env(), "--fresh"]
+
         def no_ledger():
             return ["--env", self.write_env()]
 
@@ -592,11 +637,14 @@ class RunCommandTest(LiveFixture):
             return ["--env", self.write_env(), "--fresh"]
 
         cases = ((no_env, "absent.env"), (no_owner, "DORIS_OWNER_ADDRESS"), (no_key, "ANTHROPIC_API_KEY"),
-                 (no_proof, loop.SMOKE_REFUSAL), (no_ledger, loop.NO_LIVE_LEDGER),
+                 (no_proof, loop.SMOKE_REFUSAL),
+                 (loose_proof, "Not started: the smoke check's record (smoke-sent.json) is not as the smoke writes "
+                               "it: its keys are not exactly look, sent_copy_found, ts, waited_s. " + loop.SMOKE_FIRST),
+                 (no_ledger, loop.NO_LIVE_LEDGER),
                  (fresh_over_a_ledger, loop.FRESH_OVER_LEDGER))
         for setup, said in cases:
             with self.subTest(case=setup.__name__):
-                self.prove_smoke('{"sent_copy_found": true}')
+                self.prove_smoke(self.smoke_record())
                 code, out = self.cli("run", "--live", *setup())
                 self.assertEqual(code, 2, out)
                 self.assertEqual(len(out.strip().splitlines()), 1, out)
@@ -611,6 +659,26 @@ class RunCommandTest(LiveFixture):
                 if setup is not fresh_over_a_ledger:
                     self.assertFalse(os.path.exists(ledger_path))
         self.nothing_contacted()
+
+    def test_a_smoke_that_finds_its_copy_lets_run_live_start_and_one_that_does_not_stops_it(self):
+        """Both commands as a person types them, on one live state folder: the record the smoke
+        writes is the one the run's preflight reads."""
+        patch = mock.patch.object(smoke, "SENT_LOOK_WAIT_S", 0.0)       # her second look in Sent at once
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.prove_smoke(None)
+        code, out = self.cli("smoke", "--env", self.env_path, "--send-to", "whizz@fastmail.com")
+        self.assertEqual(code, 0, out)
+        self.assertIn("\nsent copy record for a live run: ok (written)\n", out)
+        code, out = self.cli("run", "--live", "--fresh", "--env", self.env_path)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(self.started), 1)
+        self.smtp.on_deliver = lambda sender, rcpts, message: None          # no copy reaches Sent now
+        code, out = self.cli("smoke", "--env", self.env_path, "--send-to", "whizz@fastmail.com")
+        self.assertEqual(code, 1, out)
+        code, out = self.cli("run", "--live", "--fresh", "--env", self.env_path)
+        self.assertEqual((code, out.strip()), (2, loop.SMOKE_REFUSAL))
+        self.assertEqual(len(self.started), 1)
 
     def test_a_halt_in_force_refuses_before_the_env_file_is_read(self):
         supervisor.request_stop("live", "cli")

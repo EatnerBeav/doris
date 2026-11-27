@@ -24,7 +24,6 @@ steps to her next ten-minute cycle after each arrival ("her 3:10 PM cycle"); in 
 
 import datetime as _dt
 import hashlib
-import json
 import math
 import os
 import time
@@ -34,7 +33,7 @@ from dataclasses import dataclass, replace
 from typing import Callable, List, Optional
 
 from . import caps, compose, digest, gate, holds, ics, mail, netguard, parser, paths, policy, receipts
-from . import screens, slots, supervisor, templates, zones
+from . import screens, sentrecord, slots, supervisor, templates, zones
 from . import ledger as ledger_mod
 from . import model as model_mod
 from . import why as why_mod
@@ -46,9 +45,8 @@ SANDBOX_OWNER = "whizz@fastmail.com"   # the sandbox's owner and Doris addresses
 SANDBOX_DORIS = "doris.htm@fastmail.com"
 WINDOW = caps.MAX_HORIZON + _dt.timedelta(days=1)    # the span an offer reads
 ENV_OWNER = "DORIS_OWNER_ADDRESS"      # live: the owner's own address, from the env file
-SMOKE_PROOF = "smoke-sent.json"        # live state: `smoke --send-to` writes it when it finds its copy in Sent
-SMOKE_REFUSAL = ("Not started: no smoke check has found her sent copy in Sent yet. "
-                 "Run `python -m doris smoke --send-to wolf.whizz@fastmail.com` first.")
+SMOKE_FIRST = "Run `python -m doris smoke --send-to wolf.whizz@fastmail.com` first."
+SMOKE_REFUSAL = "Not started: %s. %s" % (sentrecord.MISSING, SMOKE_FIRST)   # no smoke record at all
 FRESH_OVER_LEDGER = ("Not started: the live ledger is already there, and --fresh only starts a new one. "
                      "Run without --fresh to go on from it.")
 NO_LIVE_LEDGER = ("Not started: there is no live ledger yet. `python -m doris run --live --fresh` starts one, "
@@ -180,15 +178,12 @@ def _live_link(env, error):
     return value
 
 
-def smoke_proof_ok(state_dir):
-    """True when the live state folder holds the smoke's proof (SMOKE_PROOF, JSON with
-    "sent_copy_found": true) that her SMTP mail reaches her Sent folder. Anything else is False."""
-    try:
-        with open(os.path.join(state_dir, SMOKE_PROOF), "rb") as fh:
-            proof = json.loads(fh.read().decode("utf-8"))
-    except (OSError, ValueError):
-        return False
-    return isinstance(proof, dict) and proof.get("sent_copy_found") is True
+def smoke_refusal(state_dir):
+    """None when the live state folder holds the smoke's sent record (sentrecord) exactly as
+    `smoke --send-to` writes it once it finds its copy in Sent: the proof that her SMTP mail
+    reaches her Sent folder. Else the one line a live run is refused with, saying what is wrong."""
+    why = sentrecord.problem(state_dir)
+    return None if why is None else "Not started: %s. %s" % (why, SMOKE_FIRST)
 
 
 def live_settings(env_path, model_source):
@@ -229,8 +224,9 @@ def live_preflight(state_dir, env_path, fresh):
     anything: the env file's settings (the model live), the smoke's proof, then the ledger against
     --fresh. Refused (exit 2) in one plain line; the worker makes every check again under its lock."""
     settings = live_settings(env_path, "live")
-    if not smoke_proof_ok(state_dir):
-        raise Refused(SMOKE_REFUSAL, 2)
+    refusal = smoke_refusal(state_dir)
+    if refusal is not None:
+        raise Refused(refusal, 2)
     there = os.path.exists(os.path.join(state_dir, "ledger.sqlite"))
     if fresh and there:
         raise Refused(FRESH_OVER_LEDGER, 2)
@@ -424,8 +420,9 @@ class _Run:
                           supervisor.WORKER_EXIT_HALTED)
         if cfg.mode == "live":              # every setting from the env file, before anything is made
             self.live = live_settings(cfg.env_path, cfg.model_source)
-            if not smoke_proof_ok(cfg.state_dir):
-                raise Refused(SMOKE_REFUSAL, 2)
+            refusal = smoke_refusal(cfg.state_dir)
+            if refusal is not None:
+                raise Refused(refusal, 2)
             self.cfg = cfg = replace(cfg, owner_addr=self.live.owner_addr, doris_addr=self.live.doris_addr)
         os.makedirs(os.path.join(self.run_dir, "messages"), exist_ok=True)
         # live: the env file's link; the sandbox: its own fixed link, never one from the shell
