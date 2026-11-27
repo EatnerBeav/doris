@@ -257,6 +257,7 @@ class _Run:
         self.wait_s = caps.CALENDAR_RETRY_WAIT_S if cfg.retry_wait_s is None else cfg.retry_wait_s
         self.lock = self.ledger = self.receipts = self.guard = None
         self.mail = self.calendar = self.model = self.env = None
+        self.link_before = self.pinned_link = None
         self.model_target = cfg.model_source
         self.t = None
         self.model_down = False
@@ -279,6 +280,7 @@ class _Run:
             raise Refused("Halted (%s). Only `python -m doris resume` clears it." % (cause,),
                           supervisor.WORKER_EXIT_HALTED)
         os.makedirs(os.path.join(self.run_dir, "messages"), exist_ok=True)
+        self.pin_link(templates.PLACEHOLDER_MEETING_LINK)     # the sandbox's own fixed link, never the env's
         self.t = None if cfg.mode == "live" else read_clock(cfg.sandbox_root)
         self.guard = netguard.install(self.allowed_hosts())
         self.ledger = ledger_mod.Ledger(os.path.join(cfg.state_dir, "ledger.sqlite"))
@@ -297,7 +299,17 @@ class _Run:
             queued_count=lambda addr: len([m for m in led.unprocessed_messages(sender=addr)
                                            if ledger_mod.norm_id(m["key"]) not in self.batch_keys]))
 
+    def pin_link(self, link):
+        """The one link this run uses, pinned for the reply, the .ics and G13 alike; let go at close."""
+        before = templates.use_meeting_link(link)
+        if self.pinned_link is None:
+            self.link_before = before
+        self.pinned_link = link
+
     def close_handles(self):
+        if self.pinned_link is not None:
+            templates.use_meeting_link(self.link_before)
+            self.pinned_link = self.link_before = None
         if self.guard is not None:
             self.guard.uninstall()
             self.guard = None
@@ -344,7 +356,7 @@ class _Run:
             raise Halted(cause)
 
     def link(self):
-        return templates.meeting_link()     # the one the gate checks (G13): the env, else the placeholder
+        return templates.meeting_link()     # the one the gate checks (G13): the link this run pinned
 
     def pause(self):
         if self.wait_s > 0:

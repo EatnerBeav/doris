@@ -2,6 +2,8 @@
 what the loop hands the gate, checked on a run over a fresh copy of the sandbox."""
 
 import datetime as dt
+import email
+import email.policy
 import os
 import shutil
 import tempfile
@@ -9,7 +11,7 @@ import threading
 import unittest
 from unittest import mock
 
-from doris import caps, loop, paths, receipts
+from doris import caps, loop, paths, receipts, templates
 from doris.shapes import Slot
 
 UTC = dt.timezone.utc
@@ -121,6 +123,39 @@ class TheRunEnds(unittest.TestCase):
         t.start()
         t.join(60)
         self.assertTrue(done, "the run never ended")
+
+
+def sent_and_booked_text(sandbox):
+    """Every text part she sent (decoded) and every calendar file of hers, as one string."""
+    texts = []
+    outbox = os.path.join(sandbox, "outbox")
+    for name in sorted(os.listdir(outbox)):
+        if name.endswith(".eml"):
+            with open(os.path.join(outbox, name), "rb") as fh:
+                msg = email.message_from_bytes(fh.read(), policy=email.policy.default)
+            texts += [p.get_content() for p in msg.walk() if p.get_content_maintype() == "text"]
+    calendar = os.path.join(sandbox, "calendar")
+    for name in sorted(os.listdir(calendar)):
+        if name.startswith("doris-"):
+            with open(os.path.join(calendar, name), encoding="utf-8") as fh:
+                texts.append(fh.read())
+    return "\n".join(texts)
+
+
+class TheMeetingLink(unittest.TestCase):
+    def test_a_sandbox_run_keeps_its_own_fixed_link_whatever_the_environment_says(self):
+        tmp = tempfile.mkdtemp(prefix="doris-loop-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        elsewhere = "https://meet.example/" + "not-for-the-sandbox"
+        with mock.patch.dict(os.environ, {"DORIS_MEETING_LINK": elsewhere}):
+            lines = sandbox_run(tmp)
+            self.assertEqual(templates.meeting_link(), elsewhere)      # the run let go of its link
+        text = sent_and_booked_text(os.path.join(tmp, "sandbox"))
+        self.assertIn("Join: " + templates.PLACEHOLDER_MEETING_LINK, text)
+        self.assertIn("LOCATION:" + templates.PLACEHOLDER_MEETING_LINK, text)
+        self.assertNotIn(elsewhere, text)
+        (summary,) = [l["payload"] for l in lines if l["kind"] == "summary"]
+        self.assertEqual((summary["handled"], summary["held"]), (13, 2))   # G13 passed every booking
 
 
 class TheTerminalLines(unittest.TestCase):

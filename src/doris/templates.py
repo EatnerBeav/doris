@@ -162,8 +162,21 @@ def fmt_theirs(utc, zone_id):
     return "%s (%s)" % (_full(utc, zone_id), _bracket(utc, "Pacific", zone_id))
 
 
+_run_link = None     # the link a run pinned (use_meeting_link): live from its env file, the sandbox its own
+
+
+def use_meeting_link(link):
+    """Pin the one link this run uses, so the reply, the .ics and the gate's G13 all read the same
+    value; None lets go. Returns what was pinned before, to hand back when the run ends."""
+    global _run_link
+    before, _run_link = _run_link, link
+    return before
+
+
 def meeting_link():
-    """The one fixed meeting room, from .env; the sandbox placeholder when it is not set."""
+    """The one fixed meeting room: the link the run pinned; else the env, else the sandbox placeholder."""
+    if _run_link is not None:
+        return _run_link
     value = os.environ.get(MEETING_LINK_ENV, "").strip()
     return value or PLACEHOLDER_MEETING_LINK
 

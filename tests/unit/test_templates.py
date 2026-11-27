@@ -26,6 +26,23 @@ class Base(unittest.TestCase):
         self.addCleanup(e.stop)
 
 
+class RunLinkTest(Base):
+    """A run pins the one link it uses, so the reply, the .ics and the gate's G13 read the same value;
+    the env and then the placeholder are only the fallback when nothing is pinned."""
+
+    def test_a_pinned_link_wins_over_the_env_and_unpinning_restores_the_fallback(self):
+        pinned = "https://meet.example/" + "pinned-room"
+        before = templates.use_meeting_link(pinned)
+        try:
+            self.assertEqual(templates.meeting_link(), pinned)
+            body = templates.render("T1", {"start": WED_1130, "duration": 30, "zone": None,
+                                           "meeting_link": MEETING_LINK})
+            self.assertIn("Join: " + pinned + "\n", body)
+        finally:
+            self.assertEqual(templates.use_meeting_link(before), pinned)
+        self.assertEqual(templates.meeting_link(), LINK)
+
+
 class FormatTest(Base):
     def test_fmt_slot_shane_first_with_their_zone(self):
         self.assertEqual(templates.fmt_slot(utc(2026, 12, 2, 19, 0), "Eastern"),
