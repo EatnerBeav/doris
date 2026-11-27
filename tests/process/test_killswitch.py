@@ -85,10 +85,10 @@ class Base(unittest.TestCase):
     def lines(self):
         return self.receipts_mod().read_lines(self.receipts)
 
-    def run_now(self, scenario):
+    def run_now(self, scenario, **kw):
         said = []
         code = supervisor.run_supervised(self.mode, RUN, self.worker_argv(scenario), self.receipts, self.ledger,
-                                         say=said.append, **self.modules())
+                                         say=said.append, **dict(self.modules(), **kw))
         return code, said
 
     def start(self, scenario):
@@ -335,7 +335,9 @@ class CtrlCTest(Base):
 
 class GateHaltTest(Base):
     def test_a_worker_that_sees_a_halt_at_the_gate_exits_4_and_the_parent_writes_the_halted_line(self):
-        code, said = self.run_now("g1")
+        # The supervisor's next look would see the same STOP file and kill a worker still exiting
+        # (exit 1 on Windows, -9 here): a long poll lets the worker's own exit come first, every time.
+        code, said = self.run_now("g1", poll_s=WAIT_S)
         self.assertEqual(code, supervisor.EXIT_HALTED)
         halted = self.lines()[-1]
         self.assertEqual(halted["kind"], "halted")

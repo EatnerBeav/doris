@@ -4,7 +4,6 @@ import json
 import os
 import shutil
 import tempfile
-import time
 import unittest
 
 from doris import caps, ics, slots
@@ -256,16 +255,18 @@ class CalendarFaultTest(Fixture):
         self.assertEqual(exc.fault, fault)
 
     def test_timeout_once_fails_the_first_call_then_recovers(self):
-        cal = sandbox.SandboxCalendar(self.root, timeout_s=0.05)
+        # The wait is read from the sleep it asks for, not a wall clock (Windows ticks are 15.6 ms).
+        slept = []
+        cal = sandbox.SandboxCalendar(self.root, timeout_s=0.05, sleep=slept.append)
         cal.arm("timeout-once")
-        began = time.monotonic()
         with self.assertRaises(CalendarTimeout) as ctx:
             cal.query(*SPAN)
-        self.assertGreaterEqual(time.monotonic() - began, 0.05)
+        self.assertEqual(slept, [0.05])
         self._assert_staged(ctx.exception, "timeout-once")
         self.assertEqual(cal.last_call_fault, "timeout-once")
         self.assertEqual(cal.query(*SPAN), [])
         self.assertIsNone(cal.last_call_fault)
+        self.assertEqual(slept, [0.05])
 
     def test_timeout_once_on_a_write_writes_nothing(self):
         self.cal.arm("timeout-once")
@@ -291,11 +292,12 @@ class CalendarFaultTest(Fixture):
         self.assertEqual(self.cal.query(*SPAN), [])
 
     def test_slow_calendar_waits_then_answers(self):
-        self.cal.arm("slow-calendar", seconds=0.2)
-        began = time.monotonic()
-        self.assertEqual(self.cal.query(*SPAN), [])
-        self.assertGreaterEqual(time.monotonic() - began, 0.2)
-        self.assertEqual(self.cal.last_call_fault, "slow-calendar")
+        slept = []
+        cal = sandbox.SandboxCalendar(self.root, sleep=slept.append)
+        cal.arm("slow-calendar", seconds=0.2)
+        self.assertEqual(cal.query(*SPAN), [])
+        self.assertEqual(slept, [0.2])
+        self.assertEqual(cal.last_call_fault, "slow-calendar")
 
     def test_slow_calendar_past_the_call_timeout_times_out(self):
         waits = []
