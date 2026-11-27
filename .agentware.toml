@@ -1,0 +1,9 @@
+# Agentware 2026 entry
+name = "Doris"
+pitch = "An inbox and calendar agent you can walk away from."
+track = "T1"
+track_name = "Inbox & Calendar"
+team = "Whizz"
+credits = "Shane Bornstein and Wolf (Claude), his CTO"
+repo = "https://github.com/EatnerBeav/doris"
+license = "MIT"

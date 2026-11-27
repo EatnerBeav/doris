@@ -1,0 +1,9 @@
+#!/bin/sh
+# Secret scan on every commit. Enable once per clone: git config core.hooksPath .githooks
+for py in python3 python "py -3"; do
+  if $py -c "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)" >/dev/null 2>&1; then
+    exec $py src/secret_scan.py --staged
+  fi
+done
+echo "secret scan: no Python 3.9+ found, commit blocked" >&2
+exit 1

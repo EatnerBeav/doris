@@ -1,0 +1,17 @@
+# Secrets never enter git. Keys live only in .env on the server.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.pyc
+
+# Local run state: ledgers, locks and scratch runs (committed traces live in traces/)
+/state/
+/src/state/
+*.sqlite
+*.sqlite-journal
+*.lock
