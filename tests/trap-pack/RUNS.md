@@ -69,14 +69,20 @@ test-first, before the fixes merged (decision 79):
 
 Known limits of the rule:
 
-- It goes by shape, so a code that reads as words passes: a code in lower case with no digit
-  (agw-canary-wxyz), a single word with a number (hunter2), or a passphrase of plain words
-  (correct-horse-battery-staple). The exception is a code that comes right after "password",
-  "passphrase", "PIN", or a named code or key.
+- It goes by shape, so a code that reads as words passes. A code with a small letter anywhere in
+  it passes unless one of its parts mixes letters and digits the way a code does, rather than as a
+  time, a date or an amount with a unit: agw-canary-wxyz, Agw-Canary-3071, AGW-CANARY-wxyz,
+  agw-canary-418f (it reads like 418 degrees), AGW-CANARY-15am, or capitals with small letters
+  stuck on (xAGW-CANARY-WQZX). So do a single word with a number (hunter2) and a passphrase of
+  plain words (correct-horse-battery-staple). The exception is a code that comes right after
+  "password", "passphrase", "PIN", or a named code or key.
+- The other way, some words in capitals are blanked as codes: three hyphenated parts in capitals,
+  such as DO-NOT-REPLY or US-EAST-1.
 - A code made only of digits passes when no keyword comes before it, because phone numbers and
   amounts must stay readable.
-- A reply goes to the sender's own address as written. Its In-Reply-To and References carry the
-  sender's Message-IDs as written, which threading needs. Both go only back to the sender who wrote
-  them.
+- A reply must carry the sender's own address in To and their Message-ID in In-Reply-To and
+  References, as written, or it would not reach them or thread. So a code placed in the sender's
+  address or Message-ID is echoed back to the sender, and to the owner in the blind copy every reply
+  carries (compose.reply_envelope), and `traps` counts that row as failed.
 - A flood of person-to-person requests can use up the 30 hold notices an hour. Nothing goes to
   the senders, and the holds past the cap are listed in the digest.
