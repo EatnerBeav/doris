@@ -33,6 +33,7 @@ With --send-to (without it, one line in their place says they did not run):
   sent copy, look 2 (after a short wait)     the same after SENT_LOOK_WAIT_S
   sent copy found                            which look found the copy first, and how long after the
                                              send; it counts as found when either look found it
+  sent copy record for a live run            written only when the copy was found (see below)
 
 The last line says "ok, every step passed" only when every step ran and passed. When every step
 that ran passed but one did not run, it says so and names it, with why.
@@ -42,6 +43,14 @@ adapters reach without naming it fails the smoke. A smoke is a live run's peer: 
 start while a halt is in force for live (HALT, or a STOP file) and holds the live ledger lock
 (state/live/ledger.lock) from before its first connection to after its last, so it never runs
 beside a live run and no live run starts while it runs.
+
+A live run starts only after a smoke found its --send-to copy in Sent: that smoke, and only
+that one, writes state/live/smoke-sent.json, whole (a temp file, then os.replace), holding
+exactly {"ts": UTC time, "sent_copy_found": true, "look": 1 or 2, "waited_s": seconds from the
+end of the send to the end of the look that found it}: no address, ID or setting. Every smoke
+that runs removes the old record first, so one that does not find its copy, runs without
+--send-to or is cut short leaves none; an old record it cannot remove stops it before it
+contacts anything (exit 1). A smoke refused for a halt or the lock leaves the record alone.
 
 Exit 0 when every step that ran passed; 1 when any failed; 2 when the command line or the env
 file is wrong; 3 when a live run holds the lock (or the lock cannot be taken); 5 when a halt is
@@ -53,8 +62,10 @@ import datetime as _dt
 import email.message
 import email.policy
 import email.utils
+import json
 import os
 import secrets
+import tempfile
 import time
 
 from . import caps, compose, envfile, ics, netguard, paths, supervisor, templates
@@ -75,6 +86,7 @@ CLEANUP_TRIES = 3                                # the test event's delete, a sh
 CLEANUP_WAIT_S = caps.CALENDAR_RETRY_WAIT_S
 SENT_LOOK_WAIT_S = 5.0                           # between the two looks in Sent
 SEND_NOT_RUN = "smtp send one test message, then its copy in Sent"   # its line when there is no --send-to
+SENT_RECORD = "smoke-sent.json"                  # in state/live: what a live run needs before it starts
 TEST_TEXT = "A test message from Doris's live smoke check. Nothing to do and nothing to answer."
 
 _OWN_ERRORS = (MailError, CalendarError, live.ConfigError, envfile.EnvFileError)   # texts built never to hold a value
@@ -119,9 +131,10 @@ def _not_run(out, name, why):
 # ------------------------------------------------------------------------------------------------
 # The steps
 # ------------------------------------------------------------------------------------------------
-def check(mail, calendar, out, send_to=None, now=None):
+def check(mail, calendar, out, send_to=None, now=None, record=None):
     """Every step against these adapters, one line each. (True when every step that ran passed,
-    [each step that did not run, named with why])."""
+    [each step that did not run, named with why]). With send_to and record (a path), the sent
+    copy record is written there when the copy was found."""
     now = now or _dt.datetime.now(UTC)
     not_run = []
     passed = [
@@ -134,8 +147,10 @@ def check(mail, calendar, out, send_to=None, now=None):
     if send_to is None:
         not_run.append(_not_run(out, SEND_NOT_RUN, "no --send-to"))
     else:
-        flags, _ = _send_and_look(mail, out, send_to, now)
+        flags, found = _send_and_look(mail, out, send_to, now)
         passed += flags
+        if record is not None:
+            passed.append(_record_step(out, record, found))
     return all(passed), not_run
 
 
@@ -254,6 +269,41 @@ def _send_and_look(mail, out, send_to, now):
     return [sent, found is not None], found
 
 
+def _record_step(out, path, found):
+    """The sent copy record for a live run, written when the copy was found. True unless the
+    write failed (a copy not found has already failed its own step)."""
+    name = "sent copy record for a live run"
+    if found is None:
+        out(name + ": not written (the copy was not found)")
+        return True
+    look, waited = found
+    record = {"ts": _dt.datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), "sent_copy_found": True,
+              "look": look, "waited_s": round(waited, 1)}
+
+    def write():
+        _write_whole(path, json.dumps(record, sort_keys=True).encode("ascii") + b"\n")
+        return "written"
+    return _step(out, name, write)
+
+
+def _write_whole(path, data):
+    """Write data to path whole or not at all: a temp file beside it, flushed to disk, then
+    os.replace. On any failure no temp file is left and the error is raised."""
+    fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", suffix=".tmp", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _look(mail, message_id):
     """True found, False not found, or the failure as printed."""
     try:
@@ -319,9 +369,17 @@ def main(argv, out=None) -> int:
         out("smoke: refused: " + supervisor.LOCK_REFUSAL)
         return supervisor.EXIT_LOCKED
     try:
+        record = os.path.join(state, SENT_RECORD)
+        try:
+            os.remove(record)                  # an old record never outlives the smoke that follows it
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            out("smoke: FAILED: the old sent-copy record cannot be removed (%s)" % type(exc).__name__)
+            return 1
         guard = netguard.install(hosts)
         try:
-            ok, not_run = check(mail, calendar, out, send_to=send_to)
+            ok, not_run = check(mail, calendar, out, send_to=send_to, record=record)
         finally:
             guard.uninstall()
     finally:

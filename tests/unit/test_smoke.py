@@ -12,6 +12,7 @@ import email
 import email.policy
 import http.client
 import imaplib
+import json
 import os
 import re
 import shutil
@@ -36,7 +37,7 @@ STEPS = ["imap login and inbox count", "sent folder found by its special-use fla
          "caldav query, next 7 days", "caldav test event left by an earlier run", "caldav create test event",
          "caldav read test event back, times match", "caldav delete test event", "caldav read after delete, gone"]
 SEND_STEPS = ["smtp send one test message", "sent copy, look 1 (at once)", "sent copy, look 2 (after a short wait)",
-              "sent copy found"]
+              "sent copy found", "sent copy record for a live run"]
 SEND_NOT_RUN = "smtp send one test message, then its copy in Sent"     # the line in their place without --send-to
 READ_ONLY_IMAP = {"CAPABILITY", "LOGIN", "LOGOUT", "EXAMINE", "LIST", "UID SEARCH", "UID FETCH"}
 
@@ -72,6 +73,18 @@ class SmokeFixture(unittest.TestCase):
 
     def deliver_to_sent(self, sender, recipients, message):
         self.sent.add(message, u(2026, 11, 27, 12))
+
+    def late_copy(self, wait_s):
+        """The copy reaches Sent only during the wait between the looks, which takes wait_s on a
+        clock the smoke reads (smoke._clock)."""
+        held, clock = [], [1000.0]
+        self.smtp.on_deliver = lambda sender, recipients, message: held.append(message)
+
+        def wait(seconds):
+            clock[0] += wait_s
+            while held:
+                self.sent.add(held.pop(), u(2026, 11, 27, 12))
+        return [mock.patch.object(smoke, "_sleep", wait), mock.patch.object(smoke, "_clock", lambda: clock[0])]
 
     def write_env(self, text):
         path = os.path.join(self.dir, ".env")
@@ -336,18 +349,6 @@ class SendToTest(SmokeFixture):
         self.assertRegex(self.result("sent copy found"), r"^ok \(look 1, \d+\.\d s after the send\)\Z")
         self.assert_no_value()
 
-    def late_copy(self, wait_s):
-        """The copy reaches Sent only during the wait between the looks, which takes wait_s on a
-        clock the smoke reads (smoke._clock)."""
-        held, clock = [], [1000.0]
-        self.smtp.on_deliver = lambda sender, recipients, message: held.append(message)
-
-        def wait(seconds):
-            clock[0] += wait_s
-            while held:
-                self.sent.add(held.pop(), u(2026, 11, 27, 12))
-        return [mock.patch.object(smoke, "_sleep", wait), mock.patch.object(smoke, "_clock", lambda: clock[0])]
-
     def test_a_copy_that_appears_only_after_the_wait_passes_on_the_second_look(self):
         patches = self.late_copy(5.0)
         with patches[0], patches[1]:
@@ -362,6 +363,7 @@ class SendToTest(SmokeFixture):
         self.assertEqual(self.result("sent copy, look 1 (at once)"), "not found yet")
         self.assertEqual(self.result("sent copy, look 2 (after a short wait)"), "not found")
         self.assertEqual(self.result("sent copy found"), "FAILED (not found on either look)")
+        self.assertEqual(self.result("sent copy record for a live run"), "not written (the copy was not found)")
         self.assertEqual(self.result("smoke"), "FAILED")
 
     def test_a_look_that_cannot_tell_is_named_and_the_other_look_still_counts(self):
@@ -390,6 +392,101 @@ class SendToTest(SmokeFixture):
             self.assertEqual(len(self.lines), 1)
             self.assertTrue(self.lines[0].startswith("smoke: refused --send-to"), self.lines)
         self.assertEqual((self.imap.commands, self.smtp.sessions, self.dav.requests), ([], [], []))
+
+
+class SentRecordTest(SmokeFixture):
+    """state/live/smoke-sent.json, which a live run needs before it starts: written whole (a temp
+    file, then os.replace) only by a smoke whose --send-to copy was found in Sent, and holding
+    nothing but when, that it was found, by which look and after how long. Any other smoke that
+    runs removes an old one first; a smoke refused before it runs leaves it alone."""
+
+    KEYS = {"ts", "sent_copy_found", "look", "waited_s"}
+
+    def path(self):
+        return os.path.join(paths.state_dir("live"), "smoke-sent.json")
+
+    def old_record(self):
+        os.makedirs(paths.state_dir("live"), exist_ok=True)
+        with open(self.path(), "w", encoding="utf-8") as fh:
+            json.dump({"ts": "2026-11-01T00:00:00Z", "sent_copy_found": True, "look": 1, "waited_s": 0.1}, fh)
+
+    def record(self):
+        with open(self.path(), encoding="utf-8") as fh:
+            text = fh.read()
+        for value in (DORIS, "whizz", PASSWORD, "doris-", "@", "<", COLLECTION, "127.0.0.1"):
+            self.assertNotIn(value, text)
+        return json.loads(text)
+
+    def files(self):
+        return sorted(os.listdir(paths.state_dir("live")))
+
+    def test_a_copy_found_writes_when_which_look_and_the_wait_and_nothing_else(self):
+        self.smtp.on_deliver = self.deliver_to_sent
+        before = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 0)
+        record = self.record()
+        self.assertEqual(set(record), self.KEYS)
+        self.assertIs(record["sent_copy_found"], True)
+        self.assertEqual(record["look"], 1)
+        self.assertIsInstance(record["waited_s"], float)
+        self.assertGreaterEqual(record["waited_s"], 0.0)
+        self.assertRegex(record["ts"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\Z")
+        stamp = dt.datetime.strptime(record["ts"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+        self.assertTrue(before <= stamp <= dt.datetime.now(dt.timezone.utc), record["ts"])
+        self.assertEqual(self.result("sent copy record for a live run"), "ok (written)")
+        self.assertEqual(self.files(), ["ledger.lock", "smoke-sent.json"])      # no temp file left beside it
+        self.assert_no_value()
+
+    def test_a_copy_found_on_the_second_look_records_look_2_and_the_wait(self):
+        patches = self.late_copy(5.0)
+        with patches[0], patches[1]:
+            self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 0)
+        record = self.record()
+        self.assertEqual((record["look"], record["waited_s"]), (2, 5.0))
+
+    def test_a_copy_not_found_removes_an_old_record_and_writes_none(self):
+        self.old_record()
+        self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 1)
+        self.assertEqual(self.files(), ["ledger.lock"])
+
+    def test_a_smoke_without_send_to_removes_an_old_record(self):
+        self.old_record()
+        self.assertEqual(self.run_smoke(), 0)
+        self.assertEqual(self.files(), ["ledger.lock"])
+
+    def test_a_smoke_cut_short_leaves_no_record(self):
+        self.old_record()
+        with mock.patch.object(live.LiveCalendar, "query", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_smoke("--send-to", "whizz@fastmail.com")
+        self.assertEqual(self.files(), ["ledger.lock"])
+
+    def test_a_smoke_refused_by_a_halt_or_the_lock_leaves_the_record_alone(self):
+        self.old_record()
+        supervisor.request_stop("live", "cli")
+        self.assertEqual(self.run_smoke(), supervisor.EXIT_REFUSED_HALT)
+        self.assertEqual(self.record()["ts"], "2026-11-01T00:00:00Z")
+        os.remove(supervisor.halt_file("live"))
+        held = supervisor.acquire_lock(os.path.join(paths.state_dir("live"), supervisor.LOCK_NAME))
+        self.addCleanup(held.release)
+        self.assertEqual(self.run_smoke(), supervisor.EXIT_LOCKED)
+        self.assertEqual(self.record()["ts"], "2026-11-01T00:00:00Z")
+
+    def test_an_old_record_it_cannot_remove_stops_it_before_any_connection(self):
+        os.makedirs(self.path())                 # a folder where the record goes: it cannot be removed
+        self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 1)
+        self.assertEqual(len(self.lines), 1, self.lines)
+        self.assertRegex(self.lines[0], r"^smoke: FAILED: the old sent-copy record cannot be removed \(\w+\)\Z")
+        self.assertEqual((self.imap.commands, self.smtp.sessions, self.dav.requests), ([], [], []))
+
+    def test_a_record_it_cannot_write_fails_the_smoke_and_leaves_nothing_behind(self):
+        self.smtp.on_deliver = self.deliver_to_sent
+        with mock.patch.object(smoke.os, "replace", side_effect=PermissionError(13, "denied")):
+            self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 1)
+        self.assertEqual(self.result("sent copy found")[:2], "ok")
+        self.assertEqual(self.result("sent copy record for a live run"), "PermissionError")
+        self.assertEqual(self.result("smoke"), "FAILED")
+        self.assertEqual(self.files(), ["ledger.lock"])
 
 
 class SetupTest(SmokeFixture):
