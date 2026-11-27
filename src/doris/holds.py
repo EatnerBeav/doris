@@ -10,6 +10,8 @@ the same way wherever she shows them, and so is the subject she echoes in a repl
 the approved S1 draft with a gap for Shane: no model-written prose.
 """
 
+import base64
+import binascii
 import re
 import unicodedata
 
@@ -86,7 +88,8 @@ def clean(text):
 #     a row have no lowercase letter and one of them has 2 letters or more (ABC-DEF-WXYZ, and
 #     ref=ABC-DEF-1234 or x/ABC-DEF-WXYZ: the words around a code don't save it; second Fable
 #     review of PR #4, H1);
-# three or more mixed groups in a row are blanked together (AB12 CD34 EF56, A1B2:C3D4:E5F6); and the
+# three or more mixed groups in a row are blanked together (AB12 CD34 EF56, A1B2:C3D4:E5F6); a line of
+# base64 text is blanked (below); and the
 # word after password, passphrase, passcode, PIN, OTP, a named code or key (verification code, API
 # key), or after "code", "key", "token" or "secret" with ":", "=" or "is", is blanked when it holds a
 # digit or three or more hyphenated words. Times, dates, ordinals, amounts with units (10am, 30th,
@@ -149,6 +152,40 @@ def _groups(m):
     return REDACTED if all(_mixed(g) for g in re.split(r"[ :]", m.group(0))) else m.group(0)
 
 
+# Base64 text (second Fable review of PR #4, M2): a run of 8 or more base64 characters, capitals and
+# small letters both, that decodes to printable text at some alignment (0 to 3 leading characters
+# dropped): 6 bytes or more, all printable. Each line is judged alone, so a line wrap doesn't save
+# the first line. A run of letters only must give 9 bytes (12 characters), or ordinary words would
+# go (Eventually, Installs and Visibility each decode to 6 printable bytes); a run joined by "+" or
+# "/" is also read piece by piece (billing+ and a base64 code).
+_B64 = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{8,}=*(?![A-Za-z0-9+/=])")
+_TEXT_BYTES = bytes(range(32, 127)) + b"\t\n\r"
+
+
+def _base64_text(run):
+    pieces = [run] + (re.split(r"[+/]", run) if "+" in run or "/" in run else [])
+    for piece in pieces:
+        if len(piece) < 8 or not any(c.isupper() for c in piece) or not any(c.islower() for c in piece):
+            continue
+        need = 9 if piece.isalpha() else 6
+        for off in range(4):
+            chunk = piece[off:]
+            chunk = chunk[:len(chunk) - len(chunk) % 4]
+            if len(chunk) // 4 * 3 < need:
+                break
+            try:
+                data = base64.b64decode(chunk)
+            except (binascii.Error, ValueError):
+                continue
+            if not data.translate(None, _TEXT_BYTES):
+                return True
+    return False
+
+
+def _b64(m):
+    return REDACTED if _base64_text(m.group(0).rstrip("=")) else m.group(0)
+
+
 def _secret(m):
     named = not _WEAK_WORD.match(m.group("k")) or m.group("c").strip()
     v = m.group("v")
@@ -161,6 +198,7 @@ def blank_codes(text):
     """Every code in the text replaced by [redacted] (the rules above)."""
     text = _SECRET.sub(_secret, text)
     text = _GROUPS.sub(_groups, text)
+    text = _B64.sub(_b64, text)
     return _RUN.sub(_run, text)
 
 

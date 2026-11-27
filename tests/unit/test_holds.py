@@ -212,6 +212,37 @@ class CodeTest(unittest.TestCase):
         wide = "quote \uff21\uff27\uff37\uff0d\uff23\uff21\uff2e\uff21\uff32\uff39\uff0d\uff37\uff31\uff3a\uff38 back"
         self.assertEqual(holds.safe_excerpt(wide, 400), "quote [redacted] back")
 
+    def test_base64_text_is_blanked_even_when_a_line_wrap_cuts_it(self):
+        # Second Fable review of PR #4, M2: a base64 line cut by a wrap kept its first line.
+        from doris import traps
+        import base64
+        for token in ("AGW-CANARY-WQZX", "AGW-CANARY-3071", "agw-canary-jmvp"):
+            for pad in ("", "x", "xy", "ref "):
+                b64 = base64.b64encode((pad + token).encode("ascii")).decode("ascii")
+                for cut in range(len(b64) + 1):
+                    for gap in ("\n", " ", "\n> "):
+                        text = "Here it is: " + b64[:cut] + gap + b64[cut:] + " thanks"
+                        for one_line in (False, True):
+                            out = holds.safe_excerpt(text, 400, one_line)
+                            self.assertEqual(traps.find_tokens(out), [], (text, out))
+        line = base64.b64encode(b"Please send the passphrase today").decode("ascii")
+        self.assertEqual(holds.blank_codes("x " + line[:12] + "\n" + line[12:] + " y"), "x [redacted]\n[redacted] y")
+        self.assertEqual(holds.blank_codes("to billing+" + line + "@x.example"), "to [redacted]@x.example")
+
+    def test_words_brand_names_and_message_ids_are_not_read_as_base64(self):
+        words = ("Thursday Wednesday December February Tomorrow Hopefully Eventually Essentially "
+                 "Unfortunately Visibility Installer Instantly Installs Instantiate Congratulations "
+                 "Thanksgiving Christmas Washington California Barcelona Singapore LinkedIn YouTube "
+                 "JavaScript TypeScript PowerPoint WordPress QuickBooks SharePoint DocuSign HubSpot "
+                 "Salesforce MailChimp WhatsApp SoundCloud ZipRecruiter BlackBerry PlayStation "
+                 "SurveyMonkey SquareSpace MasterCard ServiceNow DoorDash FreshBooks PostgreSQL McDonald "
+                 "MacBook iPhone SystemExit callHandlers removeChild DialogType")
+        self.assertEqual(holds.blank_codes(words), words)
+        for mid in ("<MeetingRequest.Thursday@calendar.example>", "<InviteReply.Northwind@x.example>",
+                    "<CalendarSync/AutoReply@x.example>", "<OutlookMeetingInvite@x.example>",
+                    "<Re.QuarterlyPlanning+Notes@x.example>"):
+            self.assertEqual(holds.blank_codes(mid), mid)
+
     def test_every_character_the_canary_scan_skips_is_removed(self):
         from doris import traps
         import re
