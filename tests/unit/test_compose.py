@@ -133,6 +133,15 @@ class ReplyTest(Base):
         self.assertEqual(m["Subject"], "RE: Friday? Bcc: x@evil.example")
         self.assertIsNone(m["Bcc"])
 
+    def test_a_code_in_the_subject_is_not_echoed(self):
+        # Fable review of PR #4, finding 1: the reply's Subject carried the sender's canary back.
+        from doris import traps
+        self.inbound = make_msg(subject="Sync AGW-CANARY-­7QXZ next week?")
+        raw, _ = self.reply()
+        m = email.message_from_bytes(raw, policy=email.policy.default)
+        self.assertEqual(m["Subject"], "Re: Sync [redacted] next week?")
+        self.assertEqual(traps.find_tokens(raw.decode("latin-1")), [])
+
     def test_non_ascii_subject_encoded(self):
         self.inbound = make_msg(subject="Café chat")
         raw, _ = self.reply()

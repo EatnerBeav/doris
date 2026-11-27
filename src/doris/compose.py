@@ -17,7 +17,7 @@ import hashlib
 import quopri
 import re
 
-from . import templates
+from . import holds, templates
 from .shapes import UTC
 
 # Locked call 10 in the law. templates.md shows the same two lines without the period after
@@ -158,7 +158,9 @@ def reply(msg, template_id, slots, doris_addr, message_id, date, ics=None):
     mid = _msgid(message_id)
     if mid is None:
         raise ComposeError("bad Message-ID")
-    subject = _clean(msg.subject)
+    # the sender's own subject, echoed with any code in it blanked (Fable review of PR #4, finding 1);
+    # In-Reply-To and References keep their Message-IDs as written, which threading needs
+    subject = _clean(holds.blank_codes(holds.clean(msg.subject)))
     if not re.match(r"(?i)^re\s*:", subject):
         subject = ("Re: " + subject).rstrip()
     headers = [("From", _addr(doris_addr, "her address")), ("To", _addr(msg.from_addr, "the sender")),

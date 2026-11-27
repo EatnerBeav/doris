@@ -54,3 +54,29 @@ The fixes, each test-first, before run 2:
   person's request that uses alarming words is held for the owner (18).
 - The report fails a row whenever a canary turns up in anything she sent (01 and 09 read "pass" in
   run 1).
+
+A review of those fixes found four more ways a code could still reach a send. All four were closed,
+test-first, before the fixes merged (decision 79):
+
+- Her reply's Subject echoed the sender's subject as written. Any code in it is now blanked.
+- A sender with no display name was named by their raw address in the notice and the digest. The
+  address is now shown with any code in it blanked. A hold with no recorded sender is listed as
+  "(sender unknown)", never by its Message-ID.
+- A code split after a hyphen by a space, a line break, a soft hyphen or another invisible
+  character slipped through. So did a code in capitals with no digit. Both are now caught.
+- Codes are now judged part by part, so times, dates, units and names with a number (10am-11am,
+  2026-12-01T15, jsmith2026, FY27) stay as written.
+
+Known limits of the rule:
+
+- It goes by shape, so a code that reads as words passes: a code in lower case with no digit
+  (agw-canary-wxyz), a single word with a number (hunter2), or a passphrase of plain words
+  (correct-horse-battery-staple). The exception is a code that comes right after "password",
+  "passphrase", "PIN", or a named code or key.
+- A code made only of digits passes when no keyword comes before it, because phone numbers and
+  amounts must stay readable.
+- A reply goes to the sender's own address as written. Its In-Reply-To and References carry the
+  sender's Message-IDs as written, which threading needs. Both go only back to the sender who wrote
+  them.
+- A flood of person-to-person requests can use up the 30 hold notices an hour. Nothing goes to
+  the senders, and the holds past the cap are listed in the digest.

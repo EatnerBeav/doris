@@ -131,6 +131,33 @@ class BuildTest(unittest.TestCase):
         r.add("decided", "1", {}, "policy.file_injection")
         self.assertEqual(digest.build(r.lines, NOW)["suspicious"], ["Ken visit evil[.]example"])
 
+    def test_a_code_in_a_sender_address_or_message_key_never_reaches_the_digest(self):
+        # Fable review of PR #4, finding 2: the address fallback, and a hold with no name showed its key.
+        from doris import traps
+        bad = "agw-canary-7qxz@quill.example.com"
+        r = Receipts()
+        r.observed("<AGW-CANARY-8VVM@x.example>", bad, "")
+        r.add("held", "<AGW-CANARY-8VVM@x.example>", {}, "hold.no_model", ts="2026-12-01T21:10:00Z")
+        r.add("held", "<AGW-CANARY-K4JJ@x.example>", {}, "hold.no_model", ts="2026-12-01T21:20:00Z")
+        r.observed("2", bad, "")
+        r.add("decided", "2", {}, "policy.file_injection")
+        r.observed("3", bad, "")
+        r.add("decided", "3", {"dropped": 0}, "screen.stop", n=0)
+        r.observed("4", bad, "")
+        r.add("decided", "4", {}, "screen.sensitive_skip")
+        r.observed("5", bad, "")
+        r.add("decided", "5", {"question": "Can you send it?"}, "policy.pick_plus_question")
+        r.observed("6", bad, "", "t-6")
+        r.add("decided", "6", {"thread": "t-6"}, "policy.offer_no_clear_time", cond="B5")
+        s = digest.build(r.lines, NOW, verified=True)
+        shown = "[redacted]@quill.example.com"
+        self.assertEqual([h["name"] for h in s["holds"]], [shown, "(sender unknown)"])
+        self.assertEqual((s["suspicious"], s["opted_out"], s["sensitive"], s["offered_to"]),
+                         ([shown], [(shown, 0)], [shown], [shown]))
+        self.assertEqual(s["also_asked"], [(shown, "Can you send it?")])
+        body = templates.render("S2", s)
+        self.assertEqual(traps.find_tokens(body), [])
+
     def test_held_thread_counted_but_sends_no_line(self):
         r = Receipts()
         r.observed("1", "a@x.example", "A")
