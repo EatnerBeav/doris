@@ -2,7 +2,8 @@
 
     demo     the sandbox day under the kill switch: no install, no key
     run      the long run under the kill switch: a pass over the inbox every ten minutes until
-             `python -m doris stop`; the sandbox by default (no key), or with --live her own
+             `python -m doris stop`, and the day's digest to the owner at her first pass from
+             5:00 PM Pacific; the sandbox by default (no key), or with --live her own
              mailbox and the owner's calendar from the env file (--env PATH, default
              /root/doris-secrets/.env; --fresh starts the live ledger, once)
     traps    the Trap Pack, one file at a time on fresh throwaway state
@@ -87,7 +88,8 @@ def run_cmd(argv):
     ap = argparse.ArgumentParser(
         prog="python -m doris run",
         description="The long run under the kill switch: a pass over the inbox every ten minutes until "
-                    "`python -m doris stop`. The sandbox by default; --live for her own mailbox.")
+                    "`python -m doris stop`, and the day's digest to the owner from 5:00 PM Pacific. "
+                    "The sandbox by default; --live for her own mailbox.")
     ap.add_argument("--live", action="store_true",
                     help="her own mailbox and the owner's shared calendar, every setting from the env file")
     ap.add_argument("--fresh", action="store_true",
@@ -110,7 +112,7 @@ def run_cmd(argv):
         _say(first_line(source, model_id))
         _say("She reads the sandbox inbox %s; a new .eml dropped in waits for her next cycle." % every)
         return supervise("sandbox", state, name, run_dir, sandbox_config(
-            name, state, run_dir, source, model_id, digest=False, cycles=None, cycle_s=RUN_CYCLE_S))
+            name, state, run_dir, source, model_id, digest=True, cycles=None, cycle_s=RUN_CYCLE_S))
     env_path = os.path.abspath(args.env or paths.LIVE_ENV)
     try:                                     # the worker makes every check again, under its lock
         settings = loop.live_preflight(state, env_path, args.fresh)
@@ -125,7 +127,7 @@ def run_cmd(argv):
     return supervise("live", state, name, run_dir, {
         "mode": "live", "run_name": name, "state_dir": state, "env_path": env_path, "fresh": args.fresh,
         "model_source": "live", "record_path": os.path.join(run_dir, "recorded-answers.jsonl"),
-        "clock_mode": "fixed", "digest": False, "cycles": None, "cycle_s": RUN_CYCLE_S})
+        "clock_mode": "fixed", "digest": True, "cycles": None, "cycle_s": RUN_CYCLE_S})
 
 
 def sandbox_source():

@@ -791,7 +791,7 @@ class RunCommandTest(LiveFixture):
         self.assertEqual({k: config.get(k) for k in ("mode", "state_dir", "env_path", "fresh", "model_source",
                                                      "clock_mode", "digest", "cycles", "cycle_s")},
                          {"mode": "live", "state_dir": self.state, "env_path": named, "fresh": True,
-                          "model_source": "live", "clock_mode": "fixed", "digest": False, "cycles": None,
+                          "model_source": "live", "clock_mode": "fixed", "digest": True, "cycles": None,
                           "cycle_s": loop.CYCLE.total_seconds()})
         for name in ("sandbox_root", "owner_addr", "doris_addr", "model_id", "answers_path"):
             self.assertIsNone(config.get(name), name)

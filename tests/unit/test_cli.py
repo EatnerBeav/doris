@@ -6,6 +6,8 @@ sandbox and a throwaway state folder, so the repository's own sandbox/ and state
 """
 
 import contextlib
+import email
+import email.policy
 import io
 import json
 import os
@@ -250,7 +252,50 @@ class Run(Isolated):
         with open(os.path.join(run, "config.json"), encoding="utf-8") as fh:
             config = json.load(fh)
         self.assertEqual((config["mode"], config["cycles"], config["cycle_s"], config["digest"], config["clock_mode"]),
-                         ("sandbox", None, 0.2, False, "advance"))
+                         ("sandbox", None, 0.2, True, "advance"))
+
+    def test_run_sends_the_days_digest_once_from_five_pacific(self):
+        root = os.path.dirname(self.inbox)
+        with open(os.path.join(root, "clock.txt"), "w", encoding="ascii") as fh:
+            fh.write("2026-12-02T00:50:00Z\n")                     # Tue Dec 1, 4:50 PM Pacific
+        outbox = os.path.join(root, "outbox")
+        failures = []
+
+        def digests():
+            return sorted(n for n in os.listdir(outbox) if n.endswith("-S2.eml"))
+
+        def stop_two_passes_after_the_digest():
+            deadline, fetched = time.time() + 60, None
+            while time.time() < deadline:
+                runs = os.path.join(self.state, "sandbox", "runs")
+                names = sorted(os.listdir(runs)) if os.path.isdir(runs) else []
+                lines = whole_lines(os.path.join(runs, names[-1], "receipts.jsonl")) if names else []
+                fetches = len([l for l in lines if l["kind"] == "called" and l["payload"]["call"] == "mail_fetch"])
+                if fetched is None and digests():
+                    fetched = fetches
+                elif fetched is not None and fetches >= fetched + 2:
+                    break
+                time.sleep(0.05)
+            else:
+                failures.append("gave up waiting (digest sent: %s)" % (fetched is not None))
+            supervisor.request_stop("sandbox", "cli")
+
+        judge = threading.Thread(target=stop_two_passes_after_the_digest)
+        judge.start()
+        try:
+            code, out = run_cli(["run"])
+        finally:
+            judge.join()
+        self.assertEqual(failures, [])
+        self.assertEqual(code, supervisor.EXIT_HALTED, out)
+        (name,) = digests()
+        with open(os.path.join(outbox, name), "rb") as fh:
+            sent = email.message_from_bytes(fh.read(), policy=email.policy.default)
+        self.assertEqual((str(sent["To"]), str(sent["Date"]), str(sent["Subject"])),
+                         (cli.SANDBOX_OWNER, "Wed, 02 Dec 2026 01:00:00 +0000",
+                          "Handled 1, held 0, human approvals 0. Tue Dec 1"))
+        (run,) = self.runs()
+        self.assertTrue(receipts.verify(os.path.join(run, "receipts.jsonl"), finished=True).ok)
 
     def test_fresh_and_env_belong_to_a_live_run(self):
         for argv in (["run", "--fresh"], ["run", "--env", "some.env"]):
