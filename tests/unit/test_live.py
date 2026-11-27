@@ -1574,6 +1574,21 @@ class CreateTest(CalFixture):
         err = self.fails(CalendarError, self.make_calendar(port=closed_port()).create_only, BID, her_event())
         self.assertNotIsInstance(err, CalendarTimeout)
 
+    def test_only_201_counts_as_created(self):
+        """Under If-None-Match: * a 200 or 204 is an overwrite, or a server that ignores the condition."""
+        for code in (200, 204):
+            self.dav.status["PUT"] = code
+            err = self.fails(CalendarError, self.cal.create_only, BID, her_event())
+            self.assertNotIsInstance(err, (CalendarTimeout, AlreadyExists))
+            self.assertIn(str(code), str(err))
+
+    def test_a_gateway_error_or_a_timeout_answer_is_unknown_never_not_written(self):
+        """The write may have landed behind the gateway: the caller looks it up by booking ID."""
+        for code in (408, 502, 504):
+            self.dav.status["PUT"] = code
+            err = self.fails(CalendarTimeout, self.cal.create_only, BID, her_event())
+            self.assertIn(str(code), str(err))
+
 
 class GetTest(CalFixture):
 

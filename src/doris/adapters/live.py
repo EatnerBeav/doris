@@ -828,8 +828,12 @@ class LiveCalendar(CalendarAdapter):
     # -- writes ----------------------------------------------------------------------------------
     def create_only(self, booking_id, ics_bytes):
         """PUT her event as <booking_id>.ics with If-None-Match: *, so it never overwrites.
-        412 is AlreadyExists. Refuses before any call an ID not hers, an .ics outside her fixed
-        form (G13) and a METHOD line (a calendar resource carries none, RFC 4791 4.1)."""
+        Only 201 is created. 412 is AlreadyExists. A gateway error or a timeout answer (408, 502,
+        504) is CalendarTimeout: the write may have landed, so the caller looks it up by booking
+        ID. Any other status, 200 and 204 included (under If-None-Match an overwrite, or a server
+        that ignores the condition), is a CalendarError. Refuses before any call an ID not hers,
+        an .ics outside her fixed form (G13) and a METHOD line (a calendar resource carries none,
+        RFC 4791 4.1)."""
         if not ics.is_booking_id(booking_id):
             raise NotHers("caldav create: not one of her booking IDs")
         step = "caldav create"
@@ -839,10 +843,15 @@ class LiveCalendar(CalendarAdapter):
             raise _failure(CalendarError, step, detail="refused: a calendar write carries no METHOD line")
         status, _, _ = self._request(step, "PUT", self._resource(booking_id), bytes(ics_bytes),
                                      {"If-None-Match": "*", "Content-Type": "text/calendar; charset=utf-8"})
-        if status in (200, 201, 204):
+        if status == 201:
             return
         if status == 412:
             raise _failure(AlreadyExists, step, status=status)
+        if status in _WRITE_UNKNOWN:
+            raise _failure(CalendarTimeout, step, status=status)
+        if status in (200, 204):
+            raise _failure(CalendarError, step, status=status,
+                           detail="%d, not 201: an overwrite, or a server that ignores If-None-Match" % status)
         raise _failure(CalendarError, step, status=status)
 
     def delete(self, booking_id):
@@ -901,6 +910,7 @@ _UNREADABLE = (ValueError, OverflowError)     # what ics raises on an event it c
 _XML_UNREADABLE = (xml.parsers.expat.ExpatError, ET.ParseError, LookupError, ValueError)
 _DAV, _CALDAV = "{DAV:}", "{urn:ietf:params:xml:ns:caldav}"
 _STATUS_LINE = re.compile(r"^\s*HTTP/\d(?:\.\d)?\s+(\d{3})\b")
+_WRITE_UNKNOWN = (408, 502, 504)   # a timeout or a gateway answered for the server: the write may have landed
 _STRONG_ETAG = re.compile(r'^"[\x21\x23-\x7e\x80-\xff]*"\Z')   # RFC 7232 entity-tag, not W/: what If-Match compares
 QUERY_PAD = _dt.timedelta(days=2)
 READ_PROPS = ("UID", "DTSTART", "DTEND", "DURATION", "STATUS", "TRANSP", "RECURRENCE-ID", "RRULE", "RDATE")
