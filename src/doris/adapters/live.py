@@ -77,6 +77,7 @@ _INTERNALDATE = re.compile(rb'INTERNALDATE "\s?(\d{1,2})-([A-Za-z]{3})-(\d{4}) (
 _UID = re.compile(rb"\bUID (\d+)")
 _FLAGS = re.compile(rb"\bFLAGS \(([^)]*)\)")
 _BODY_LITERAL = re.compile(rb"BODY\[\] \{\d+\}$")
+_HEADER_LITERAL = re.compile(rb'BODY\[HEADER\.FIELDS \("?MESSAGE-ID"?\)\] \{\d+\}\Z', re.I)
 _LIST_LINE = re.compile(rb'^\((?P<attrs>[^)]*)\)\s+(?P<delim>"(?:[^"\\]|\\.)*"|NIL)\s+(?P<rest>.*)\Z', re.S)
 _KEYWORD = re.compile(r"^[A-Za-z0-9$_-]{1,64}\Z")
 _SERVER_ID = re.compile(r"^INBOX:([1-9][0-9]{0,9}):([1-9][0-9]{0,9})\Z")
@@ -484,13 +485,19 @@ class LiveMail(MailAdapter):
 
     def _bodies(self, conn, uids, step):
         """uid -> the whole message as it arrived, read with BODY.PEEK[] (\\Seen untouched)."""
-        data = self._fetch(conn, uids, "(UID BODY.PEEK[])", step)
+        return self._literals(conn, uids, "(UID BODY.PEEK[])", _BODY_LITERAL, step)
+
+    def _literals(self, conn, uids, items, literal, step):
+        """uid -> the literal the server sent for the one item asked (its answer's head matching
+        literal), for every uid it answered that way. A uid left out, or answered with anything
+        but a literal (NIL, a quoted string), is simply not in the result."""
+        data = self._fetch(conn, uids, items, step)
         out = {}
         for i, item in enumerate(data):
             if not isinstance(item, tuple) or len(item) != 2 or not isinstance(item[0], bytes):
                 continue
             head, body = item
-            if not _BODY_LITERAL.search(head):
+            if not literal.search(head):
                 continue
             trailer = data[i + 1] if i + 1 < len(data) and isinstance(data[i + 1], bytes) else b""
             uid = _UID.search(head + b" " + trailer)
@@ -559,20 +566,27 @@ class LiveMail(MailAdapter):
     def find_in_sent(self, message_id):
         """True when a folder flagged \\Sent (RFC 6154 special-use, never a folder name) holds a
         message whose Message-ID is exactly this one. Read-only; writes nothing anywhere.
-        Raises MailError when it cannot tell, including when no folder is flagged \\Sent."""
+        False only when every message the search named was read and none is it. Raises
+        MailError when it cannot tell: no folder flagged \\Sent, or a message the search named
+        that the fetch then left out (expunged meanwhile) or answered without a header literal."""
         step = "imap sent lookup"
         target = _norm_mid(message_id)
         if not _MESSAGE_ID.match(target):
             raise _failure(MailError, step, detail="not a Message-ID it can search for")
+        unread = False
         with self._imap(step) as conn:
             for folder in self._sent_folders(conn, step):
                 self._open(conn, folder, True, step)
                 uids = self._search(conn, ("HEADER", "Message-ID", '"%s"' % target), step)
                 for batch in _batches(uids):
-                    for item in self._fetch(conn, batch, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])", step):
-                        if isinstance(item, tuple) and len(item) == 2 and target in _message_ids(item[1]):
-                            return True
-            return False
+                    headers = self._literals(conn, batch, "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])",
+                                             _HEADER_LITERAL, step)
+                    if any(target in _message_ids(header) for header in headers.values()):
+                        return True
+                    unread = unread or any(uid not in headers for uid in batch)
+        if unread:
+            raise _failure(MailError, step, detail="a message the search named could not be read; cannot tell")
+        return False
 
     def _sent_folders(self, conn, step):
         """Every mailbox flagged \\Sent: asked for with LIST ... RETURN (SPECIAL-USE), then a

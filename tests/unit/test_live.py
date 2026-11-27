@@ -270,6 +270,7 @@ class FakeIMAP(socketserver.ThreadingTCPServer):
         self.uid_after_body = False   # put "UID n" after the literal, as some servers do
         self.unsolicited = False      # slip an unrelated FETCH (flags) update into answers
         self.omit = set()             # uids whose answers the server leaves out
+        self.header_nil = False       # answer a header fetch with NIL instead of a literal
         self.no_uidvalidity = False
         self.store_quiet = False      # STORE sends no FETCH back
         self.store_ignored = False    # STORE answers OK but keeps nothing
@@ -447,6 +448,8 @@ class IMAPHandler(socketserver.StreamRequestHandler):
                 literal = ("BODY[]", msg["raw"])
                 if "BODY.PEEK[]" not in items_u and not self.readonly:
                     msg["flags"].add("\\Seen")
+            elif "HEADER.FIELDS (MESSAGE-ID)" in items_u and srv.header_nil:
+                head.append("BODY[HEADER.FIELDS (MESSAGE-ID)] NIL")
             elif "HEADER.FIELDS (MESSAGE-ID)" in items_u:
                 literal = ("BODY[HEADER.FIELDS (MESSAGE-ID)]", header_field(msg["raw"], "message-id"))
             tail = " UID %d" % uid if srv.uid_after_body else ""
@@ -775,6 +778,26 @@ class SentTest(ImapFixture):
         self.imap.fault["UID SEARCH"] = "no"
         with self.assertRaises(MailError):
             self.mail.find_in_sent("<0f3a9c@fastmail.com>")
+
+    def test_a_match_the_fetch_then_leaves_out_is_a_mail_error_never_false(self):
+        """Expunged between the search and the fetch: it cannot tell, so it does not say absent."""
+        uid = self.sent.add(eml(1, mid="0f3a9c@fastmail.com"), u(2026, 11, 27, 9, 0))
+        self.imap.omit.add(uid)
+        with self.assertRaises(MailError):
+            self.mail.find_in_sent("<0f3a9c@fastmail.com>")
+
+    def test_a_header_answer_that_is_not_a_literal_is_a_mail_error_never_false(self):
+        self.sent.add(eml(1, mid="0f3a9c@fastmail.com"), u(2026, 11, 27, 9, 0))
+        self.imap.header_nil = True
+        with self.assertRaises(MailError):
+            self.mail.find_in_sent("<0f3a9c@fastmail.com>")
+
+    def test_a_match_read_whole_is_found_whatever_another_match_does(self):
+        """Found is found: a second match that cannot be read does not undo it."""
+        near = self.sent.add(eml(1, mid="x0f3a9c@fastmail.com.example"), u(2026, 11, 27, 9, 0))
+        self.sent.add(eml(2, mid="0f3a9c@fastmail.com"), u(2026, 11, 27, 9, 1))
+        self.imap.omit.add(near)
+        self.assertTrue(self.mail.find_in_sent("<0f3a9c@fastmail.com>"))
 
     def test_a_message_id_it_cannot_search_for_is_refused_before_any_call(self):
         for bad in ("", "<>", None, 'a"b@fastmail.com', "no-at-sign", "a b@fastmail.com", "a\r\nb@fastmail.com",
