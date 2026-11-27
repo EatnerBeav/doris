@@ -1206,6 +1206,7 @@ class FakeCalDAV(http.server.ThreadingHTTPServer):
         self.status = {}              # method -> a status to answer with instead
         self.fault = {}               # method -> "drop" (close, no answer) | "hang"
         self.hang_s = 1.5
+        self.on_request = None        # called (method, resource name) as each request arrives
         self.etags = 0
         self.thread = threading.Thread(target=self.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
         self.thread.start()
@@ -1245,6 +1246,8 @@ class CalDAVHandler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
         srv.requests.append((self.command, self.path, {k.lower(): v for k, v in self.headers.items()}, body))
+        if srv.on_request is not None:
+            srv.on_request(self.command, self.name())
         fault = srv.fault.get(self.command)
         if fault in ("drop", "hang"):
             if fault == "hang":
@@ -1292,8 +1295,18 @@ class CalDAVHandler(http.server.BaseHTTPRequestHandler):
             return self.answer(code, data, [("Content-Type", kind)])
         items = srv.report
         if items is None:
-            items = [item(name, data) for name, (_, data) in sorted(srv.resources.items())]
+            uid = report_uid(body)
+            items = [item(name, data) for name, (_, data) in sorted(srv.resources.items())
+                     if uid is None or any(uid in v.uid for v in ics.read_events(data))]
         self.answer(207, multistatus(items), [("Content-Type", "application/xml; charset=utf-8")])
+
+
+def report_uid(body):
+    """The text a calendar-query matches UIDs against (RFC 4791 9.7.5: a substring), or None."""
+    for prop in ET.fromstring(body).iter(C_NS + "prop-filter"):
+        if prop.get("name") == "UID":
+            return prop.find(C_NS + "text-match").text
+    return None
 
 
 def closed_port():
@@ -1570,6 +1583,7 @@ class GetTest(CalFixture):
 
     def test_none_only_when_the_server_says_404(self):
         self.assertIsNone(self.cal.get(BID))
+        self.assertEqual(self.dav.methods(), ["GET", "REPORT"])
         for code in (403, 410, 500):
             self.dav.status["GET"] = code
             err = self.fails(CalendarError, self.cal.get, BID)
@@ -1582,6 +1596,26 @@ class GetTest(CalFixture):
         for bad in ("other", "doris-../x", "", None, BID + "\n"):
             self.fails(NotHers, self.cal.get, bad)
         self.assertEqual(self.dav.requests, [])
+
+    def test_a_404_is_confirmed_by_asking_the_collection_for_her_uid(self):
+        """None only when the calendar itself answers and holds no event with her UID."""
+        self.dav.put("someone-else.ics", vcal(timed("someone-else", S, E)))
+        self.assertIsNone(self.cal.get(BID))
+        (_, path, headers, body) = self.dav.requests[-1]
+        self.assertEqual((self.dav.methods(), path, headers["depth"]), (["GET", "REPORT"], COLLECTION, "1"))
+        self.assertEqual(report_uid(body), BID)
+        self.assertIsNone(ET.fromstring(body).find(".//" + C_NS + "time-range"))
+
+    def test_a_calendar_that_answers_404_itself_is_a_failure_never_none(self):
+        """A revoked share or a wrong collection answers 404 to everything: her event may still be there."""
+        for report in (404, 403, 500):
+            self.dav.status.update(GET=404, REPORT=report)
+            err = self.fails(CalendarError, self.cal.get, BID)
+            self.assertIn(str(report), str(err))
+
+    def test_her_uid_filed_under_another_name_is_a_failure_never_none(self):
+        self.dav.put("renamed-by-a-client.ics", vcal(timed(BID, S, E)))
+        self.fails(CalendarError, self.cal.get, BID)
 
     def test_an_event_filed_under_her_id_with_another_uid_is_a_failure(self):
         self.dav.put(BID + ".ics", vcal(timed("not-hers", S, E)))
@@ -1623,7 +1657,19 @@ class DeleteTest(CalFixture):
 
     def test_an_id_already_gone_is_a_no_op(self):
         self.cal.delete(BID)
-        self.assertEqual(self.dav.methods(), ["GET"])
+        self.assertEqual(self.dav.methods(), ["GET", "REPORT"])
+        self.assertEqual(report_uid(self.dav.requests[-1][3]), BID)
+
+    def test_a_calendar_that_answers_404_itself_is_a_failure_not_a_no_op(self):
+        self.dav.status.update(GET=404, REPORT=404)
+        err = self.fails(CalendarError, self.cal.delete, BID)
+        self.assertIn("404", str(err))
+        self.assertNotIn("DELETE", self.dav.methods())
+
+    def test_her_uid_filed_under_another_name_is_a_failure_not_a_no_op(self):
+        self.dav.put("renamed-by-a-client.ics", vcal(timed(BID, S, E)))
+        self.fails(CalendarError, self.cal.delete, BID)
+        self.assertNotIn("DELETE", self.dav.methods())
 
     def test_an_id_not_hers_is_refused_before_any_call(self):
         for bad in ("other", "doris-../x", "", None, "doris-a/b", BID + "\n"):
@@ -1663,8 +1709,19 @@ class DeleteTest(CalFixture):
 
     def test_a_resource_gone_between_the_read_and_the_delete_is_a_no_op(self):
         self.cal.create_only(BID, her_event())
-        self.dav.status["DELETE"] = 404
+
+        def someone_deletes_it_first(method, name):
+            if method == "DELETE":
+                self.dav.resources.pop(name, None)
+        self.dav.on_request = someone_deletes_it_first
         self.cal.delete(BID)
+        self.assertEqual(self.dav.methods(), ["PUT", "GET", "DELETE", "REPORT"])
+
+    def test_a_delete_answered_404_while_her_event_is_still_there_is_a_failure(self):
+        self.cal.create_only(BID, her_event())
+        self.dav.status["DELETE"] = 404
+        self.fails(CalendarError, self.cal.delete, BID)
+        self.assertIn(BID + ".ics", self.dav.resources)
 
 
 class CalDAVTransportTest(unittest.TestCase):

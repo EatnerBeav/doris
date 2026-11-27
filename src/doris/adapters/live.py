@@ -811,13 +811,15 @@ class LiveCalendar(CalendarAdapter):
     def get(self, booking_id):
         """Her event by booking ID, with the times and status the server holds (the caller
         compares them with what she wrote). A resource holding anything but exactly her one,
-        unrepeated VEVENT is a CalendarError. None only when the server answers 404; any other
-        failure raises (a timeout or lost connection as CalendarTimeout), never None."""
+        unrepeated VEVENT is a CalendarError. None only when the server answers 404 and the
+        collection itself, asked by UID, holds no event of hers; any other failure raises (a
+        timeout or lost connection as CalendarTimeout), never None."""
         if not ics.is_booking_id(booking_id):
             raise NotHers("caldav get: not one of her booking IDs")
         step = "caldav get"
         status, _, body = self._request(step, "GET", self._resource(booking_id), read=True)
         if status == 404:
+            self._confirm_absent(booking_id, step + " absent check")
             return None
         if status != 200:
             raise _failure(CalendarError, step, status=status)
@@ -846,13 +848,15 @@ class LiveCalendar(CalendarAdapter):
     def delete(self, booking_id):
         """Delete her own event by booking ID: read the resource, refuse unless it holds her
         event alone (NotHers), then DELETE exactly that resource If-Match its ETag. Absent
-        (404, before or after the read) is a no-op; the caller's read-back confirms it."""
+        (404, before or after the read, and the collection asked by UID holding no event of
+        hers) is a no-op; the caller's read-back confirms it."""
         if not ics.is_booking_id(booking_id):
             raise NotHers("caldav delete: not one of her booking IDs")
         step = "caldav delete"
         path = self._resource(booking_id)
         status, etag, body = self._request(step + " read", "GET", path, read=True)
         if status == 404:
+            self._confirm_absent(booking_id, step + " absent check")
             return
         if status != 200:
             raise _failure(CalendarError, step + " read", status=status)
@@ -864,9 +868,25 @@ class LiveCalendar(CalendarAdapter):
             raise _failure(NotHers, step, detail="the resource under her booking ID is not her event alone; not deleted")
         strong = etag and not etag.startswith("W/")     # If-Match compares strong ETags only (RFC 7232)
         status, _, _ = self._request(step, "DELETE", path, headers={"If-Match": etag} if strong else None)
-        if status in (200, 204, 404):
+        if status in (200, 204):
+            return
+        if status == 404:
+            self._confirm_absent(booking_id, step + " absent check")
             return
         raise _failure(CalendarError, step, status=status)
+
+    def _confirm_absent(self, booking_id, step):
+        """Return only when the collection itself answers a query for events with her UID and
+        names none. A 404 on her resource alone is no proof her event is gone: a revoked share or
+        a wrong collection answers 404 to everything, and a client may have filed her event under
+        another name. Anything else is a CalendarError."""
+        uid = booking_id.replace("&", "&amp;").replace("<", "&lt;")     # her IDs carry neither; kept safe anyway
+        status, _, body = self._request(step, "REPORT", self.path, (_UID_QUERY % {"uid": uid}).encode("utf-8"),
+                                        {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"}, read=True)
+        if status != 207:
+            raise _failure(CalendarError, step, status=status)
+        if self._multistatus(body, step):
+            raise _failure(CalendarError, step, detail="an event with her booking ID's UID is on the calendar; not gone")
 
 
 # ------------------------------------------------------------------------------------------------
@@ -955,6 +975,26 @@ def _her_one_event(body, booking_id, step):
         return ics.to_event(v)
     except _UNREADABLE:
         raise _failure(CalendarError, step, detail="her event cannot be read") from None
+
+
+# RFC 4791 9.7.5: every event whose UID contains her booking ID (a substring match; any answer at all
+# means "not gone"). Only the ETag is asked for: nothing about the event is read.
+_UID_QUERY = """<?xml version="1.0" encoding="utf-8"?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <D:getetag/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VEVENT">
+        <C:prop-filter name="UID">
+          <C:text-match collation="i;octet">%(uid)s</C:text-match>
+        </C:prop-filter>
+      </C:comp-filter>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>
+"""
 
 
 def _ics_stamp(moment):

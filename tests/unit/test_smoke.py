@@ -106,7 +106,8 @@ class SmokeTest(SmokeFixture):
         before = dt.datetime.now(dt.timezone.utc)
         self.run_smoke()
         self.run_smoke()
-        self.assertEqual(self.dav.methods(), ["REPORT", "PUT", "GET", "GET", "DELETE", "GET"] * 2)
+        # the last GET's 404 is confirmed by a UID query on the collection
+        self.assertEqual(self.dav.methods(), ["REPORT", "PUT", "GET", "GET", "DELETE", "GET", "REPORT"] * 2)
         puts = [r for r in self.dav.requests if r[0] == "PUT"]
         names = [path[len(COLLECTION):-len(".ics")] for _, path, _, _ in puts]
         for name, (_, _, _, body) in zip(names, puts):
