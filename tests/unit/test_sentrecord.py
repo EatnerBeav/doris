@@ -8,8 +8,9 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
-from doris import paths, sentrecord
+from doris import caps, paths, sentrecord
 
 UTC = dt.timezone.utc
 WHEN = dt.datetime(2026, 11, 28, 15, 4, 5, 678000, tzinfo=UTC)
@@ -59,7 +60,7 @@ class SentRecordFormatTest(unittest.TestCase):
             for waited in (0, 0.0, 0.04, 0.05, 4.96, 5.0, 61.25, 3600.0):
                 with self.subTest(look=look, waited=waited):
                     sentrecord.write(self.path, look, waited, WHEN)
-                    self.assertIsNone(sentrecord.problem(self.state))
+                    self.assertIsNone(sentrecord.problem(self.state, WHEN))
                     self.assertEqual(sorted(os.listdir(self.state)), ["smoke-sent.json"])   # no temp file
 
     def test_the_smoke_never_writes_a_record_a_live_run_would_refuse(self):
@@ -71,13 +72,36 @@ class SentRecordFormatTest(unittest.TestCase):
                     sentrecord.write(self.path, look, waited, WHEN)
                 self.assertEqual(os.listdir(self.state), [])
 
+    def test_a_record_is_fresh_from_when_the_smoke_wrote_it_until_a_day_after(self):
+        self.assertEqual(caps.SMOKE_RECORD_MAX_AGE, dt.timedelta(hours=24))
+        sentrecord.write(self.path, 1, 0.4, WHEN)                 # ts 15:04:05, to the second
+        written = WHEN.replace(microsecond=0)
+        for now in (written, WHEN, written + dt.timedelta(hours=23, minutes=59, seconds=59),
+                    written + caps.SMOKE_RECORD_MAX_AGE):
+            with self.subTest(now=now):
+                self.assertIsNone(sentrecord.problem(self.state, now))
+        for now in (written + caps.SMOKE_RECORD_MAX_AGE + dt.timedelta(seconds=1), written + dt.timedelta(days=30)):
+            with self.subTest(now=now):
+                self.assertEqual(sentrecord.problem(self.state, now),
+                                 "the smoke check's record (smoke-sent.json) is more than 24 hours old")
+        for now in (written - dt.timedelta(seconds=1), written - dt.timedelta(days=1)):
+            with self.subTest(now=now):
+                self.assertEqual(sentrecord.problem(self.state, now),
+                                 "the smoke check's record (smoke-sent.json) is dated after now")
+
+    def test_a_shorter_limit_reads_as_hours_and_minutes(self):
+        sentrecord.write(self.path, 1, 0.4, WHEN)
+        with mock.patch.object(caps, "SMOKE_RECORD_MAX_AGE", dt.timedelta(minutes=90)):
+            self.assertEqual(sentrecord.problem(self.state, WHEN + dt.timedelta(hours=2)),
+                             "the smoke check's record (smoke-sent.json) is more than 1.5 hours old")
+
     def test_no_record_is_refused_as_no_smoke_having_found_the_copy(self):
-        self.assertEqual(sentrecord.problem(self.state), sentrecord.MISSING)
+        self.assertEqual(sentrecord.problem(self.state, WHEN), sentrecord.MISSING)
         self.assertEqual(sentrecord.MISSING, "no smoke check has found her sent copy in Sent yet")
 
     def test_a_record_that_cannot_be_read_is_refused(self):
         os.makedirs(self.path)                   # a folder where the record goes
-        self.assertRegex(sentrecord.problem(self.state),
+        self.assertRegex(sentrecord.problem(self.state, WHEN),
                          r"^the smoke check's record \(smoke-sent\.json\) cannot be read: \w+\Z")
 
     def test_anything_but_the_smokes_own_layout_is_refused(self):
@@ -100,7 +124,7 @@ class SentRecordFormatTest(unittest.TestCase):
         for name, data in cases.items():
             with self.subTest(case=name):
                 self.put(data)
-                self.assertTrue(sentrecord.problem(self.state).startswith(
+                self.assertTrue(sentrecord.problem(self.state, WHEN).startswith(
                     "the smoke check's record (smoke-sent.json) is not as the smoke writes it: "), name)
 
     def test_a_key_missing_or_extra_or_a_value_of_another_kind_is_refused_naming_the_field(self):
@@ -139,7 +163,7 @@ class SentRecordFormatTest(unittest.TestCase):
         for data, why in cases:
             with self.subTest(data=data):
                 self.put(data)
-                said = sentrecord.problem(self.state)
+                said = sentrecord.problem(self.state, WHEN)
                 self.assertTrue(said.startswith(
                     "the smoke check's record (smoke-sent.json) is not as the smoke writes it: " + why), said)
                 self.assertNotIn("whizz", said)

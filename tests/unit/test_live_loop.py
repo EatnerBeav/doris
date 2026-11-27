@@ -6,6 +6,7 @@ The real LiveMail and LiveCalendar talk to test_live's fake IMAP, SMTP and CalDA
 test_smoke. No test reads a real env file or reaches a real server.
 """
 import contextlib
+import datetime as dt
 import email
 import email.policy
 import http.client
@@ -170,10 +171,10 @@ class LiveFixture(EnvFolder):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def smoke_record(self):
+    def smoke_record(self, when=None):
         """The record `smoke --send-to` writes when it finds its copy in Sent: the smoke's own
-        writer's bytes (sentrecord.encode), from an hour before her first cycle here."""
-        return sentrecord.encode(1, 0.4, u(2026, 12, 1, 15, 0))
+        writer's bytes (sentrecord.encode), by default from an hour before her first cycle here."""
+        return sentrecord.encode(1, 0.4, when or u(2026, 12, 1, 15, 0))
 
     def prove_smoke(self, data):
         """Leave data (bytes, or text as UTF-8) where the smoke writes its record; None: no record."""
@@ -314,6 +315,23 @@ class LiveStartTest(LiveFixture):
         self.assertRegex(str(cm.exception), r"^Not started: the smoke check's record \(smoke-sent\.json\) "
                                             r"cannot be read: \w+\. Run `python -m doris smoke")
         self.nothing_contacted()
+
+    def test_a_record_more_than_a_day_old_or_dated_ahead_refuses_before_anything_connects(self):
+        """Fresh is from when the smoke wrote it until caps.SMOKE_RECORD_MAX_AGE (a day) after."""
+        stale = ("Not started: the smoke check's record (smoke-sent.json) is more than 24 hours old. "
+                 + loop.SMOKE_FIRST)
+        ahead = "Not started: the smoke check's record (smoke-sent.json) is dated after now. " + loop.SMOKE_FIRST
+        for clock, said in ((u(2026, 12, 2, 15, 0, 1), stale), (u(2026, 12, 9, 15, 0), stale),
+                            (u(2026, 12, 1, 14, 59, 59), ahead)):
+            with self.subTest(clock=clock):
+                self.clock = clock
+                with self.assertRaises(loop.Refused) as cm:
+                    self.go(fresh=True)
+                self.assertEqual((str(cm.exception), cm.exception.exit_code), (said, 2))
+                self.assertFalse(os.path.exists(os.path.join(self.state, "ledger.sqlite")))
+                self.nothing_contacted()
+        self.clock = u(2026, 12, 2, 15, 0)                       # a day to the second after the smoke
+        self.assertTrue(self.go(fresh=True).verify_ok)
 
     def test_a_live_config_carries_no_addresses_and_no_sandbox(self):
         for extra in ({"owner_addr": OWNER}, {"doris_addr": DORIS}, {"sandbox_root": self.dir}, {"env_path": None}):
@@ -629,6 +647,10 @@ class RunCommandTest(LiveFixture):
             self.prove_smoke('{"sent_copy_found": true}')
             return ["--env", self.write_env(), "--fresh"]
 
+        def stale_proof():
+            self.prove_smoke(self.smoke_record(u(2026, 11, 30, 15, 59, 59)))     # a day and a second before
+            return ["--env", self.write_env(), "--fresh"]
+
         def no_ledger():
             return ["--env", self.write_env()]
 
@@ -640,6 +662,8 @@ class RunCommandTest(LiveFixture):
                  (no_proof, loop.SMOKE_REFUSAL),
                  (loose_proof, "Not started: the smoke check's record (smoke-sent.json) is not as the smoke writes "
                                "it: its keys are not exactly look, sent_copy_found, ts, waited_s. " + loop.SMOKE_FIRST),
+                 (stale_proof, "Not started: the smoke check's record (smoke-sent.json) is more than 24 hours old. "
+                               + loop.SMOKE_FIRST),
                  (no_ledger, loop.NO_LIVE_LEDGER),
                  (fresh_over_a_ledger, loop.FRESH_OVER_LEDGER))
         for setup, said in cases:
@@ -670,6 +694,7 @@ class RunCommandTest(LiveFixture):
         code, out = self.cli("smoke", "--env", self.env_path, "--send-to", "whizz@fastmail.com")
         self.assertEqual(code, 0, out)
         self.assertIn("\nsent copy record for a live run: ok (written)\n", out)
+        self.clock = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)    # the run starts right after
         code, out = self.cli("run", "--live", "--fresh", "--env", self.env_path)
         self.assertEqual(code, 0, out)
         self.assertEqual(len(self.started), 1)

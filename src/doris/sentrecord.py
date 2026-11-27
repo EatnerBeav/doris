@@ -14,9 +14,11 @@ holding exactly these four keys and nothing else (no address, ID or setting):
   look             1 or 2: the look in Sent that found the copy first
   waited_s         seconds from the end of the send to the end of that look, to 0.1 s
 
-A live run takes the record only as the smoke writes it, byte for byte. No file, a file that
-cannot be read, anything else in it, a key missing or extra, or a value of another kind: the run
-is refused, with one phrase saying which (problem). The smoke never writes what a run refuses.
+A live run takes the record only as the smoke writes it, byte for byte, and only while it is
+fresh: from its ts until caps.SMOKE_RECORD_MAX_AGE (a day) after. No file, a file that cannot be
+read, anything else in it, a key missing or extra, a value of another kind, a record older than
+that or dated after now: the run is refused, with one phrase saying which (problem). The smoke
+never writes what a run would refuse as malformed.
 """
 
 import datetime as _dt
@@ -25,6 +27,8 @@ import math
 import os
 import re
 import tempfile
+
+from . import caps
 
 UTC = _dt.timezone.utc
 NAME = "smoke-sent.json"                # in the live state folder, paths.state_dir("live")
@@ -71,9 +75,9 @@ def write(file_path, look, waited_s, now):
         raise
 
 
-def problem(state_dir):
-    """None when the state folder holds the record as the smoke writes it; else why not, as one
-    phrase that shows no value from the file."""
+def problem(state_dir, now):
+    """None when the state folder holds the record as the smoke writes it, fresh at now (an aware
+    time); else why not, as one phrase that shows no value from the file."""
     try:
         with open(path(state_dir), "rb") as fh:
             data = fh.read(MAX_BYTES + 1)
@@ -82,9 +86,13 @@ def problem(state_dir):
     except OSError as exc:
         return "%s cannot be read: %s" % (_ITS, type(exc).__name__)
     try:
-        _parse(data)
+        written = _parse(data)
     except ValueError as exc:
         return "%s is not as the smoke writes it: %s" % (_ITS, exc)
+    if written > now:
+        return "%s is dated after now" % _ITS
+    if now - written > caps.SMOKE_RECORD_MAX_AGE:
+        return "%s is more than %g hours old" % (_ITS, caps.SMOKE_RECORD_MAX_AGE.total_seconds() / 3600)
     return None
 
 

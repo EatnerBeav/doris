@@ -57,10 +57,12 @@ A live run starts only after a smoke found its --send-to copy in Sent: that smok
 that one, writes state/live/smoke-sent.json, whole (a temp file, then os.replace), holding
 exactly {"ts": UTC time, "sent_copy_found": true, "look": 1 or 2, "waited_s": seconds from the
 end of the send to the end of the look that found it}: no address, ID or setting. The file and
-its format are sentrecord's, which the live run's preflight reads, so the two agree. Every smoke
-that runs removes the old record first, so one that does not find its copy, runs without
---send-to or is cut short leaves none; an old record it cannot remove stops it before it
-contacts anything (exit 1). A smoke refused for a halt or the lock leaves the record alone.
+its format are sentrecord's, which the live run's preflight reads, so the two agree; a run
+takes the record for a day after it is written (caps.SMOKE_RECORD_MAX_AGE), then needs a new
+smoke. Every smoke that runs removes the old record first, so one that does not find its copy,
+runs without --send-to or is cut short leaves none; an old record it cannot remove stops it
+before it contacts anything (exit 1). A smoke refused for a halt or the lock leaves the record
+alone.
 
 Exit 0 when every step that ran passed; 1 when any failed; 2 when the command line or the env
 file is wrong; 3 when a live run holds the lock (or the lock cannot be taken); 5 when a halt is

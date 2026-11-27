@@ -178,11 +178,12 @@ def _live_link(env, error):
     return value
 
 
-def smoke_refusal(state_dir):
+def smoke_refusal(state_dir, now):
     """None when the live state folder holds the smoke's sent record (sentrecord) exactly as
-    `smoke --send-to` writes it once it finds its copy in Sent: the proof that her SMTP mail
-    reaches her Sent folder. Else the one line a live run is refused with, saying what is wrong."""
-    why = sentrecord.problem(state_dir)
+    `smoke --send-to` writes it once it finds its copy in Sent, and fresh at now (no more than
+    caps.SMOKE_RECORD_MAX_AGE old): the proof that her SMTP mail reaches her Sent folder. Else the
+    one line a live run is refused with, saying what is wrong."""
+    why = sentrecord.problem(state_dir, now)
     return None if why is None else "Not started: %s. %s" % (why, SMOKE_FIRST)
 
 
@@ -224,7 +225,7 @@ def live_preflight(state_dir, env_path, fresh):
     anything: the env file's settings (the model live), the smoke's proof, then the ledger against
     --fresh. Refused (exit 2) in one plain line; the worker makes every check again under its lock."""
     settings = live_settings(env_path, "live")
-    refusal = smoke_refusal(state_dir)
+    refusal = smoke_refusal(state_dir, _wall_now())
     if refusal is not None:
         raise Refused(refusal, 2)
     there = os.path.exists(os.path.join(state_dir, "ledger.sqlite"))
@@ -420,7 +421,7 @@ class _Run:
                           supervisor.WORKER_EXIT_HALTED)
         if cfg.mode == "live":              # every setting from the env file, before anything is made
             self.live = live_settings(cfg.env_path, cfg.model_source)
-            refusal = smoke_refusal(cfg.state_dir)
+            refusal = smoke_refusal(cfg.state_dir, _wall_now())
             if refusal is not None:
                 raise Refused(refusal, 2)
             self.cfg = cfg = replace(cfg, owner_addr=self.live.owner_addr, doris_addr=self.live.doris_addr)

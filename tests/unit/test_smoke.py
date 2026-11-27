@@ -21,7 +21,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from doris import ics, loop, netguard, paths, sentrecord, smoke, supervisor, templates
+from doris import caps, ics, loop, netguard, paths, sentrecord, smoke, supervisor, templates
 from doris.adapters import live
 from doris.shapes import MailError, Slot
 from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, FakeSMTP, eml, u
@@ -501,12 +501,24 @@ class SentRecordTest(SmokeFixture):
     def test_the_record_this_smoke_writes_is_one_a_live_run_takes(self):
         self.smtp.on_deliver = self.deliver_to_sent
         self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 0)
-        self.assertIsNone(loop.smoke_refusal(paths.state_dir("live")))
+        now = dt.datetime.now(dt.timezone.utc)
+        self.assertIsNone(loop.smoke_refusal(paths.state_dir("live"), now))
         self.assertEqual(self.preflight().doris_addr, DORIS)      # not refused
 
+    def test_the_record_this_smoke_writes_goes_stale_for_a_live_run_a_day_later(self):
+        self.smtp.on_deliver = self.deliver_to_sent
+        self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 0)
+        later = dt.datetime.now(dt.timezone.utc).replace(microsecond=0) + caps.SMOKE_RECORD_MAX_AGE
+        with mock.patch.object(loop, "_wall_now", lambda: later + dt.timedelta(seconds=1)):
+            with self.assertRaises(loop.Refused) as cm:
+                self.preflight()
+        self.assertEqual(str(cm.exception), "Not started: the smoke check's record (smoke-sent.json) is more than "
+                                            "24 hours old. " + loop.SMOKE_FIRST)
+
     def test_after_a_smoke_that_did_not_find_its_copy_a_live_run_is_refused(self):
-        self.old_record()
-        self.assertIsNone(loop.smoke_refusal(paths.state_dir("live")))
+        os.makedirs(paths.state_dir("live"), exist_ok=True)
+        sentrecord.write(self.path(), 1, 0.1, dt.datetime.now(dt.timezone.utc))      # an earlier smoke's, fresh
+        self.assertIsNone(loop.smoke_refusal(paths.state_dir("live"), dt.datetime.now(dt.timezone.utc)))
         self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 1)
         with self.assertRaises(loop.Refused) as cm:
             self.preflight()

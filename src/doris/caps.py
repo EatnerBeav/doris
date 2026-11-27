@@ -60,6 +60,9 @@ MODEL_RETRY_WAIT_S = 2.0
 RULING17_REREAD_WAIT_S = 2.0             # "missing on two reads a short wait apart"
 SENT_LOOK_WAIT_S = 5.0                   # live: between her two looks in Sent after a send (ruling 8)
 
+# --- A live run's start (decision 76) -------------------------------------------------------
+SMOKE_RECORD_MAX_AGE = _dt.timedelta(hours=24)   # how long after a smoke wrote its sent record a live run takes it
+
 # --- Hold notices (S1) ---------------------------------------------------------------------
 HOLD_QUOTE_CHARS = 400
 
