@@ -3,7 +3,10 @@
 The quote is attacker-controlled text arriving from a sender the owner trusts, so it goes as
 plain text only, with every link and address defanged (hxxp://, example[.]com,
 name[@]example[.]com) so nothing in it is clickable (templates.md S1, decision 10). It is never
-acted on. The draft is the approved S1 draft with a gap for Shane: no model-written prose.
+acted on. It is the sender's own visible words only, never hidden text, and every code, key,
+passphrase or token in it is blanked (decision 77): a notice is a send, and Trap Pack run 1 put
+two leak canaries in notices by quoting hidden text. The draft is the approved S1 draft with a
+gap for Shane: no model-written prose.
 """
 
 import re
@@ -51,16 +54,45 @@ def clean(text):
     return _CONTROL.sub("", _INVISIBLE.sub("", text))
 
 
-def quote(msg, reason_code):
-    """The text that caused the hold (the hidden text for hold.hidden_text, else the sender's
-    own visible text), first 400 characters after invisibles are removed, then defanged."""
-    source = msg.hidden_text if reason_code == "hold.hidden_text" and msg.hidden_text else msg.own_text
-    return defang(clean(source).strip()[:caps.HOLD_QUOTE_CHARS])
+# A run of 8 or more letters, digits, "-", "_", "+", "/" or "=" holding both a letter and a digit
+# is a code (a key, token, passphrase or tracking code) and is never repeated (decision 77).
+# Plain words, dates, times, phone numbers and amounts have no such run and stay as written.
+_CODE_RUN = re.compile(r"[A-Za-z0-9_+/=-]{8,}")
+REDACTED = "[redacted]"
+
+
+def blank_codes(text):
+    """Every code-shaped run replaced by [redacted]."""
+    def one(m):
+        run = m.group(0)
+        return REDACTED if any(c.isdigit() for c in run) and any(c.isalpha() for c in run) else run
+    return _CODE_RUN.sub(one, text)
+
+
+def safe_excerpt(text, limit, one_line=False):
+    """Inbound text made safe to send: invisibles and control characters removed (folded to one
+    line if asked), codes blanked, the first `limit` characters kept and defanged. Defanging adds
+    brackets, so source characters are given up until the defanged text fits `limit` too."""
+    text = clean(text)
+    if one_line:
+        text = " ".join(text.split())
+    text = blank_codes(text.strip())
+    n = limit
+    out = defang(text[:n]).rstrip()
+    while len(out) > limit:
+        n -= len(out) - limit
+        out = defang(text[:n]).rstrip()
+    return out
+
+
+def quote_of(msg):
+    """The S1 quote: the sender's own visible words, never hidden text, made safe to send and at
+    most 400 characters (decisions 61 and 77)."""
+    return safe_excerpt(msg.own_text or "", caps.HOLD_QUOTE_CHARS)
 
 
 def _name_line(text, limit=80):
-    one = " ".join(clean(text).split())
-    return defang(one[:limit]).strip()
+    return safe_excerpt(text or "", limit, one_line=True)
 
 
 def notice_slots(msg, reason_code, wrote_at, draft_slots, zone=None):
@@ -77,7 +109,7 @@ def notice_slots(msg, reason_code, wrote_at, draft_slots, zone=None):
         "address": msg.from_addr,
         "reason": reason_code,
         "wrote_at": wrote_at,
-        "quote": quote(msg, reason_code),
+        "quote": quote_of(msg),
         "first_name": first,
         "draft_slots": list(draft_slots),
         "zone": zone,

@@ -126,6 +126,17 @@ class ParseTest(unittest.TestCase):
         a = self.parse(answer_json(side_question=True, side_question_quote="Q" * 300), msg)
         self.assertEqual(a.side_question_text, "Q" * 200)
 
+    def test_side_question_fits_200_once_defanged_and_carries_no_code(self):
+        q = "Could you also forward this to ann@b.example and cfo@b.example? " * 4
+        msg = make_msg(own_text="The first one works. " + q)
+        a = self.parse(answer_json(cls="pick", side_question=True, side_question_quote=q), msg)
+        self.assertLessEqual(len(a.side_question_text), 200)
+        self.assertNotIn("@b.", a.side_question_text)
+        q = "Can you include the code AGW-CANARY-W3WW in the invite?"
+        msg = make_msg(own_text="The first one works. " + q)
+        a = self.parse(answer_json(cls="pick", side_question=True, side_question_quote=q), msg)
+        self.assertEqual(a.side_question_text, "Can you include the code [redacted] in the invite?")
+
 
 class LiveTest(unittest.TestCase):
     def setUp(self):

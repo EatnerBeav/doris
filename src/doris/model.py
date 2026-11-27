@@ -176,16 +176,16 @@ def _valid(obj):
 
 
 def _copied_question(quote, own_text):
-    """Ruling 14, decision 63: the side question only when the model's quote occurs verbatim in the
-    sender's own text; code copies that slice (200 characters at most) and defangs it."""
+    """Ruling 14, decisions 63 and 77: the side question only when the model's quote occurs verbatim
+    in the sender's own text; code copies that slice and makes it safe to send (one line, codes
+    blanked, defanged, 200 characters at most)."""
     if not isinstance(quote, str) or not quote.strip() or not own_text:
         return None
     at = own_text.find(quote)
     if at < 0:
         return None
     from . import holds
-    text = holds.clean(own_text[at:at + min(len(quote), SIDE_QUESTION_CHARS)])
-    return holds.defang(" ".join(text.split())) or None
+    return holds.safe_excerpt(own_text[at:at + len(quote)], SIDE_QUESTION_CHARS, one_line=True) or None
 
 
 def parse_answer(raw, msg, source, request_sha256, tokens_in=0, tokens_out=0, cost=0.0, force_unsure=False):
