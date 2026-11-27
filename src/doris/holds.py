@@ -28,8 +28,10 @@ _CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 _SCHEME = re.compile(r"(?i)\b(https?|[a-z][a-z0-9+.\-]*)://")
 _IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
-# Labels are bounded at 63 characters, the most DNS allows, so no label is read more than once over.
-_HOST = re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]\b")
+# A host's labels are letters and digits in any script (münchen.de, пример.рф: second Fable review of
+# PR #4, L3), bounded at 63 characters, the most DNS allows, so no label is read more than once over.
+_LD = r"[^\W_]"
+_HOST = re.compile(r"\b(?:{L}(?:(?:{L}|-){{0,61}}{L})?\.)+[^\W\d_](?:{L}|-){{0,61}}{L}\b".format(L=_LD))
 
 
 def _scheme(m):
@@ -50,9 +52,10 @@ def _host(m):
     return token.replace(".", "[.]")
 
 
-# A fullwidth or ideographic dot between letters reads as a dot in a link, and a fullwidth "@" as
-# an at sign (Fable review of PR #4, finding 10): they are defanged like their ASCII forms.
-_WIDE_DOT = re.compile("(?<=[A-Za-z0-9])[\u3002\uff0e\uff61](?=[A-Za-z0-9])")
+# A fullwidth or ideographic dot between letters or digits (in any script: 例。com) reads as a dot in
+# a link, and a fullwidth "@" as an at sign (Fable review of PR #4, finding 10; second review, L3):
+# they are defanged like their ASCII forms.
+_WIDE_DOT = re.compile("(?<=[^\\W_])[\u3002\uff0e\uff61](?=[^\\W_])")
 
 
 def defang(text):

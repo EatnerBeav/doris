@@ -62,8 +62,18 @@ class DefangTest(unittest.TestCase):
         # Fable review of PR #4, finding 10: ideographic and fullwidth dots read as dots in a link.
         self.assertEqual(holds.defang("go to evil．com, mail ann＠b。example or x｡io"),
                          "go to evil[.]com, mail ann[@]b[.]example or x[.]io")
-        self.assertEqual(holds.defang("ありがとう。よろしく"), "ありがとう。よろしく")
+        # Japanese prose between two sentences reads like an IDN host (例。テスト), so it is defanged too:
+        # the safe direction (second review, L3).
+        self.assertEqual(holds.defang("ありがとう。よろしく"), "ありがとう[.]よろしく")
+        self.assertEqual(holds.defang("ありがとう。 よろしく"), "ありがとう。 よろしく")
 
+
+    def test_wide_dots_beside_any_letter_or_digit(self):
+        # Second Fable review of PR #4, L3: only ASCII beside the dot counted, so 例。com stayed a link.
+        self.assertEqual(holds.defang("例。com"), "例[.]com")
+        self.assertEqual(holds.defang("пример.рф or münchen.de"), "пример[.]рф or münchen[.]de")
+        self.assertEqual(holds.quote_of(make_msg(own_text="visit evil.ｃｏｍ or ｅｖｉｌ．ｃｏｍ or 例｡com")),
+                         "visit evil[.]com or evil[.]com or 例[.]com")
 
 class QuoteTest(unittest.TestCase):
     def test_own_text_first_400_after_invisibles_then_defanged(self):
