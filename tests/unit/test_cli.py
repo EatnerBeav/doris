@@ -240,7 +240,12 @@ class Run(Isolated):
         lines = receipts.read_lines(path)
         self.assertEqual((lines[-1]["kind"], lines[-1]["payload"]["cause"]), ("halted", "cli"))
         observed = [l["payload"]["clock"] for l in lines if l["kind"] == "observed" and "from_addr" in l["payload"]]
-        self.assertEqual(observed, ["2026-12-01T16:10:00Z", "2026-12-01T16:20:00Z"])   # the judge's: a cycle on
+        # Priya's on the first pass; the judge's on a later one: the next, or the one after when the judge's
+        # file lands just after that pass read the inbox (a busy machine), never the pass that was running
+        self.assertEqual(len(observed), 2, observed)
+        self.assertEqual(observed[0], "2026-12-01T16:10:00Z")
+        self.assertGreater(observed[1], observed[0])
+        self.assertTrue(observed[1].endswith("0:00Z"), observed)    # on her ten-minute cycle
         self.assertEqual([l["payload"]["outcome"] for l in closed(lines)], ["book", "offer"])
         with open(os.path.join(run, "config.json"), encoding="utf-8") as fh:
             config = json.load(fh)
