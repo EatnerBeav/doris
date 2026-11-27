@@ -294,6 +294,21 @@ class Sends(Base):
         with self.assertRaises(KeyError):
             self.db.reset_send("<zz@fastmail.com>", "e" * 64)
 
+    def test_a_send_the_server_took_is_never_taken_back(self):
+        # decision 76: SMTP's 250 is written down as handed_over before the Sent look; from there the
+        # send can only become confirmed, whatever a later look, a restart or the kill switch writes
+        self.reply("<a1@fastmail.com>")
+        self.db.set_send_state("<a1@fastmail.com>", "handed_over")
+        for later in ("unknown", "pending", "handed_over"):
+            self.db.set_send_state("<a1@fastmail.com>", later)
+            self.assertEqual(self.db.send("<a1@fastmail.com>")["state"], "handed_over")
+        with self.assertRaises(ValueError):
+            self.db.reset_send("<a1@fastmail.com>", "f" * 64)
+        self.db.set_send_state("<a1@fastmail.com>", "confirmed")
+        for later in ("unknown", "pending", "handed_over"):
+            self.db.set_send_state("<a1@fastmail.com>", later)
+            self.assertEqual(self.db.send("<a1@fastmail.com>")["state"], "confirmed")
+
     def test_send_kind_is_checked(self):
         with self.assertRaises(ValueError):
             self.reply("<a1@fastmail.com>", kind="reply")
@@ -344,6 +359,8 @@ class Sends(Base):
         self.db.set_send_state("<a2@fastmail.com>", "confirmed")
         self.db.set_send_state("<a3@fastmail.com>", "unknown")
         self.assertEqual([s["message_id"] for s in self.db.unfinished_sends()], ["<a1@fastmail.com>", "<a3@fastmail.com>"])
+        self.db.set_send_state("<a1@fastmail.com>", "handed_over")      # the server took it: nothing to redo
+        self.assertEqual([s["message_id"] for s in self.db.unfinished_sends()], ["<a3@fastmail.com>"])
 
 
 class StopList(Base):

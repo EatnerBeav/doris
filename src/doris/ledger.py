@@ -32,7 +32,10 @@ SCHEMA_VERSION = 2   # 2: an offer names the send that carries it (offers.messag
 MESSAGE_STATUSES = ("fetched", "processing", "done", "superseded", "dropped", "held", "quarantined")
 UNPROCESSED = ("fetched", "processing")
 SEND_KINDS = ("send_reply", "send_hold_notice", "send_digest")
-SEND_STATES = ("pending", "confirmed", "unknown")
+SEND_STATES = ("pending", "confirmed", "unknown", "handed_over")
+# Decision 76: a send SMTP accepted (250) is handed_over before the Sent look and is never sent
+# again; from there, and from confirmed, a send only ever moves up to confirmed.
+SENT_STATES = ("handed_over", "confirmed")
 BOOKING_STATES = ("intent", "written", "confirmed", "cancelled", "gone", "collision_unresolved", "removed",
                   "unconfirmed", "blocked")   # blocked: the gate stopped it, never written
 LIVE_BOOKING_STATES = ("intent", "written", "confirmed", "unconfirmed", "collision_unresolved")
@@ -365,22 +368,30 @@ class Ledger:
 
     def reset_send(self, message_id, body_sha256):
         """A new body for a send that never reached Sent (state pending or unknown, and the loop looked
-        first): it goes out under the same Message-ID (ruling 8). A confirmed send never changes."""
+        first): it goes out under the same Message-ID (ruling 8). A send the server took (handed_over)
+        or that is confirmed in Sent never changes."""
         with self._tx() as con:
             row = con.execute("SELECT state FROM sends WHERE mid_norm = ?", (norm_id(message_id),)).fetchone()
             if row is None:
                 raise KeyError(message_id)
-            if row["state"] == "confirmed":
-                raise ValueError("send %s is confirmed in Sent; it never changes" % (norm_id(message_id),))
+            if row["state"] in SENT_STATES:
+                raise ValueError("send %s is %s; it never changes" % (norm_id(message_id), row["state"]))
             con.execute("UPDATE sends SET body_sha256 = ? WHERE mid_norm = ?",
                         (_text(body_sha256, "body_sha256"), norm_id(message_id)))
 
     def set_send_state(self, message_id, state):
+        """A send's state. One the server took (handed_over) only moves up to confirmed, and a confirmed
+        one stays: any other state asked for later is not written (decision 76)."""
         if state not in SEND_STATES:
             raise ValueError("send state must be one of %s, not %r" % (", ".join(SEND_STATES), state))
-        cur = self._con.execute("UPDATE sends SET state = ? WHERE mid_norm = ?", (state, norm_id(message_id)))
-        if cur.rowcount == 0:
-            raise KeyError(message_id)
+        mid = norm_id(message_id)
+        with self._tx() as con:
+            row = con.execute("SELECT state FROM sends WHERE mid_norm = ?", (mid,)).fetchone()
+            if row is None:
+                raise KeyError(message_id)
+            if row["state"] == "confirmed" or (row["state"] == "handed_over" and state != "confirmed"):
+                return
+            con.execute("UPDATE sends SET state = ? WHERE mid_norm = ?", (state, mid))
 
     def send(self, message_id) -> Optional[dict]:
         row = self._one("SELECT * FROM sends WHERE mid_norm = ?", (norm_id(message_id),))
