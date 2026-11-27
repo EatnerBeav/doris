@@ -121,13 +121,18 @@ def _value(env, name):
     return value.strip() if isinstance(value, str) else ""
 
 
-def _address(env):
-    value = _value(env, ENV_ADDRESS)
+def bare_address(env, name=ENV_ADDRESS):
+    """The setting `name` as one bare email address. ConfigError names the setting, never its value."""
+    value = _value(env, name)
     if not value:
-        raise ConfigError("%s is not set" % ENV_ADDRESS)
+        raise ConfigError("%s is not set" % name)
     if not _ADDRESS.match(value):
-        raise ConfigError("%s is not one bare email address" % ENV_ADDRESS)
+        raise ConfigError("%s is not one bare email address" % name)
     return value
+
+
+def _address(env):
+    return bare_address(env, ENV_ADDRESS)
 
 
 def _password(env):

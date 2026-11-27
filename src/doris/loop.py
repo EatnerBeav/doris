@@ -41,7 +41,9 @@ DIGEST_AT = _dt.time(17, 0)            # Pacific: the demo's digest goes at 5:00
 SANDBOX_OWNER = "whizz@fastmail.com"   # the sandbox's owner and Doris addresses (sandbox/README.md)
 SANDBOX_DORIS = "doris.htm@fastmail.com"
 WINDOW = caps.MAX_HORIZON + _dt.timedelta(days=1)    # the span an offer reads
-ENV_NAMES = ("ANTHROPIC_API_KEY", "DORIS_MODEL", "DORIS_MEETING_LINK")   # names only ever reach a receipt
+ENV_OWNER = "DORIS_OWNER_ADDRESS"      # live: the owner's own address, from the env file
+ENV_KEY = "ANTHROPIC_API_KEY"
+ENV_NAMES = (ENV_KEY, "DORIS_MODEL", templates.MEETING_LINK_ENV, ENV_OWNER)   # names only ever reach a receipt
 
 CALENDAR_FAULTS = frozenset({"timeout-once", "timeout-twice", "read-fails", "slow-calendar", "lands-between",
                              "write-unknown-present", "write-unknown-absent", "lookup-fails",
@@ -121,6 +123,70 @@ class _CalendarDown(Exception):
     def __init__(self, code="hold.calendar_down"):
         Exception.__init__(self, code)
         self.code = code
+
+
+class LiveSettings(object):
+    """What a live run takes from its env file. Its repr shows no value: the env holds her app
+    password and the model key, and the link and the addresses are the env file's too."""
+    __slots__ = ("env", "owner_addr", "doris_addr", "meeting_link", "hosts", "model_id")
+
+    def __init__(self, env, owner_addr, doris_addr, meeting_link, hosts, model_id):
+        self.env, self.owner_addr, self.doris_addr = env, owner_addr, doris_addr
+        self.meeting_link, self.hosts, self.model_id = meeting_link, hosts, model_id
+
+    def __repr__(self):
+        return "<live settings from the env file>"
+
+    __str__ = __repr__
+
+
+def _live_link(env, error):
+    """The meeting link live bookings carry: one https link of printable characters, no space."""
+    name = templates.MEETING_LINK_ENV
+    value = (env.get(name) or "").strip()
+    if not value:
+        raise error("%s is not set" % name)
+    try:
+        parts = urllib.parse.urlsplit(value)
+        ok = parts.scheme == "https" and bool(parts.hostname)
+    except ValueError:
+        ok = False
+    if not ok or len(value) > ics.MAX_LINK_CHARS or not all(0x21 <= ord(c) <= 0x7E for c in value):
+        raise error("%s must be one https link of printable characters, at most %d" % (name, ics.MAX_LINK_CHARS))
+    return value
+
+
+def live_settings(env_path, model_source):
+    """Everything a live run takes from its env file, and nothing from os.environ: her address and
+    the owner's, the meeting link, the hosts the network guard allows and, with the model live, the
+    model ID (the key stays in the env). The adapters are built once to check every setting they
+    read; building one connects nowhere. Refused (exit 2) with one plain line naming the env file or
+    the setting, never a value."""
+    from . import envfile
+    from .adapters import live
+    try:
+        env = envfile.load(env_path)
+    except envfile.EnvFileError as exc:
+        raise Refused("Not started: the env file at %s cannot be used: %s." % (env_path, exc), 2) from None
+    try:
+        doris_addr = live.bare_address(env, live.ENV_ADDRESS)
+        owner_addr = live.bare_address(env, ENV_OWNER)
+        if owner_addr.lower() == doris_addr.lower():
+            raise live.ConfigError("%s must be the owner's own address, not hers" % ENV_OWNER)
+        link = _live_link(env, live.ConfigError)
+        hosts = tuple(live.hosts(env))
+        live.LiveMail(env, doris_addr)
+        live.LiveCalendar(env)
+        model_id = None
+        if model_source == "live":
+            if not (env.get(ENV_KEY) or "").strip():
+                raise live.ConfigError("%s is not set" % ENV_KEY)
+            model_id = model_mod.default_model_id(env)
+            if not caps.MODEL_PRICES_USD_PER_MTOK.get(model_id):
+                raise live.ConfigError("DORIS_MODEL names a model with no price in caps.MODEL_PRICES_USD_PER_MTOK")
+    except live.ConfigError as exc:
+        raise Refused("Not started: %s (env file %s)." % (exc, env_path), 2) from None
+    return LiveSettings(env, owner_addr, doris_addr, link, hosts, model_id)
 
 
 # ------------------------------------------------------------------------------------------
