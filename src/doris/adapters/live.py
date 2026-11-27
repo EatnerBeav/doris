@@ -76,7 +76,8 @@ MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", 
 _INTERNALDATE = re.compile(rb'INTERNALDATE "\s?(\d{1,2})-([A-Za-z]{3})-(\d{4}) (\d{2}):(\d{2}):(\d{2}) ([+-])(\d{2})(\d{2})"')
 _UID = re.compile(rb"\bUID (\d+)")
 _FLAGS = re.compile(rb"\bFLAGS \(([^)]*)\)")
-_BODY_LITERAL = re.compile(rb"BODY\[\] \{\d+\}$")
+_SIZE = re.compile(rb"\bRFC822\.SIZE (\d+)")
+_BODY_LITERAL = re.compile(rb"BODY\[\](?:<0>)? \{\d+\}\Z")   # the whole message, or its first octets (<0>)
 _HEADER_LITERAL = re.compile(rb'BODY\[HEADER\.FIELDS \("?MESSAGE-ID"?\)\] \{\d+\}\Z', re.I)
 _LIST_LINE = re.compile(rb'^\((?P<attrs>[^)]*)\)\s+(?P<delim>"(?:[^"\\]|\\.)*"|NIL)\s+(?P<rest>.*)\Z', re.S)
 _KEYWORD = re.compile(r"^[A-Za-z0-9$_-]{1,64}\Z")
@@ -472,20 +473,22 @@ class LiveMail(MailAdapter):
         return [item for item in data if item is not None]
 
     def _dates(self, conn, uids, step):
-        """uid -> INTERNALDATE as aware UTC, for every uid the server answered for."""
+        """uid -> (INTERNALDATE as aware UTC, RFC822.SIZE), for every uid the server gave both for."""
         out = {}
-        for item in self._fetch(conn, uids, "(UID INTERNALDATE)", step):
+        for item in self._fetch(conn, uids, "(UID INTERNALDATE RFC822.SIZE)", step):
             text = item[0] if isinstance(item, tuple) else item
             if not isinstance(text, bytes):
                 continue
-            uid, when = _UID.search(text), _INTERNALDATE.search(text)
-            if uid and when:
-                out[int(uid.group(1))] = _internaldate(when, step)
+            uid, when, size = _UID.search(text), _INTERNALDATE.search(text), _SIZE.search(text)
+            if uid and when and size:
+                out[int(uid.group(1))] = (_internaldate(when, step), int(size.group(1)))
         return out
 
-    def _bodies(self, conn, uids, step):
-        """uid -> the whole message as it arrived, read with BODY.PEEK[] (\\Seen untouched)."""
-        return self._literals(conn, uids, "(UID BODY.PEEK[])", _BODY_LITERAL, step)
+    def _bodies(self, conn, uids, step, octets=None):
+        """uid -> the whole message as it arrived, read with BODY.PEEK[] (\\Seen untouched); with
+        octets, only its first octets (BODY.PEEK[]<0.octets>)."""
+        items = "(UID BODY.PEEK[])" if octets is None else "(UID BODY.PEEK[]<0.%d>)" % octets
+        return self._literals(conn, uids, items, _BODY_LITERAL, step)
 
     def _literals(self, conn, uids, items, literal, step):
         """uid -> the literal the server sent for the one item asked (its answer's head matching
@@ -508,28 +511,36 @@ class LiveMail(MailAdapter):
     # -- the interface ---------------------------------------------------------------------------
     def fetch_new(self):
         """Every INBOX message received at or after since_utc, oldest first (INTERNALDATE, then
-        UID). Read-only (EXAMINE) and with BODY.PEEK[], so nothing about her mail changes.
-        Raises MailError on any failure, including a message the server named and then did
-        not hand over: a failure is never an empty inbox."""
+        UID). Read-only (EXAMINE) and with BODY.PEEK[], so nothing about her mail changes. Each
+        message's RFC822.SIZE is read with its date: one over caps.MAX_RAW_BYTES is handed over
+        as only its first MAX_RAW_BYTES + 1 octets, never downloaded whole, and the reader holds
+        it as oversize. Raises MailError on any failure, including a message the server named
+        and then did not hand over: a failure is never an empty inbox."""
         step = "imap fetch"
         since = self.since_utc
+        cap = caps.MAX_RAW_BYTES
         with self._imap(step) as conn:
             uidvalidity, _ = self._open(conn, "INBOX", True, step)
             criteria = ("ALL",) if since is None else ("SINCE", _imap_day(since - _DAY))
             uids = self._search(conn, criteria, step)
             dated = []
             for batch in _batches(uids):
-                dates = self._dates(conn, batch, step)
+                facts = self._dates(conn, batch, step)
                 for uid in batch:
-                    if uid not in dates:
-                        raise _failure(MailError, step, detail="the server left a message's date out")
-                    if since is None or dates[uid] >= since:
-                        dated.append((dates[uid], uid))
+                    if uid not in facts:
+                        raise _failure(MailError, step, detail="the server left a message's date or size out")
+                    received, size = facts[uid]
+                    if since is None or received >= since:
+                        dated.append((received, uid, size))
             dated.sort()
             items = []
             for batch in _batches(dated):
-                bodies = self._bodies(conn, [uid for _, uid in batch], step)
-                for received, uid in batch:
+                whole = [uid for _, uid, size in batch if size <= cap]
+                over = [uid for _, uid, size in batch if size > cap]
+                bodies = self._bodies(conn, whole, step) if whole else {}
+                if over:
+                    bodies.update(self._bodies(conn, over, step, octets=cap + 1))
+                for received, uid, _ in batch:
                     if uid not in bodies:
                         raise _failure(MailError, step, detail="the server left a message out")
                     items.append(InboundItem(server_id=server_id(uidvalidity, uid), raw=bodies[uid],

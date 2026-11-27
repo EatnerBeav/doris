@@ -24,7 +24,7 @@ import xml.etree.ElementTree as ET
 from unittest import mock
 from xml.sax.saxutils import escape
 
-from doris import caps, ics, slots
+from doris import caps, ics, mail as mail_mod, screens, slots
 from doris.adapters import live
 from doris.adapters.base import CalendarAdapter, MailAdapter
 from doris.adapters.sandbox import NotHers
@@ -271,6 +271,7 @@ class FakeIMAP(socketserver.ThreadingTCPServer):
         self.unsolicited = False      # slip an unrelated FETCH (flags) update into answers
         self.omit = set()             # uids whose answers the server leaves out
         self.header_nil = False       # answer a header fetch with NIL instead of a literal
+        self.no_size = set()          # uids whose RFC822.SIZE the server leaves out
         self.no_uidvalidity = False
         self.store_quiet = False      # STORE sends no FETCH back
         self.store_ignored = False    # STORE answers OK but keeps nothing
@@ -443,8 +444,14 @@ class IMAPHandler(socketserver.StreamRequestHandler):
                 head.append('INTERNALDATE "%s"' % msg["date"])
             if "FLAGS" in items_u:
                 head.append("FLAGS (%s)" % " ".join(sorted(msg["flags"])))
+            if "RFC822.SIZE" in items_u and uid not in srv.no_size:
+                head.append("RFC822.SIZE %d" % len(msg["raw"]))
             literal = None
-            if "BODY.PEEK[]" in items_u or "BODY[]" in items_u:
+            partial = re.search(r"BODY\.PEEK\[\]<(\d+)\.(\d+)>", items_u)
+            if partial:
+                origin, count = int(partial.group(1)), int(partial.group(2))
+                literal = ("BODY[]<%d>" % origin, msg["raw"][origin:origin + count])
+            elif "BODY.PEEK[]" in items_u or "BODY[]" in items_u:
                 literal = ("BODY[]", msg["raw"])
                 if "BODY.PEEK[]" not in items_u and not self.readonly:
                     msg["flags"].add("\\Seen")
@@ -640,6 +647,29 @@ class FetchTest(ImapFixture):
         self.assertIsInstance(cm.exception, cls)
         secret_free(self, cm.exception)
         return cm.exception
+
+    def test_a_message_over_the_raw_cap_is_fetched_only_to_one_byte_past_it(self):
+        """Its size is asked with its date; past the cap only a partial fetch goes, and what comes
+        back is still over the cap, so the reader holds it as oversize with a receipt."""
+        small, big = eml(1), eml(2) + b"z" * 5000
+        uid_small = self.inbox.add(small, u(2026, 11, 27, 9, 0))
+        uid_big = self.inbox.add(big, u(2026, 11, 27, 9, 5))
+        with mock.patch.object(caps, "MAX_RAW_BYTES", 2000):
+            items = self.mail.fetch_new()
+            held = screens.oversize(mail_mod.parse_eml(items[1].raw))
+        self.assertEqual([i.raw for i in items], [small, big[:2001]])
+        self.assertEqual((held.settled, held.hold_reason, held.facts["over_raw"]), (True, "hold.oversize", True))
+        fetches = [a for v, a in self.imap.commands if v == "UID FETCH"]
+        self.assertIn("RFC822.SIZE", fetches[0])
+        self.assertIn("%d (UID BODY.PEEK[]<0.2001>)" % uid_big, fetches)
+        whole = [a.split(" ", 1)[0] for a in fetches if a.endswith("BODY.PEEK[])")]
+        self.assertEqual(whole, [str(uid_small)])
+
+    def test_a_size_left_out_of_the_answer_is_a_failure(self):
+        uid = self.inbox.add(eml(1), u(2026, 11, 27, 9, 0))
+        self.imap.no_size.add(uid)
+        with self.assertRaises(MailError):
+            self.mail.fetch_new()
 
     def test_a_body_left_out_of_the_answer_is_a_failure(self):
         self.inbox.add(eml(1), u(2026, 11, 27, 9, 0))
