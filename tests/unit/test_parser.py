@@ -1229,6 +1229,18 @@ class MatchPickTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(self.pick(text), ("matched_slot", i))
 
+    def test_a_pick_says_whether_it_named_the_time_or_only_its_place(self):
+        # A pick by number or a yes names a slot only by its place in an offer, so policy checks it reached
+        # her after that offer went out; one that names the time needs no such check (Fable review 2 of
+        # PR #3, finding B).
+        for text, by in (("The first one works.", "number"), ("Option 2 works.", "number"), ("3 works", "number"),
+                         ("Thursday at 2pm Pacific works", "time"), ("1:30 PM ET please", "time"),
+                         ("The first one, Wednesday at 2pm, works.", "time")):
+            with self.subTest(text=text):
+                self.assertEqual(parser.match_pick(text, OFFER, "Eastern", NOW).by, by)
+        self.assertEqual(parser.match_pick("Yes", OFFER[:1], "Eastern", NOW).by, "yes")
+        self.assertIsNone(parser.match_pick("Option 4", OFFER, "Eastern", NOW).by)
+
     def test_bare_number_that_is_also_an_offered_hour_is_ambiguous(self):
         self.assertEqual(self.pick("2"), ("ambiguous", None))
         self.assertEqual(self.pick("2 works for me"), ("ambiguous", None))

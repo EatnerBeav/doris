@@ -76,6 +76,7 @@ class Facts:
     own_reply: Optional[str] = None     # the template of its reply already in Sent
     own_reply_unknown: Optional[str] = None   # the template of its reply Sent could not be asked about
     own_booking: Optional[dict] = None  # its booking written down: slot, direct, offer_id, length_min
+    arrived: Optional[_dt.datetime] = None   # when it reached her, as the mail server handed it over
 
 
 @dataclass
@@ -166,6 +167,27 @@ def _all_open_slots(thread):
     return out
 
 
+def _after_newest_offer(f):
+    """True when the message reached her after her newest open offer to the sender went out (its send
+    time, set again whenever a restart sends it). Either time unknown is False: fail closed."""
+    sent = [o.get("created") for o in f.thread.open_offers]
+    if not sent or not all(_aware(s) for s in sent) or not _aware(f.arrived):
+        return False
+    return f.arrived > max(sent)
+
+
+def _aware(t):
+    return isinstance(t, _dt.datetime) and t.tzinfo is not None and t.utcoffset() is not None
+
+
+def _before_offer(kind):
+    """Fable review 2 of PR #3, finding B: a pick by number or a yes names a slot only by its place in an
+    offer, so one that reached her before her newest offer went out cannot be answering that offer. It
+    gets the open offer again (T12, no new offer record), never a booking."""
+    return Plan(action="resend", outcome="offer", why=_why("policy.pick_before_offer"), template="T12",
+                pick_kind=kind)
+
+
 def _pick(f):
     t = f.thread
     if not t.open_offers:
@@ -175,6 +197,8 @@ def _pick(f):
     pk = f.pick
     if pk is not None and pk.kind == "matched_slot" and pk.slot_index is not None:
         offer = _offer_holding(t, pk.slot_index)
+        if offer is not None and getattr(pk, "by", None) != "time" and not _after_newest_offer(f):
+            return _before_offer("matched_slot")
         if offer is not None:
             oid, s, length = offer
             code = "policy.pick_plus_question" if f.answer.side_question and f.answer.side_question_text else None
@@ -200,6 +224,8 @@ def _offer_holding(thread, index):
 def _yes(f):
     t = f.thread
     flat = _all_open_slots(t)
+    if len(flat) == 1 and not _after_newest_offer(f):
+        return _before_offer("yes_single")
     if len(flat) == 1:
         oid, s, length = flat[0]
         return Plan(action="book", outcome="book", why=_why("policy.yes_books"), slot=s, offer_id=oid,

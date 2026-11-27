@@ -474,8 +474,8 @@ class Ledger:
         return None if row is None else self._offer(row)
 
     def set_offer_slots(self, offer_id, slots, now, expires):
-        """New times for an offer whose send never went out (ruling 8: the loop looked in Sent first).
-        Still one offer: the thread's count does not change."""
+        """New times, and the time it goes out, for an offer whose send never went out (ruling 8: the loop
+        looked in Sent first). Still one offer: the thread's count does not change."""
         rows, created, until = self._offer_rows(slots, None, now, expires)
         with self._tx() as con:
             if con.execute("SELECT 1 FROM offers WHERE id = ?", (offer_id,)).fetchone() is None:

@@ -43,8 +43,10 @@ def thread(**kw):
 
 
 def facts(cls="meeting_request", **kw):
+    # arrived: the message reached her an hour after every offer here went out (offer() sends at NOW)
     base = dict(sender=SENDER, branch="1", others_on_thread=0, thread=thread(), answer=answer(cls),
-                parse=parse(), model_agrees=False, pick=None, money_code=None, reply_to_mismatch=False)
+                parse=parse(), model_agrees=False, pick=None, money_code=None, reply_to_mismatch=False,
+                arrived=NOW + dt.timedelta(hours=1))
     base.update(kw)
     return policy.Facts(**base)
 
@@ -191,6 +193,63 @@ class Picks(WhyIsListed):
         p = policy.decide(facts("no_thanks", branch="2", thread=t))
         self.assertEqual((p.action, p.template), ("close", None))
         self.assertWhy(p, "policy.no_thanks_close")
+
+
+class APickBeforeHerNewestOffer(WhyIsListed):
+    """A numbered pick or a yes names a slot only by its place in an offer: one that reached her before her
+    newest offer to the sender went out cannot be answering it, so it gets that offer again (T12), never a
+    booking (Fable review 2 of PR #3, finding B). A pick that names the time is read by its time."""
+    BEFORE = NOW - dt.timedelta(minutes=6)
+
+    def three(self):
+        return [slot(0), slot(24), slot(48)]
+
+    def on_thread(self, *offers):
+        return thread(own_thread=True, offer_count=len(offers), open_offers=list(offers),
+                      written_to=frozenset([SENDER]), offer_to=SENDER)
+
+    def assertResent(self, p):
+        self.assertEqual((p.action, p.template, p.slot, p.offer_id), ("resend", "T12", None, None))
+        self.assertWhy(p, "policy.pick_before_offer")
+
+    def test_a_numbered_pick_that_reached_her_before_the_offer_went_out_gets_it_again(self):
+        t = self.on_thread(offer(self.three()))
+        for by in ("number", None):          # a pick that does not say how it named the slot is read by number
+            with self.subTest(by=by):
+                self.assertResent(policy.decide(facts("pick", branch="2", thread=t, arrived=self.BEFORE,
+                                                      pick=PickResult("matched_slot", 0, by))))
+        self.assertResent(policy.decide(facts("meeting_request", branch="2", thread=t, arrived=NOW,
+                                              pick=PickResult("matched_slot", 0, "number"))))
+        p = policy.decide(facts("pick", branch="2", thread=t, pick=PickResult("matched_slot", 0, "number")))
+        self.assertEqual((p.action, p.slot), ("book", slot(0)))
+
+    def test_its_arrival_or_the_offers_send_time_unknown_is_never_a_booking(self):
+        t = self.on_thread(offer(self.three()))
+        self.assertResent(policy.decide(facts("pick", branch="2", thread=t, arrived=None,
+                                              pick=PickResult("matched_slot", 0, "number"))))
+        unsent = dict(offer(self.three()), created=None)
+        self.assertResent(policy.decide(facts("pick", branch="2", thread=self.on_thread(unsent),
+                                              pick=PickResult("matched_slot", 0, "number"))))
+
+    def test_it_is_read_against_the_newest_offer(self):
+        older = offer([slot(0)], oid=1)
+        newer = dict(offer([slot(24), slot(48)], oid=2), created=NOW + dt.timedelta(minutes=70))
+        between = NOW + dt.timedelta(minutes=30)
+        self.assertResent(policy.decide(facts("pick", branch="2", thread=self.on_thread(older, newer), arrived=between,
+                                              pick=PickResult("matched_slot", 1, "number"))))
+
+    def test_a_pick_that_names_the_time_still_books(self):
+        t = self.on_thread(offer(self.three()))
+        p = policy.decide(facts("pick", branch="2", thread=t, arrived=self.BEFORE,
+                                pick=PickResult("matched_slot", 1, "time")))
+        self.assertEqual((p.action, p.slot, p.offer_id), ("book", slot(24), 1))
+
+    def test_a_yes_that_reached_her_before_the_offer_went_out_gets_it_again(self):
+        t = self.on_thread(offer([slot(0)]))
+        self.assertResent(policy.decide(facts("yes", branch="2", thread=t, arrived=self.BEFORE)))
+        self.assertResent(policy.decide(facts("yes", branch="2", thread=t, arrived=None)))
+        p = policy.decide(facts("yes", branch="2", thread=t))
+        self.assertEqual((p.action, p.slot), ("book", slot(0)))
 
 
 class CancelAndMove(WhyIsListed):

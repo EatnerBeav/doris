@@ -701,7 +701,7 @@ class _Run:
                             others_on_thread=int(s8.get("others_on_thread", 0) or 0), thread=thread, answer=answer,
                             parse=parse, model_agrees=agrees, pick=pick, money_code=policy.money_check(msg.own_text),
                             reply_to_mismatch=any(not screens.same_address(r, msg.from_addr) for r in msg.reply_to),
-                            **own)
+                            arrived=e.item.received_utc, **own)
 
     def own_effects(self, e):
         """What a message read again after a kill or a stop already did (ruling 8, A3), for policy to
@@ -1255,15 +1255,16 @@ class _Run:
 
         def write_offer_down():
             # written down before the send (A3), once per send: a restart that sends again under the
-            # same Message-ID gives the same offer record its fresh times; the thread's count is unchanged
+            # same Message-ID gives the same offer record its fresh times and the time it goes out
+            # (a pick that came before then cannot be answering it); the thread's count is unchanged
             if template not in NEW_OFFER_TEMPLATES or not offered:
                 return
-            prior = self.ledger.offer_for_send(mid)
+            prior, sent = self.ledger.offer_for_send(mid), self.now()
             if prior is None:
                 self.ledger.create_offer(e.thread, msg.from_addr, list(offered), length or caps.DEFAULT_LENGTH_MIN,
-                                         now, now + caps.OFFER_EXPIRY, message_id=mid)
-            elif prior["slots"] != list(offered):
-                self.ledger.set_offer_slots(prior["id"], list(offered), now, now + caps.OFFER_EXPIRY)
+                                         sent, sent + caps.OFFER_EXPIRY, message_id=mid)
+            else:
+                self.ledger.set_offer_slots(prior["id"], list(offered), sent, sent + caps.OFFER_EXPIRY)
 
         if not self.deliver(e, mid, "send_reply", template, msg.from_addr, raw, body,
                             compose.reply_envelope(msg, self.cfg.owner_addr), tslots, before_send=write_offer_down):

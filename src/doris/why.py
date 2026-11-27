@@ -42,6 +42,8 @@ CODES = {
     "policy.offer_one_slot": "Only one slot is available: offer it.",
     "policy.pick_books": "They picked slot {n} of the open offer: book it.",
     "policy.pick_resend": "The reply does not match exactly one offered slot ({rule}): send the same offer again.",
+    "policy.pick_before_offer": ("A pick by number or a yes that reached her before her newest offer to them went "
+                                 "out cannot be answering it: send that offer again."),
     "policy.yes_books": "A yes to an open offer holding one slot: book it.",
     "policy.stale_pick_reoffer": "The picked slot is no longer bookable or available ({rule}): offer fresh times.",
     "policy.decline_second_offer": "They declined the first offer: second offer with times not offered before.",

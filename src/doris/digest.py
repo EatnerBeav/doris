@@ -26,6 +26,7 @@ from .shapes import UTC
 
 OFFER_CODES = frozenset({
     "policy.offer_no_clear_time", "policy.offer_conflict", "policy.offer_one_slot", "policy.pick_resend",
+    "policy.pick_before_offer",
     "policy.stale_pick_reoffer", "policy.decline_second_offer", "policy.move_cancel_offer",
     "policy.collision_reoffer",
 })

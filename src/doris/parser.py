@@ -1635,12 +1635,13 @@ def _match_pick(own_text, offer_slots, sender_zone, now):
     if len(hits) == 1:
         if near and not time_hits_any:
             return PickResult(kind="ambiguous")
-        return PickResult(kind="matched_slot", slot_index=hits.pop())
+        # named by its time, or only by its place in the offer (Fable review 2 of PR #3, finding B)
+        return PickResult(kind="matched_slot", slot_index=hits.pop(), by="time" if time_hits_any else "number")
     if near:
         return PickResult(kind="near_miss")
     if _YES.search(lt) and not T.times and not T.dates:
         if len(slots) == 1:
-            return PickResult(kind="yes_single", slot_index=0)
+            return PickResult(kind="yes_single", slot_index=0, by="yes")
         return PickResult(kind="ambiguous")
     return PickResult(kind="none")
 
