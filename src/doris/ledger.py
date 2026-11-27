@@ -80,6 +80,8 @@ _SCHEMA = (
         detail TEXT NOT NULL, state TEXT NOT NULL, outcome TEXT, drop_cause TEXT)""",
     """CREATE TABLE IF NOT EXISTS spend (
         id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, usd REAL NOT NULL)""",
+    # live only: when the ledger was started fresh. Her live mail is read from then on (ruling 8).
+    "CREATE TABLE IF NOT EXISTS fresh_start (started_utc TEXT NOT NULL)",
 )
 
 
@@ -139,6 +141,27 @@ def _opt_text(value, name):
     if not isinstance(value, str):
         raise ValueError("%s must be a string or None" % name)
     return value
+
+
+def start_fresh(path, now):
+    """Ruling 8's fresh start: a new ledger at path that already records `now` as its start, so a
+    live ledger that exists always says from when her mail is read. It is built under a temporary
+    name and moved into place whole; a ledger already at path is refused (FileExistsError) and left
+    alone. The caller holds the ledger lock, so no second fresh start can race this one."""
+    path = os.fspath(path)
+    started = _ts(now, "now")
+    if os.path.exists(path):
+        raise FileExistsError("a ledger is already at %s" % (path,))
+    building = path + ".fresh"
+    for leftover in (building, building + "-journal"):      # a fresh start cut short before
+        if os.path.exists(leftover):
+            os.remove(leftover)
+    db = Ledger(building)
+    try:
+        db._con.execute("INSERT INTO fresh_start (started_utc) VALUES (?)", (started,))
+    finally:
+        db.close()
+    os.replace(building, path)
 
 
 class Ledger:
@@ -698,6 +721,11 @@ class Ledger:
         return float(self._one("SELECT COALESCE(SUM(usd), 0.0) FROM spend WHERE run_id = ?", (run_id,))[0])
 
     # --- Runs ----------------------------------------------------------------------------------
+    def fresh_start(self) -> Optional[_dt.datetime]:
+        """When this ledger was started fresh (start_fresh), or None: a ledger never started fresh."""
+        row = self._one("SELECT started_utc FROM fresh_start ORDER BY rowid LIMIT 1")
+        return None if row is None else _when(row["started_utc"])
+
     def start_run(self, run_id, mode, now):
         """Record the run and make it this object's current run. Starting the same open run again is a no-op."""
         if mode not in MODES:

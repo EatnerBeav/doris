@@ -95,6 +95,41 @@ class OpenAndSchema(Base):
             Ledger(bad)
 
 
+class FreshStart(Base):
+    """Ruling 8: the live ledger is made by a fresh start, which records when it started; her live
+    mail is read from that time on, so the first run never answers the old mail in her inbox."""
+
+    def setUp(self):
+        super().setUp()
+        self.live = os.path.join(self._tmp.name, "state", "live", "ledger.sqlite")
+
+    def test_a_fresh_start_makes_a_ledger_that_already_names_its_start(self):
+        ledger_mod.start_fresh(self.live, T0)
+        with Ledger(self.live, create=False) as db:
+            self.assertEqual(db.fresh_start(), T0)
+
+    def test_a_ledger_that_never_started_fresh_names_no_start(self):
+        self.assertIsNone(self.db.fresh_start())
+
+    def test_a_fresh_start_refuses_a_ledger_already_there_and_leaves_it_alone(self):
+        with self.assertRaises(FileExistsError):
+            ledger_mod.start_fresh(self.path, T0)
+        self.assertIsNone(self.db.fresh_start())
+        ledger_mod.start_fresh(self.live, T0)
+        with self.assertRaises(FileExistsError):
+            ledger_mod.start_fresh(self.live, T0 + H)
+        with Ledger(self.live, create=False) as db:
+            self.assertEqual(db.fresh_start(), T0)
+
+    def test_a_fresh_start_that_cannot_record_its_time_leaves_no_ledger(self):
+        with self.assertRaises(ValueError):
+            ledger_mod.start_fresh(self.live, dt.datetime(2026, 11, 30, 17, 0))      # naive: refused
+        self.assertFalse(os.path.exists(self.live))
+        ledger_mod.start_fresh(self.live, T0)                                     # and it can start after
+        with Ledger(self.live, create=False) as db:
+            self.assertEqual(db.fresh_start(), T0)
+
+
 class CommitsBeforeReturn(Base):
     def test_every_write_is_visible_to_a_second_connection_at_once(self):
         db, other = self.db, self.other()
