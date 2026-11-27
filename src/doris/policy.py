@@ -335,8 +335,11 @@ def decide(f):
         return Plan(action="suppress", outcome="suppress", why=_why("policy.suppress_opt_out"))
 
     # Group mail and a new address on her own thread: held if she would act, filed if she would only file.
+    # So is a sender with no offer of their own on a thread whose open offer went to someone else: an offer
+    # or a booking of theirs there would lock that person out of it (Fable review 2 of PR #3, finding C).
     group = f.others_on_thread > 0
-    new_address = t.own_thread and f.sender not in t.written_to
+    new_address = (t.own_thread and f.sender not in t.written_to) or \
+        (not t.open_offers and t.offer_to is not None and t.offer_to != f.sender)
     if group or new_address:
         if cls in FILE_ONLY:
             return _file(cls)

@@ -188,32 +188,46 @@ def to_the_owner_on_her_thread(sender, mid, text):
 
 class AnOfferIsOneSenders(Written):
     """Same sender, same thread (ruling 6; Fable review of PR #3, finding 3): someone else who names
-    Lena's request and picks "the first one" never books the quarter hour she offered Lena."""
+    Lena's request and picks "the first one" never books the quarter hour she offered Lena. Nor does he
+    get an offer of his own on her thread, which would lock her out of it: with an open offer there to
+    Lena and none to him, he is held for the owner (Fable review 2 of PR #3, finding C)."""
     text = QuarterHourTimes.text
 
-    def open_offers(self):
+    def offer_rows(self):
         led = ledger_mod.Ledger(os.path.join(self.state, "ledger.sqlite"))
         try:
-            return led.open_offers("<%s>" % self.key, at(2026, 12, 1, 17, 0))
+            return [(r["sender"], r["closed_reason"]) for r in led._all("SELECT sender, closed_reason FROM offers")]
         finally:
             led.close()
 
-    def test_a_pick_from_another_address_never_books_her_offer(self):
+    def bob_picks(self):
         self.run_once()
         add(self.root, "21-bob-pick.eml",
             to_the_owner_on_her_thread(BOB, "20261201.0930.bob.pick@elsewhere.example", "The first one works."),
             {"forwarded": "yes"})
-        s = self.run_once()
+        return self.run_once()
+
+    def test_a_pick_from_another_address_never_books_her_offer(self):
+        s = self.bob_picks()
         self.assertEqual(self.events(), [])
-        # nothing was offered to Bob, so "the first one" is a new request of his own: his own times
-        self.assertEqual(self.templates_sent(BOB[1]), ["T2"])
-        self.assertEqual(self.closing(s, "bob"), ["offer"])
-        lena, bob = self.open_offers()
-        self.assertEqual((lena["sender"], bob["sender"]), (LENA[1], BOB[1]))
-        self.assertEqual(lena["slots"][:2], [Slot(at(2026, 12, 3, 22, 15), at(2026, 12, 3, 22, 45)),
-                                             Slot(at(2026, 12, 4, 18, 45), at(2026, 12, 4, 19, 15))])
-        self.assertEqual(self.off_her_grid(bob["slots"]), [])
+        self.assertEqual(self.templates_sent(BOB[1]), [])
+        self.assertEqual(self.closing(s, "bob"), ["hold:new_address"])
+        self.assertEqual(self.templates_sent(OWNER), ["S1"])
         self.assertEqual(self.templates_sent(LENA[1]), ["T2"])
+        # a hold keeps the whole thread the owner's (unchanged): her offer closes with it
+        self.assertEqual(self.offer_rows(), [(LENA[1], "held")])
+
+    def test_her_pick_after_that_stays_with_the_owner(self):
+        # Holds are per thread, so Lena's thread is the owner's from Bob's hold on: her pick books nothing and
+        # gets no reply and no second notice; the owner has Bob's notice and the digest lists the thread
+        self.bob_picks()
+        (t2,) = [m for t, m in self.sent(LENA[1]) if t == "T2"]
+        add(self.root, "22-lena-pick.eml", pick(t2["Message-ID"], b"The first one works."), {"forwarded": "no"})
+        s = self.run_once()
+        self.assertEqual(self.closing(s, "lena.pick"), ["hold:thread_held"])
+        self.assertEqual(self.events(), [])
+        self.assertEqual(self.templates_sent(LENA[1]), ["T2"])
+        self.assertEqual(self.templates_sent(OWNER), ["S1"])
 
 
 class OnlyTimesTheSenderWrote(Written):

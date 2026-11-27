@@ -385,6 +385,25 @@ class CodeHoldsBeatTheModel(WhyIsListed):
         p = policy.decide(facts(parse=parse("book", instant=WED_11), model_agrees=True))
         self.assertEqual(p.action, "book")
 
+    def test_a_sender_on_a_thread_whose_open_offer_went_to_someone_else_is_held_before_any_offer(self):
+        # Fable review 2 of PR #3, finding C: Bob names Lena's request, which holds her open offer, and has
+        # none of his own: he is held (he would otherwise get an offer of his own on her thread)
+        lena = "lena@harborline.example"
+        t = thread(own_thread=False, offer_count=1, written_to=frozenset([lena]), offer_to=lena)
+        for cls, pick in (("pick", PickResult("matched_slot", 0, "number")), ("meeting_request", None),
+                          ("yes", None), ("decline", None), ("move", None)):
+            with self.subTest(cls=cls):
+                p = policy.decide(facts(cls, branch="1", thread=t, pick=pick,
+                                        parse=parse("book", instant=WED_11), model_agrees=True))
+                self.assertEqual((p.action, p.hold_code), ("hold", "hold.new_address"))
+        self.assertEqual(policy.decide(facts("fyi", branch="1", thread=t)).action, "file")
+        # his own open offer on the thread, or no open offer to anyone there: the table goes on as before
+        mine = thread(own_thread=False, offer_count=2, open_offers=[offer([slot(0)])], written_to=frozenset([lena]),
+                      offer_to=SENDER)
+        self.assertEqual(policy.decide(facts("yes", branch="1", thread=mine)).action, "book")
+        lapsed = thread(own_thread=False, offer_count=1, written_to=frozenset([lena]), offer_to=None)
+        self.assertEqual(policy.decide(facts(branch="1", thread=lapsed)).offer_family, "T2")
+
 
 class Resume(WhyIsListed):
     """Ruling 8 and A3: a message read again after a kill or a stop keeps what it already did,
