@@ -11,8 +11,9 @@ import unittest
 
 from doris import ledger as ledger_mod
 from doris import receipts
+from doris.adapters import sandbox as sandbox_mod
 from doris.shapes import Slot
-from tests.unit.test_restart import OWNER, Restart, add
+from tests.unit.test_restart import OWNER, Restart, add, expire_offers
 
 UTC = dt.timezone.utc
 
@@ -141,6 +142,29 @@ class ResendTheOpenOffer(Written):
     def test_a_near_miss_gets_the_same_offer_again(self):
         offer, s = self.answer(b"Thursday at 4:45 PM Pacific works for me.")
         self.assert_resent(offer, s, "near_miss")
+
+
+class AnExpiredQuarterHourPick(Written):
+    """Her pick of a quarter hour is killed before the write, and the offer expires before the restart:
+    no open offer holds it now, so she offers fresh times (T4) because nothing offers it, the gate's own
+    test, not because it is off the half hour (Fable review of PR #3, finding 6)."""
+    text = QuarterHourTimes.text
+
+    def test_the_restart_offers_fresh_times_because_no_open_offer_holds_it(self):
+        self.run_once()
+        (t2,) = [m for t, m in self.sent(LENA[1]) if t == "T2"]
+        add(self.root, "21-lena-pick.eml", pick(t2["Message-ID"], b"The first one works."), {"forwarded": "no"})
+        s = self.crash_then_run(sandbox_mod.SandboxCalendar, "create_only", lambda *a, **k: True,
+                                between=lambda: expire_offers(self.state))
+        self.assertEqual(self.templates_sent(LENA[1]), ["T2", "T4"])
+        self.assertEqual(self.closing(s, "lena.pick"), ["reoffer"])
+        self.assertEqual(self.events(), [])
+        lines = receipts.read_lines(s.receipts_path)
+        (close,) = [l for l in lines if l["kind"] == "decided" and l["payload"].get("outcome") == "reoffer"]
+        self.assertEqual(close["why"]["text"],
+                         "The picked slot is no longer bookable or available (not_offered): offer fresh times.")
+        (send,) = [l["payload"] for l in lines if l["kind"] == "called" and l["payload"]["call"] == "send"]
+        self.assertEqual(send["slots"]["asked"], "2026-12-03T22:15:00Z")
 
 
 BOB = ("Bob Stone", "bob@elsewhere.example")

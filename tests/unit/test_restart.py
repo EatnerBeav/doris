@@ -272,6 +272,42 @@ class PickedOffer(Restart):
         self.assert_booked_once(s2)
 
 
+def expire_offers(state):
+    """Every offer in the ledger expires while she is down (before the restart's clock)."""
+    led = ledger_mod.Ledger(os.path.join(state, "ledger.sqlite"))
+    try:
+        led._con.execute("UPDATE offers SET expires_utc = '2026-12-01T17:00:00Z'")
+    finally:
+        led.close()
+
+
+class PickedOfferExpiredWhileDown(Restart):
+    """A pick killed before the write, and its offer expires before the restart: no open offer holds
+    the slot now, so she offers fresh times (T4) before any booking is made, the same test the gate
+    makes, never a gate block (Fable review of PR #3, finding 6)."""
+    names = ("02-marcus-request.eml", "07-marcus-pick.eml")
+
+    def test_the_restart_offers_fresh_times_and_books_nothing(self):
+        s2 = self.crash_then_run(sandbox_mod.SandboxCalendar, "create_only", lambda *a, **k: True,
+                                 between=lambda: expire_offers(self.state))
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T4"])
+        self.assertEqual([t for t in self.templates_sent(OWNER) if t == "S1"], [])
+        self.assertEqual(self.closing(s2, "marcus.pick"), ["reoffer"])
+        self.assertEqual(self.events(), [])
+        lines = receipts.read_lines(s2.receipts_path)
+        (close,) = [l for l in lines if l["kind"] == "decided" and l["payload"].get("outcome") == "reoffer"]
+        self.assertEqual(close["why"]["text"],
+                         "The picked slot is no longer bookable or available (not_offered): offer fresh times.")
+        self.assertNotIn("calendar_create", [l["payload"]["action"] for l in lines if l["kind"] == "checked"])
+        (send,) = [l["payload"] for l in lines if l["kind"] == "called" and l["payload"]["call"] == "send"]
+        self.assertEqual(send["slots"]["asked"], "2026-12-03T17:00:00Z")
+        led = ledger_mod.Ledger(os.path.join(self.state, "ledger.sqlite"))
+        try:
+            self.assertEqual([r["state"] for r in led._all("SELECT state FROM bookings")], ["blocked"])
+        finally:
+            led.close()
+
+
 class HoldNotice(Restart):
     """A hold, then a kill before its notice went out or before the closing line: the owner is told
     once, for the reason the hold was made (Fable re-review E)."""

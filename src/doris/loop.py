@@ -892,9 +892,14 @@ class _Run:
 
     def book_fresh(self, e, f, plan, bid):
         now, slot, msg = self.now(), plan.slot, e.msg
-        # a pick keeps the grid its slot was offered on (G9): a time the sender wrote may sit on a quarter hour
-        written = plan.direct is True or slot in self.open_offer_slots(e.thread, msg.from_addr)
-        ok, rule = slots.bookable(slot, now, written=written)
+        # a pick books only a slot an open offer to its sender holds, the gate's own test (G9): one whose
+        # offer expired or closed while she was down gets fresh times before any booking is made (Fable
+        # review of PR #3, finding 6). Past that, the slot is a time the sender wrote or one she offered
+        # them, so a quarter hour stays bookable.
+        if plan.direct is not True and slot not in self.open_offer_slots(e.thread, msg.from_addr):
+            self.drop_booking(bid)
+            return self.act(e, f, policy.on_unavailable(plan, "not_offered", f.thread))
+        ok, rule = slots.bookable(slot, now, written=True)
         if not ok:
             self.drop_booking(bid)
             return self.act(e, f, policy.on_unavailable(plan, rule, f.thread))
