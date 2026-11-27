@@ -198,11 +198,17 @@ def _times(v, lo, hi):
     return [_aware(t, "slot") for t in v]
 
 
+def line_ok(v, limit=200):
+    """True when v can stand as one line of header text (a name) of at most `limit` characters."""
+    return (isinstance(v, str) and bool(v.strip()) and len(v) <= limit
+            and not any(ord(c) < 32 or ord(c) == 127 for c in v))
+
+
 def _line(v, what, limit=200):
     """One line of header text (a name): no line breaks, no control characters."""
     if not isinstance(v, str) or not v.strip() or len(v) > limit:
         raise TemplateError("%s must be a short non-empty string" % (what,))
-    if any(ord(c) < 32 or ord(c) == 127 for c in v):
+    if not line_ok(v, limit):
         raise TemplateError("%s may not carry control characters or line breaks" % (what,))
     return v
 

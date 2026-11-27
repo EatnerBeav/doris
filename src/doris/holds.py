@@ -207,28 +207,31 @@ def shown_subject(subject):
 
 def shown_address(addr):
     """The sender's address as she shows it to the owner: as written, unless a code is in it, which
-    is blanked as in the quote (Fable review of PR #4, finding 2). An address too long to be real
-    is never read: it shows as [redacted]."""
+    is blanked as in the quote (Fable review of PR #4, finding 2). An address the notice can't carry
+    as one address on one line (too long once blanked, no dot in its domain, a quoted or bracketed
+    part) shows as [redacted], so the notice and the digest always go (second review, M1)."""
     addr = addr or ""
+    if not addr:
+        return ""
     if len(addr) > 4 * ADDRESS_CHARS:
         return REDACTED
     addr = clean(addr)
     if len(addr) > ADDRESS_CHARS:
         return REDACTED
     local, at, domain = addr.rpartition("@")
-    if not at:
-        return blank_codes(addr)
-    return blank_codes(local) + "@" + blank_codes(domain)
+    shown = blank_codes(local) + "@" + blank_codes(domain) if at else blank_codes(addr)
+    return shown if templates.shown_address_ok(shown) else REDACTED
 
 
 def sender_name(from_name, from_addr):
-    """How a notice names the sender: the display name made safe, else the shown address (fitted to
-    the name's 200 characters)."""
+    """How a notice names the sender: the display name made safe, else the shown address, else the
+    address made safe as a line (200 characters), else [redacted]."""
     shown = _name_line(from_name)
-    if shown:
-        return shown
-    address = shown_address(from_addr)
-    return address if len(address) <= 200 else _name_line(address, 200)
+    if not shown:
+        shown = shown_address(from_addr)
+        if not shown or shown == REDACTED or len(shown) > 200:
+            shown = _name_line(from_addr, 200)
+    return shown if templates.line_ok(shown) else REDACTED
 
 
 def quote_of(msg):
@@ -248,15 +251,17 @@ def notice_slots(msg, reason_code, wrote_at, draft_slots, zone=None):
     if reason_code in templates.NO_NOTICE:
         raise templates.TemplateError("%s sends no hold notice" % (reason_code,))
     shown = _name_line(msg.from_name)
-    address = shown_address(msg.from_addr)
-    first = shown.split()[0] if shown else _name_line(address.rpartition("@")[0] or address)
+    addr = msg.from_addr or ""
+    first = shown.split()[0] if shown else _name_line(addr.rpartition("@")[0] or addr)
+    address = shown_address(addr)
+    # a value the template can't carry shows as [redacted]; the notice itself always goes (M1)
     return {
-        "name": sender_name(msg.from_name, msg.from_addr),
-        "address": address,
+        "name": sender_name(msg.from_name, addr),
+        "address": address if templates.shown_address_ok(address) else REDACTED,
         "reason": reason_code,
         "wrote_at": wrote_at,
         "quote": quote_of(msg),
-        "first_name": first,
+        "first_name": first if templates.line_ok(first, 80) else REDACTED,
         "draft_slots": list(draft_slots),
         "zone": zone,
     }

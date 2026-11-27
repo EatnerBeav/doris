@@ -158,6 +158,32 @@ class BuildTest(unittest.TestCase):
         body = templates.render("S2", s)
         self.assertEqual(traps.find_tokens(body), [])
 
+    def test_every_address_the_reader_takes_reaches_the_digest(self):
+        # Second Fable review of PR #4, M1: one such sender lost the whole digest.
+        from tests.unit.test_holds import ODD_ADDRESSES, read_from
+        for addr in ODD_ADDRESSES:
+            got = read_from(addr)
+            for name in ("", "Ann Lee"):
+                r = Receipts()
+                r.observed("1", "ok@fine.example", "Ok Fine")
+                r.add("held", "1", {}, "hold.no_model", ts="2026-12-01T21:10:00Z")
+                r.observed("2", got, name)
+                r.add("held", "2", {}, "hold.no_model", ts="2026-12-01T21:20:00Z")
+                r.observed("3", got, name)
+                r.add("decided", "3", {"dropped": 1}, "screen.stop", n=1)
+                r.observed("4", got, name)
+                r.add("decided", "4", {}, "screen.sensitive_skip")
+                r.observed("5", got, name)
+                r.add("decided", "5", {"question": "Is parking free?"}, "policy.pick_plus_question")
+                r.observed("6", got, name)
+                r.add("decided", "6", {}, "policy.file_injection")
+                r.observed("7", got, name, "t-7")
+                r.add("decided", "7", {"thread": "t-7"}, "policy.offer_no_clear_time", cond="B5")
+                body = templates.render("S2", digest.build(r.lines, NOW, verified=True))
+                self.assertIn("Opted out: [redacted] (1 queued request dropped)", body, addr)
+                self.assertIn("Sensitive mail skipped: [redacted]", body, addr)
+                self.assertIn("Ok Fine, ", body)
+
     def test_held_thread_counted_but_sends_no_line(self):
         r = Receipts()
         r.observed("1", "a@x.example", "A")

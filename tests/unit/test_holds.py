@@ -4,8 +4,23 @@ import time
 import unittest
 from unittest import mock
 
-from doris import caps, holds, templates
+from doris import caps, holds, mail, templates
 from tests.unit.voice_fakes import FakeZones, make_msg, utc
+
+# Second Fable review of PR #4, M1: addresses the reader takes that a notice cannot show as written.
+# Each one lost the hold notice and the day's digest.
+ODD_ADDRESSES = (
+    "ab@" + ".".join(["1a2b"] * 30) + ".example",                 # past 254 once its codes are blanked
+    "a" * 64 + "@" + ".".join(["b" * 60] * 3) + ".example",        # 255 characters
+    "x@localhost", "mailer-daemon@x", "x@1a2b", "x@[10.0.0.1]", "\u200b@x.example", '"a\\"b"@x.example',
+)
+
+
+def read_from(addr):
+    """The sender's address as the reader takes it from a From header."""
+    raw = ("From: <%s>\r\nTo: whizz@fastmail.com\r\nSubject: hi\r\nMessage-ID: <m1@x.example>\r\n"
+           "Date: Tue, 1 Dec 2026 16:00:00 +0000\r\n\r\nhello\r\n" % addr).encode("utf-8")
+    return mail.parse_eml(raw).from_addr
 
 
 class DefangTest(unittest.TestCase):
@@ -270,6 +285,19 @@ class NoticeSlotsTest(unittest.TestCase):
         slots = holds.notice_slots(msg, "hold.no_model", utc(2026, 12, 1, 21, 10), [])
         self.assertLessEqual(len(slots["first_name"]), 80)
         templates.render("S1", slots)
+
+    def test_every_address_the_reader_takes_gets_its_notice(self):
+        for addr in ODD_ADDRESSES:
+            got = read_from(addr)
+            for name in ("", "Ann Lee"):
+                msg = make_msg(from_name=name, from_addr=got, own_text="hi")
+                slots = holds.notice_slots(msg, "hold.no_model", utc(2026, 12, 1, 21, 10), [])
+                self.assertEqual(slots["address"], "[redacted]", addr)
+                body = templates.render("S1", slots)
+                self.assertTrue(body.startswith("Held for you: %s ([redacted]), " % slots["name"]), body[:120])
+        msg = make_msg(from_name="", from_addr="x@localhost", own_text="hi")
+        slots = holds.notice_slots(msg, "hold.no_model", utc(2026, 12, 1, 21, 10), [])
+        self.assertEqual((slots["name"], slots["first_name"]), ("x[@]localhost", "x"))
 
     def test_no_notice_for_a_held_thread(self):
         with self.assertRaises(templates.TemplateError):
