@@ -99,8 +99,9 @@ def demo(argv):
 
 
 def worker(argv):
-    """The child the kill switch watches: one run from its config file. Exit 0 done, 1 the chain
-    failed its own check, 3 another Doris holds the ledger, 4 halted (the parent writes that line)."""
+    """The child the kill switch watches: one run from its config file. Exit 0 done, 1 the run
+    failed (the inbox could not be read, or the chain failed its own check), 3 another Doris holds
+    the ledger, 4 halted (the parent writes that line)."""
     with open(argv[0], encoding="utf-8") as fh:
         fields = json.load(fh)
     cfg = loop.RunConfig(supervised=True, say=_say, **fields)
@@ -111,6 +112,11 @@ def worker(argv):
         return refused.exit_code
     except loop.Halted:
         return supervisor.WORKER_EXIT_HALTED
+    if s.read_failed:
+        _say("Stopped: the inbox could not be read, so the run ended there (%d handled, %d held before it). "
+             "Nothing was read as an empty inbox. Receipts %s: %s."
+             % (s.handled, s.held, _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
+        return 1
     cost = "none (stub)" if cfg.model_source == "stub" else "$%.4f%s" % (
         s.cost_usd, " (recorded)" if cfg.model_source == "replayed" else "")
     _say("Done: %d handled, %d held, %d human approvals. %d sent to prospects, %d hold notices, %d bookings. "
@@ -164,7 +170,7 @@ def verify(argv):
     if path is None:
         print("No run to verify yet: run `python -m doris demo` first, or name a receipts file.")
         return 2
-    r = receipts.verify(path)
+    r = receipts.verify(path, finished=True)
     if r.ok:
         print("ok: %d lines, every hash matches the line before it (%s). %s" % (r.lines, _display(path), r.reason))
         return 0

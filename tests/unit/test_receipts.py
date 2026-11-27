@@ -245,6 +245,32 @@ class Verify(Tmp):
         self.five_lines()
         self.assertEqual(tuple(receipts.verify(self.path)[:3]), (True, 5, None))
 
+    def test_a_finished_run_ends_with_its_summary(self):
+        self.five_lines()
+        self.assertTrue(receipts.verify(self.path, finished=True).ok)
+
+    def test_lines_cut_from_the_end_fail_the_finished_check(self):
+        # whole lines cut from the end leave a chain that still links (Fable #7)
+        self.five_lines()
+        self.put_lines(self.lines()[:3])
+        self.assertTrue(receipts.verify(self.path).ok)        # the chain so far is whole
+        res = receipts.verify(self.path, finished=True)
+        self.assertFalse(res.ok, res)
+        self.assertEqual((res.lines, res.first_bad_seq), (3, 4))
+        self.assertIn("no closing line", res.reason)
+
+    def test_a_halted_line_also_ends_a_run(self):
+        w = self.writer()
+        w.write("observed", {"message_sha256": "ab" * 32}, subject="m1@northwind.example")
+        w.write("halted", {"cause": "cli", "in_flight": "none", "dropped": []}, subject="run", why=WHY)
+        self.assertTrue(receipts.verify(self.path, finished=True).ok)
+
+    def test_an_empty_file_is_not_a_finished_run(self):
+        os.makedirs(os.path.dirname(self.path))
+        self.put(b"")
+        self.assertTrue(receipts.verify(self.path).ok)
+        self.assertFalse(receipts.verify(self.path, finished=True).ok)
+
     def test_hand_built_chain_passes(self):
         os.makedirs(os.path.dirname(self.path))
         self.put(build_chain([1, 2, 3]))

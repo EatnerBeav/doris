@@ -135,9 +135,15 @@ def _check(whole):
     return VerifyResult(True, len(good), None, "ok"), good
 
 
-def verify(path) -> VerifyResult:
+CLOSING_KINDS = ("summary", "halted")
+
+
+def verify(path, finished=False) -> VerifyResult:
     """Recompute the whole chain. Names the first bad seq for a changed byte, a deleted, reordered or
-    duplicated line, a seq gap and a torn tail. Reads only; never raises on bad content."""
+    duplicated line, a seq gap and a torn tail. finished=True (a run that has ended: the verify
+    command) also needs the last line to be its summary or halted line, so whole lines cut from the
+    end are named too; without it, a chain still being written passes. Reads only; never raises on
+    bad content."""
     try:
         with open(path, "rb") as fh:
             data = fh.read()
@@ -150,6 +156,11 @@ def verify(path) -> VerifyResult:
     if torn:
         return VerifyResult(False, len(good), len(good) + 1,
                             "torn tail at seq %d: %d bytes with no whole line" % (len(good) + 1, len(torn)))
+    if finished and (not good or good[-1]["kind"] not in CLOSING_KINDS):
+        last = "%s line" % good[-1]["kind"] if good else "no line"
+        return VerifyResult(False, len(good), len(good) + 1,
+                            "no closing line: it ends at seq %d with %s, not a summary or halted line, so lines "
+                            "may be cut from the end (or the run never finished)" % (len(good), last))
     notes = ["torn tail moved aside at seq %d" % line["seq"] for line in good
              if line["kind"] == "error" and line["subject"] == "torn-tail"]
     return VerifyResult(True, len(good), None, "; ".join(["ok"] + notes))

@@ -140,6 +140,33 @@ class ReplyTest(Base):
         m = email.message_from_bytes(raw, policy=email.policy.default)
         self.assertEqual(m["Subject"], "Re: Café chat")
 
+    def test_a_reference_outside_ascii_is_left_out(self):
+        # one byte outside ASCII in References must not stop the reply after the booking (Fable #2)
+        self.inbound = make_msg(references=["<café@x.example>", "<root@northwind.example>"])
+        raw, _ = self.reply()
+        raw.decode("ascii")
+        m = email.message_from_bytes(raw, policy=email.policy.default)
+        self.assertEqual(m["References"], "<root@northwind.example> <msg-1@northwind.example>")
+
+    def test_a_message_id_outside_ascii_threads_on_nothing(self):
+        self.inbound = make_msg(key="café@x.example", message_id="<café@x.example>")
+        raw, _ = self.reply()
+        raw.decode("ascii")
+        m = email.message_from_bytes(raw, policy=email.policy.default)
+        self.assertIsNone(m["In-Reply-To"])
+        self.assertIsNone(m["References"])
+
+    def test_a_control_character_in_a_message_id_is_left_out(self):
+        self.inbound = make_msg(references=["<a\x7fb@x.example>"])
+        raw, _ = self.reply()
+        m = email.message_from_bytes(raw, policy=email.policy.default)
+        self.assertEqual(m["References"], "<msg-1@northwind.example>")
+
+    def test_a_sender_address_outside_ascii_is_refused(self):
+        self.inbound = make_msg(from_addr="josé@x.example")
+        with self.assertRaises(ComposeError):
+            self.reply()
+
     def test_unapproved_template_refused(self):
         with self.assertRaises(templates.TemplateError):
             self.reply(template_id="T17", slots={}, ics=None)

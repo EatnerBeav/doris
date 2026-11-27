@@ -29,7 +29,7 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
-from . import caps, compose, digest, gate, holds, ics, netguard, parser, paths, policy, receipts
+from . import caps, compose, digest, gate, holds, ics, mail, netguard, parser, paths, policy, receipts
 from . import screens, slots, supervisor, templates, zones
 from . import ledger as ledger_mod
 from . import model as model_mod
@@ -49,7 +49,7 @@ CALENDAR_FAULTS = frozenset({"timeout-once", "timeout-twice", "read-fails", "slo
 MAIL_FAULTS = frozenset({"sent-unconfirmed"})
 NEW_OFFER_TEMPLATES = frozenset({"T2", "T3", "T4", "T13", "T18"})   # each one is an offer record
 NOTICE_WITHOUT_TIMES = frozenset({"hold.owner_mail", "hold.calendar_down", "hold.unknown_result", "hold.no_slot",
-                                  "hold.remove_failed"})
+                                  "hold.remove_failed", "hold.internal_error"})
 
 
 # ------------------------------------------------------------------------------------------
@@ -93,6 +93,7 @@ class RunSummary:
     cost_usd: float = 0.0
     verify_ok: bool = False
     halted: Optional[str] = None
+    read_failed: bool = False               # the inbox could not be read: the run ended there, never "clean"
 
 
 class Refused(Exception):
@@ -195,7 +196,7 @@ class _Entry:
         self.msg = msg
         self.results = list(results)
         self.raw_sha256 = hashlib.sha256(bytes(item.raw)).hexdigest()
-        self.key = msg.key if msg is not None else "sha256:" + self.raw_sha256
+        self.key = msg.key if msg is not None else mail.raw_key(item.raw)   # its Message-ID even when unreadable
         self.facts = dict(getattr(item, "facts", None) or {})
         self.thread = self.key
         self.redo = False            # fetched in an earlier run and never finished: read again
@@ -205,6 +206,7 @@ class _Entry:
         self.injection_seen = False
         self.cost = None
         self.action_id = None
+        self.closed = False          # its closing line is written: one per message, never two
 
     def settled_by(self):
         for r in self.results:
@@ -382,7 +384,7 @@ class _Run:
                 ev = self.get_event(None, b["booking_id"])
             except _CalendarDown:
                 continue
-            if ev is not None and b["state"] == "intent":
+            if ev is not None and b["state"] in ("intent", "unconfirmed"):
                 self.ledger.set_booking_state(b["booking_id"], "written")
         self.redo = set(ledger_mod.norm_id(m["key"]) for m in self.ledger.unprocessed_messages())
 
@@ -396,9 +398,9 @@ class _Run:
                     return
                 self.t = max(self.t, next_cycle(nxt))
             items = self.fetch()
-            self.batch(items)
-            if self.cfg.clock_mode != "advance" and not items:
-                return
+            fresh = self.batch(items)
+            if self.cfg.clock_mode != "advance" and not fresh:
+                return                      # nothing new: a fetch can hand over old mail again
             if self.cfg.clock_mode == "advance" and not items and last == self.t:
                 return                      # the adapter named an arrival it then did not hand over
             last = self.t
@@ -415,9 +417,9 @@ class _Run:
             "handled": s.handled, "held": s.held, "human_approvals": s.human_approvals, "errors": s.errors,
             "quarantined": s.quarantined, "sends": s.sends, "hold_notices": s.hold_notices,
             "bookings": s.bookings, "model_calls": s.model_calls, "cost_usd": round(s.cost_usd, 6),
-            "halted": s.halted})
+            "halted": s.halted, "read_failed": s.read_failed})
         self.ledger.end_run(self.run_id, self.now())
-        s.verify_ok = receipts.verify(self.receipts_path).ok
+        s.verify_ok = receipts.verify(self.receipts_path, finished=True).ok
 
     def write_halted(self, cause):
         """Unsupervised runs (traps, tests) write their own halted line; under the kill switch the parent does."""
@@ -428,9 +430,10 @@ class _Run:
             dropped.append({"kind": a["kind"], "message": a["message_key"], "thread": a["thread_key"],
                             "template": a["detail"].get("template"), "booking_id": a["detail"].get("booking_id")})
         for m in self.ledger.unprocessed_messages(run_id=self.run_id):
+            # left unprocessed, as the kill switch leaves them: after resume each is read again
+            # through the whole loop, and no dropped action runs as it was recorded
             dropped.append({"kind": "message", "message": m["key"], "thread": m["thread_key"],
                             "template": None, "booking_id": None})
-            self.ledger.set_message_status(m["key"], "dropped", "halt")
         why_code = "halt." + cause if ("halt." + cause) in why_mod.CODES else "halt.unreadable"
         self.write("halted", {"cause": cause, "in_flight": flight or "none", "dropped": dropped},
                    why=why_mod.why(why_code))
@@ -452,22 +455,47 @@ class _Run:
         if not self.redo:
             return False
         msg, _ = screens.decode(item)
-        key = msg.key if msg is not None else "sha256:" + hashlib.sha256(bytes(item.raw)).hexdigest()
+        key = msg.key if msg is not None else mail.raw_key(item.raw)
         return ledger_mod.norm_id(key) in self.redo
 
-    def thread_of(self, msg):
+    def thread_of(self, msg, in_batch=None):
         """The thread a message is on: the thread of her message it answers, else of an inbound
-        message it answers, else its own Message-ID (it starts one). What it claims never counts."""
+        message it answers (in the ledger, or in_batch: earlier in this same batch), else its own
+        Message-ID (it starts one). What it claims never counts."""
         named = list(msg.in_reply_to) + list(reversed(msg.references))
         for mid in named:
             t = self.ledger.thread_of_sent(mid)
             if t:
                 return t
         for mid in named:
-            t = self.ledger.thread_of_message(mid)
+            t = self.ledger.thread_of_message(mid) or (in_batch(mid) if in_batch is not None else None)
             if t:
                 return t
         return msg.key
+
+    def threads(self, entries):
+        """Every message's thread, before any of the batch is written down. A reply to a message in
+        this same batch joins that message's thread, so of the two only the newer goes on (Fable #4)."""
+        by_key = {}
+        for e in entries:
+            if e.msg is not None:
+                by_key.setdefault(ledger_mod.norm_id(e.key), e)
+        done = {}
+
+        def resolve(e, path):
+            k = ledger_mod.norm_id(e.key)
+            if k not in done:
+                def earlier(mid):
+                    other = by_key.get(ledger_mod.norm_id(mid))
+                    if other is None or ledger_mod.norm_id(other.key) in path:
+                        return None             # not in this batch, or a loop of forged headers
+                    return resolve(other, path | {k})
+                done[k] = self.thread_of(e.msg, earlier)
+            return done[k]
+
+        for e in entries:
+            if e.msg is not None:
+                e.thread = resolve(e, frozenset())
 
     def batch(self, items):
         fresh = [it for it in items if self.is_new(it)]
@@ -478,8 +506,7 @@ class _Run:
             if e.settled_by() is None:
                 e.results.extend(screens.run_message(e.msg, self.env))
             e.redo = ledger_mod.norm_id(e.key) in self.redo
-            if e.msg is not None:
-                e.thread = self.thread_of(e.msg)
+        self.threads(entries)
         self.batch_keys = set(ledger_mod.norm_id(e.key) for e in entries)
         for e in entries:
             self.write_down(e)
@@ -594,6 +621,15 @@ class _Run:
             answer = self.classify(e)
             f = self.facts(e, answer)
             self.act(e, f, policy.decide(f))
+        except (Halted, Refused):
+            raise
+        except _CalendarDown as down:
+            if not e.closed:
+                self.hold_code(e, down.code)
+        except Exception as exc:            # Contract 7: a bug holds this one message, loudly; the run goes on
+            self.error(e, "handle", exc)
+            if not e.closed:
+                self.hold_code(e, "hold.internal_error")
         finally:
             self.disarm()
 
@@ -637,16 +673,43 @@ class _Run:
                             reply_to_mismatch=any(not screens.same_address(r, msg.from_addr) for r in msg.reply_to))
 
     def thread_state(self, e, s8):
+        """The thread as policy sees it, before this message did anything (ruling 8: a kill can come
+        part way, and the next run reads it again). A booking this message made itself is not "a
+        live booking on the thread" (book() picks that one up), and an offer its own reply already
+        carries does not count against the thread; a booking its own cancel or move already took off
+        the calendar still stands for it, so the reply goes on."""
         tk, now = e.thread, self.now()
-        offers = self.ledger.open_offers(tk, now)
-        live = self.ledger.live_booking_for_thread(tk)
-        gone = any(b["state"] == "gone" for b in self.ledger.bookings_for_thread(tk))
+        mine = set(o["id"] for o in self.own_offers(e))
+        offers = [o for o in self.ledger.open_offers(tk, now) if o["id"] not in mine]
+        own = ledger_mod.norm_id(e.key)
+        booked = self.ledger.bookings_for_thread(tk)
+        live = next((b for b in booked if b["state"] in ledger_mod.LIVE_BOOKING_STATES
+                     and ledger_mod.norm_id(b["message_key"]) != own), None)
+        if live is None:
+            live = self.unbooked_here(e, booked)
+        gone = any(b["state"] == "gone" for b in booked)
         return policy.ThreadState(
             thread_key=tk, own_thread=bool(s8.get("own_thread")), held=self.ledger.thread_held(tk),
-            offer_count=self.ledger.offer_count(tk), open_offers=offers, live_booking=live,
+            offer_count=self.ledger.offer_count(tk) - len(mine), open_offers=offers, live_booking=live,
             gone_booking=gone and live is None,
             written_to=frozenset(a.lower() for a in self.ledger.addresses_written_on_thread(tk)),
             offer_to=offers[-1]["sender"] if offers else None)
+
+    def own_offers(self, e):
+        """Offer records this message's own reply already carries on its thread (written down before
+        the send; a kill came before the message closed)."""
+        out = []
+        for template in sorted(NEW_OFFER_TEMPLATES):
+            o = self.ledger.offer_for_send(compose.new_message_id(self.cfg.doris_addr, e.key, template, 1))
+            if o is not None and ledger_mod.norm_id(o["thread_key"]) == ledger_mod.norm_id(e.thread):
+                out.append(o)
+        return out
+
+    def unbooked_here(self, e, booked):
+        """The booking this message's own cancel or move already took off the calendar, or None."""
+        ids = set(a["detail"].get("booking_id") for a in self.ledger.actions_for_message(e.key)
+                  if a["kind"] in ("cancel", "move"))
+        return next((b for b in booked if b["state"] == "cancelled" and b["booking_id"] in ids), None)
 
     # --- act ------------------------------------------------------------------------------------
     def act(self, e, f, plan):
@@ -692,18 +755,65 @@ class _Run:
         }, subject=e.subject, why=plan.why)
 
     def book(self, e, f, plan):
-        """Re-check right before the write, ledger first, create-only, read back (rulings 4 and 8)."""
+        """Re-check right before the write, ledger first, create-only, read back (rulings 4 and 8).
+        A booking this message already wrote down (a crash or a stop came part way) is picked up
+        where it stopped: looked up by its ID first, never booked again."""
+        bid = booking_id(e.key, plan.slot)
+        if self.ledger.booking(bid) is not None:
+            return self.resume_booking(e, f, plan, self.ledger.booking(bid))
+        return self.book_fresh(e, f, plan, bid)
+
+    def resume_booking(self, e, f, plan, b):
+        """Ruling 8 after a restart. Never written: one more try, now that it is not blind. Written:
+        read back, then T1 once (Sent is looked in first). Gone: held for the owner. A collision:
+        that path. A lookup that fails: held."""
+        bid, slot, state = b["booking_id"], b["slot"], b["state"]
+        e.recovered = True
+        if state in ("intent", "unconfirmed", "blocked"):
+            try:
+                there = self.get_event(e, bid)
+            except _CalendarDown:
+                return self.hold_code(e, "hold.unknown_result", f)
+            if there is None:
+                self.ledger.set_booking_state(bid, "intent")
+                return self.book_fresh(e, f, plan, bid)
+            self.ledger.set_booking_state(bid, "written")
+            state = "written"
+        if state in ("written", "confirmed"):
+            try:
+                there = self.get_event(e, bid)
+            except _CalendarDown:
+                return self.hold_code(e, "hold.unknown_result", f)
+            if there is None:
+                self.ledger.set_booking_state(bid, "gone")
+                return self.hold_code(e, "hold.owner_removed", f)
+            return self.confirm_booking(e, f, plan, bid, slot)
+        if state == "collision_unresolved":
+            return self.collision(e, f, plan, bid, slot)
+        if state == "removed":
+            return self.act(e, f, policy.on_collision(plan, f.thread))
+        return self.hold_code(e, "hold.unsure", f)      # cancelled or gone: never booked again
+
+    def drop_booking(self, bid):
+        """A booking written down at intent and then not made: never written, so not live."""
+        b = self.ledger.booking(bid)
+        if b is not None and b["state"] == "intent":
+            self.ledger.set_booking_state(bid, "blocked")
+
+    def book_fresh(self, e, f, plan, bid):
         now, slot, msg = self.now(), plan.slot, e.msg
         ok, rule = slots.bookable(slot, now, written=plan.direct)
         if not ok:
+            self.drop_booking(bid)
             return self.act(e, f, policy.on_unavailable(plan, rule, f.thread))
         try:
             busy = slots.busy(self.read(e, slot.start_utc, slot.end_utc), slot)
         except _CalendarDown as down:
+            self.drop_booking(bid)
             return self.hold_code(e, down.code, f)
         if busy:
+            self.drop_booking(bid)
             return self.act(e, f, policy.on_unavailable(plan, "overlap", f.thread))
-        bid = booking_id(e.key, slot)
         self.ledger.record_booking(bid, e.key, e.thread, msg.from_addr, slot, now, run_id=self.run_id)
         event = ics.build_event(bid, slot, self.link(), "CONFIRMED", 0, now, None)
         action = Action(kind="calendar_create", message_key=e.key, thread_key=e.thread,
@@ -715,6 +825,14 @@ class _Run:
             return self.blocked(e, f, g)
         try:
             self.create(e, bid, event)
+        except _CalendarDown as down:
+            return self.hold_code(e, down.code, f)
+        return self.confirm_booking(e, f, plan, bid, slot)
+
+    def confirm_booking(self, e, f, plan, bid, slot):
+        """Her event is written: read it back and re-read its span, then T1 once."""
+        now = self.now()
+        try:
             mine, others = self.readback(e, bid, slot)
         except _CalendarDown as down:
             return self.hold_code(e, down.code, f)
@@ -756,7 +874,10 @@ class _Run:
             events = self.read(e, now, now + WINDOW)
         except _CalendarDown as down:
             return self.hold_code(e, down.code, f)
-        exclude = set(self.ledger.offered_starts(e.thread)) if plan.exclude_offered else set()
+        exclude = set()
+        if plan.exclude_offered:                # times offered before, not the ones this reply already holds
+            exclude = set(self.ledger.offered_starts(e.thread)) - set(
+                s.start_utc for o in self.own_offers(e) for s in o["slots"])
         if plan.asked is not None:
             exclude.add(plan.asked)
         found = self.find(events, now, plan, f, exclude)
@@ -817,7 +938,12 @@ class _Run:
 
     def unbook(self, e, f, bid, slot):
         """Her own event off the calendar, through the gate, confirmed by a re-read. The cancel .ics
-        goes on the reply, where G13 reads it."""
+        goes on the reply, where G13 reads it. Already off (this message took it off, then a kill
+        came before its reply): nothing is removed twice, and the reply goes on."""
+        b = self.ledger.booking(bid)
+        if b is not None and b["state"] == "cancelled":
+            e.recovered = True
+            return True
         action = Action(kind="calendar_delete", message_key=e.key, thread_key=e.thread,
                         recipient_source="sender", booking_id=bid, span=slot,
                         evidence={"reason": "sender_asked"})
@@ -986,11 +1112,21 @@ class _Run:
             own = led.booking(action.booking_id)
             if own is not None and own["run_id"] == self.run_id and own["state"] == "intent":
                 writes -= 1
-        return {"sends_hour": led.count_prospect_sends(since=hour),
-                "sends_run": led.count_prospect_sends(run_id=self.run_id),
-                "sends_thread_day": led.count_prospect_sends(since=day, thread_key=thread_key) if thread_key else 0,
-                "sends_thread_ever": led.count_prospect_sends(thread_key=thread_key) if thread_key else 0,
-                "offers_thread": led.offer_count(thread_key) if thread_key else 0,
+        # a reply an earlier run recorded and never confirmed is this one again, not one more
+        mine = offer = None
+        if action is not None and action.kind == "send_reply" and action.template:
+            mid = compose.new_message_id(self.cfg.doris_addr, action.message_key, action.template, 1)
+            mine, offer = led.send(mid), led.offer_for_send(mid)
+
+        def less(n, counted):
+            return n - 1 if mine is not None and counted else n
+        here = mine is not None and thread_key and ledger_mod.norm_id(mine["thread_key"] or "") == ledger_mod.norm_id(thread_key)
+        return {"sends_hour": less(led.count_prospect_sends(since=hour), mine and mine["created"] >= hour),
+                "sends_run": less(led.count_prospect_sends(run_id=self.run_id), mine and mine["run_id"] == self.run_id),
+                "sends_thread_day": less(led.count_prospect_sends(since=day, thread_key=thread_key),
+                                         here and mine["created"] >= day) if thread_key else 0,
+                "sends_thread_ever": less(led.count_prospect_sends(thread_key=thread_key), here) if thread_key else 0,
+                "offers_thread": (led.offer_count(thread_key) - (1 if offer is not None else 0)) if thread_key else 0,
                 "calendar_writes_run": writes,
                 "hold_notices_hour": led.count_hold_notices(since=hour)}
 
@@ -1016,34 +1152,59 @@ class _Run:
         if not g.passed:
             self.blocked(e, f, g)
             return False
-        if template in NEW_OFFER_TEMPLATES and offered:
-            self.ledger.create_offer(e.thread, msg.from_addr, list(offered), length or caps.DEFAULT_LENGTH_MIN, now,
-                                     now + caps.OFFER_EXPIRY)
+
+        def write_offer_down():
+            # written down before the send (A3), once per send: a restart that sends again under the
+            # same Message-ID gives the same offer record its fresh times; the thread's count is unchanged
+            if template not in NEW_OFFER_TEMPLATES or not offered:
+                return
+            prior = self.ledger.offer_for_send(mid)
+            if prior is None:
+                self.ledger.create_offer(e.thread, msg.from_addr, list(offered), length or caps.DEFAULT_LENGTH_MIN,
+                                         now, now + caps.OFFER_EXPIRY, message_id=mid)
+            elif prior["slots"] != list(offered):
+                self.ledger.set_offer_slots(prior["id"], list(offered), now, now + caps.OFFER_EXPIRY)
+
         if not self.deliver(e, mid, "send_reply", template, msg.from_addr, raw, body,
-                            compose.reply_envelope(msg, self.cfg.owner_addr), tslots):
+                            compose.reply_envelope(msg, self.cfg.owner_addr), tslots, before_send=write_offer_down):
             self.hold(e, "hold.send_unconfirmed", why_mod.why("hold.send_unconfirmed"), f)
             return False
         self.summary.sends += 1
         return True
 
-    def deliver(self, e, mid, kind, template, to_addr, raw, body, envelope, tslots):
-        """Recorded before it is sent; sent once; found in Sent after (one more look); never resent blind."""
+    def deliver(self, e, mid, kind, template, to_addr, raw, body, envelope, tslots, before_send=None):
+        """Recorded before it is sent; sent once; found in Sent after (one more look); never resent blind.
+        A send an earlier run recorded and never confirmed is looked up in Sent first: found, it is
+        done; the lookup failing, nothing goes out (unknown); confirmed absent, it goes out now under
+        the same Message-ID (ruling 8). True only when her copy is found in Sent."""
         subject = e.subject if e is not None else ""
         old = self.ledger.send(mid)
         if old is not None and old["state"] == "confirmed":
             return True                     # sent in an earlier run: the restart sends nothing twice
         body_sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
-        self.ledger.record_send(mid, kind, template, e.thread if e is not None else None, to_addr, body_sha,
-                                self.now(), self.run_id)
-        if old is not None and self.look_in_sent(e, mid, template):
-            self.ledger.set_send_state(mid, "confirmed")
-            return True
+        if old is None:
+            self.ledger.record_send(mid, kind, template, e.thread if e is not None else None, to_addr, body_sha,
+                                    self.now(), self.run_id)
+        else:
+            if e is not None:
+                e.recovered = True
+            found = self.look_in_sent(e, mid, template)
+            if found:
+                self.ledger.set_send_state(mid, "confirmed")
+                return True
+            if found is None:
+                self.ledger.set_send_state(mid, "unknown")
+                return False
+            if old["body_sha256"] != body_sha:
+                self.ledger.reset_send(mid, body_sha)
+        if before_send is not None:
+            before_send()
         seq = self.called("send", target=template, subject=subject, message_id=mid,
                           to="sender" if kind == "send_reply" else "owner",
                           bcc="owner" if kind == "send_reply" else None, body_sha256=body_sha,
                           slots=templates.receipt_slots(tslots))
         try:
-            self.mail.send(raw, envelope, mid)
+            self.mail.send(raw, envelope, mid, template=template)
             self.result(seq, subject=subject, ok=True, state="handed_over")
         except SendUnknown:
             self.result(seq, subject=subject, ok=False, state="unknown")
@@ -1053,16 +1214,17 @@ class _Run:
             return False
         found = self.look_in_sent(e, mid, template) or self.look_in_sent(e, mid, template)
         self.ledger.set_send_state(mid, "confirmed" if found else "unknown")
-        return found
+        return bool(found)
 
     def look_in_sent(self, e, mid, template):
+        """True found, False confirmed absent, None the lookup failed (never read as "not sent")."""
         subject = e.subject if e is not None else ""
         seq = self.called("sent_lookup", target=template, subject=subject, message_id=mid)
         try:
             found = self.mail.find_in_sent(mid) is True
         except MailError:
             self.result(seq, subject=subject, ok=False)
-            return False
+            return None
         self.result(seq, subject=subject, ok=True, found=found)
         return found
 
@@ -1129,6 +1291,7 @@ class _Run:
                    "wrapped": e.facts.get("wrapped"), "thread": e.subject if e.sensitive else e.thread}
         payload.update(extra)
         self.write(kind, payload, subject=e.subject, why=why_)
+        e.closed = True
         if e.in_ledger:
             self.ledger.set_message_status(e.key, _status_for(outcome), outcome)
         if e.action_id is not None:
@@ -1212,7 +1375,8 @@ def run(cfg):
                 raise
             r.write_halted(h.cause)
         except MailError as exc:
-            r.error(None, "fetch", exc)
+            r.error(None, "fetch", exc)     # a refused read ends the run, and the summary says so
+            r.summary.read_failed = True
         r.finish()
     finally:
         r.close_handles()

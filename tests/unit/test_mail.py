@@ -75,6 +75,31 @@ class Identity(unittest.TestCase):
         self.assertEqual(m.to, [])
 
 
+class KeyWithoutABody(unittest.TestCase):
+    """A message whose body can't be decoded is still keyed by its Message-ID (ruling 8): only a
+    message with no Message-ID is keyed by the hash of its bytes."""
+
+    BAD = (b"From: a@x.example\r\nTo: b@y.example\r\nMessage-ID: <bill-7@x.example>\r\n"
+           b"Subject: bill\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nTotal \xa3120\r\n")
+
+    def test_the_body_fails_but_the_header_gives_the_key(self):
+        with self.assertRaises(DecodeError):
+            mail.parse_eml(self.BAD)
+        self.assertEqual(mail.raw_key(self.BAD), "bill-7@x.example")
+
+    def test_no_message_id_means_the_hash(self):
+        raw = self.BAD.replace(b"Message-ID: <bill-7@x.example>\r\n", b"")
+        self.assertEqual(mail.raw_key(raw), "sha256:" + hashlib.sha256(raw).hexdigest())
+
+    def test_a_message_id_that_is_not_plain_ascii_means_the_hash(self):
+        raw = self.BAD.replace(b"<bill-7@x.example>", "<caf\u00e9@x.example>".encode("utf-8"))
+        self.assertEqual(mail.raw_key(raw), "sha256:" + hashlib.sha256(raw).hexdigest())
+
+    def test_the_same_key_as_a_decoded_message(self):
+        good = self.BAD.replace(b"\xa3", b"GBP ")
+        self.assertEqual(mail.raw_key(good), mail.parse_eml(good).key)
+
+
 class Refusals(unittest.TestCase):
     def assertRefused(self, raw):
         with self.assertRaises(DecodeError):

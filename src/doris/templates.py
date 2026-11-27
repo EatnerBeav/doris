@@ -44,7 +44,8 @@ ICS_METHOD = {"T1": "PUBLISH", "T10": "CANCEL", "T18": "CANCEL"}   # templates t
 
 # --- S1 hold reasons ------------------------------------------------------------------------
 # The twenty-one approved phrases (templates.md "S1 hold reasons": fifteen Nov 25-26, six more
-# Nov 27, decision 68), plus hold.unknown_result on the approved calendar phrase (decision 61).
+# Nov 27, decision 68), plus hold.unknown_result on the approved calendar phrase (decision 61) and
+# hold.internal_error on the approved "wasn't sure" phrase (decision 69).
 HOLD_REASONS = {
     "hold.owner_mail": "mail from your own address; I don't take instructions by email",
     "hold.oversize": "too long to read safely",
@@ -72,6 +73,8 @@ HOLD_REASONS = {
     "hold.no_slot": "no available slot in the next 30 days",
     "hold.gate_blocked": "a safety check stopped my reply",
     "hold.send_unconfirmed": "I couldn't confirm my reply was sent",
+    # an unexpected error part way through one message (decision 69): an approved phrase, no new wording
+    "hold.internal_error": "not something I handle, or I wasn't sure",
 }
 NO_NOTICE = frozenset({"hold.thread_held"})   # decision 3: later mail on a held thread goes to the digest only
 

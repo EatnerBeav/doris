@@ -228,6 +228,10 @@ class HoldReasonsTest(Base):
         for code, phrase in expect.items():
             self.assertEqual(templates.reason_phrase(code), phrase)
 
+    def test_an_unexpected_error_reuses_an_approved_phrase(self):
+        # decision 69: no new wording to approve; the "wasn't sure" phrase stands in
+        self.assertEqual(templates.reason_phrase("hold.internal_error"), templates.reason_phrase("hold.unsure"))
+
     def test_unknown_code_is_refused(self):
         with self.assertRaises(TemplateError):
             templates.reason_phrase("hold.made_up")

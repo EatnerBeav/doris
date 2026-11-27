@@ -152,6 +152,17 @@ class Verify(Isolated):
         self.assertIn("seq 5", out)
 
 
+    def test_lines_cut_from_the_end_fail(self):
+        copy = os.path.join(self.tmp, "cut.jsonl")
+        with open(self.path, "rb") as fh:
+            lines = fh.read().split(b"\n")[:-1]
+        with open(copy, "wb") as fh:
+            fh.write(b"".join(l + b"\n" for l in lines[:-3]))
+        code, out = run_cli(["verify", copy])
+        self.assertEqual(code, 1, out)
+        self.assertIn("no closing line", out)
+
+
 class NotYet(unittest.TestCase):
     def test_commands_not_built_yet_say_so(self):
         for name in ("run", "redteam", "replay", "watch"):

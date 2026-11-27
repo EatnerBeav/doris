@@ -5,6 +5,7 @@ import datetime as dt
 import os
 import shutil
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -81,7 +82,7 @@ class Counts(unittest.TestCase):
         self.assertEqual(loop.count_outcomes(lines)["human_approvals"], 1)
 
 
-def sandbox_run(tmp, say=None):
+def sandbox_run(tmp, say=None, clock_mode="advance"):
     """The demo day on a fresh copy of sandbox/, stub model, advancing clock; returns its receipt lines."""
     sandbox = os.path.join(tmp, "sandbox")
     shutil.copytree(paths.SANDBOX, sandbox, ignore=shutil.ignore_patterns("doris-*.ics", "*.eml.sent", "keywords.json"))
@@ -91,7 +92,7 @@ def sandbox_run(tmp, say=None):
             os.remove(os.path.join(outbox, name))
     cfg = loop.RunConfig(mode="throwaway", run_name="model-stub-sandbox-test", state_dir=os.path.join(tmp, "state"),
                          sandbox_root=sandbox, owner_addr="whizz@fastmail.com", doris_addr="doris.htm@fastmail.com",
-                         model_source="stub", clock_mode="advance", say=say)
+                         model_source="stub", clock_mode=clock_mode, say=say)
     return receipts.read_lines(loop.run(cfg).receipts_path)
 
 
@@ -108,6 +109,18 @@ class WhatTheGateIsHanded(unittest.TestCase):
         self.assertTrue(creates[0]["passed"], creates[0]["checks"]["G7"])
         self.assertEqual(creates[1]["first_fail"], "G7")
 
+
+
+class TheRunEnds(unittest.TestCase):
+    def test_a_fixed_clock_run_ends_once_nothing_new_is_fetched(self):
+        # the sandbox hands over the same mail on every fetch; the ledger is what makes it old
+        tmp = tempfile.mkdtemp(prefix="doris-loop-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        done = []
+        t = threading.Thread(target=lambda: done.append(sandbox_run(tmp, clock_mode="fixed")), daemon=True)
+        t.start()
+        t.join(60)
+        self.assertTrue(done, "the run never ended")
 
 
 class TheTerminalLines(unittest.TestCase):

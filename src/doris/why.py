@@ -100,6 +100,7 @@ CODES = {
     "hold.no_slot": "Held: no available slot in the next 30 days.",
     "hold.unknown_result": "Held: a write's result is unknown and the lookup failed.",
     "hold.send_unconfirmed": "Held: a send could not be confirmed in Sent.",
+    "hold.internal_error": "Held: an unexpected error stopped her part way; the error line before this names it.",
     "hold.gate_blocked": "Held: the gate blocked the action ({check}); nothing was sent.",
     "hold.thread_held": "Held thread: it stays the owner's, nothing more is sent on it.",
     # --- halts ----------------------------------------------------------------------------

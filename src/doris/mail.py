@@ -23,7 +23,7 @@ import re
 import unicodedata
 from email import policy as _policy
 from email import utils as _eutils
-from email.parser import BytesParser
+from email.parser import BytesHeaderParser, BytesParser
 from html.parser import HTMLParser
 from typing import Dict, List, Optional, Tuple
 
@@ -130,6 +130,21 @@ def message_key(message_id: Optional[str], raw: bytes) -> str:
         if k:
             return k
     return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def raw_key(raw: bytes) -> str:
+    """Message.key read from the headers alone, for a message whose body can't be decoded (ruling 8):
+    its one Message-ID when that is plain ASCII, else the hash of its bytes. Never raises."""
+    raw = bytes(raw or b"")
+    try:
+        values = BytesHeaderParser(policy=_policy.compat32).parsebytes(raw).get_all("message-id") or []
+    except Exception:
+        values = []
+    if len(values) == 1 and isinstance(values[0], str):
+        value = values[0].strip()
+        if value and value.isascii() and not any(c.isspace() for c in value):
+            return message_key(value, raw)
+    return message_key(None, raw)
 
 
 def _date_utc(msg) -> Optional[_dt.datetime]:

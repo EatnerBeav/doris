@@ -28,7 +28,7 @@ from .paths import MODES
 from .receipts import canonical, iso, jsonable
 from .shapes import Slot
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2   # 2: an offer names the send that carries it (offers.message_id)
 MESSAGE_STATUSES = ("fetched", "processing", "done", "superseded", "dropped", "held", "quarantined")
 UNPROCESSED = ("fetched", "processing")
 SEND_KINDS = ("send_reply", "send_hold_notice", "send_digest")
@@ -63,7 +63,8 @@ _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS offers (
         id INTEGER PRIMARY KEY AUTOINCREMENT, thread_key TEXT NOT NULL, thread_norm TEXT NOT NULL,
         sender TEXT NOT NULL, length_min INTEGER NOT NULL, created_utc TEXT NOT NULL, expires_utc TEXT NOT NULL,
-        used INTEGER NOT NULL DEFAULT 0, closed_reason TEXT)""",
+        used INTEGER NOT NULL DEFAULT 0, closed_reason TEXT, mid_norm TEXT)""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS offers_by_send ON offers (mid_norm) WHERE mid_norm IS NOT NULL",
     """CREATE TABLE IF NOT EXISTS offer_slots (
         offer_id INTEGER NOT NULL, idx INTEGER NOT NULL, start_utc TEXT NOT NULL, end_utc TEXT NOT NULL,
         PRIMARY KEY (offer_id, idx))""",
@@ -339,6 +340,18 @@ class Ledger:
                         (mid, message_id, kind, same[1], thread_key, same[2], same[3], same[4], created, run_id))
         return True
 
+    def reset_send(self, message_id, body_sha256):
+        """A new body for a send that never reached Sent (state pending or unknown, and the loop looked
+        first): it goes out under the same Message-ID (ruling 8). A confirmed send never changes."""
+        with self._tx() as con:
+            row = con.execute("SELECT state FROM sends WHERE mid_norm = ?", (norm_id(message_id),)).fetchone()
+            if row is None:
+                raise KeyError(message_id)
+            if row["state"] == "confirmed":
+                raise ValueError("send %s is confirmed in Sent; it never changes" % (norm_id(message_id),))
+            con.execute("UPDATE sends SET body_sha256 = ? WHERE mid_norm = ?",
+                        (_text(body_sha256, "body_sha256"), norm_id(message_id)))
+
     def set_send_state(self, message_id, state):
         if state not in SEND_STATES:
             raise ValueError("send state must be one of %s, not %r" % (", ".join(SEND_STATES), state))
@@ -405,9 +418,10 @@ class Ledger:
         return [r["addr"] for r in self._all("SELECT addr FROM silences ORDER BY silenced_utc, rowid")]
 
     # --- Offers (ruling 6) -------------------------------------------------------------------
-    def create_offer(self, thread_key, sender, slots, length_min, now, expires) -> int:
-        """One offer record: 1 to 3 absolute slots, expiring after now and at most caps.OFFER_EXPIRY later.
-        A thread gets two offers, ever (the law): a third is refused here as well as held by policy."""
+    @staticmethod
+    def _offer_rows(slots, length_min, now, expires):
+        """The checked slot rows and times of an offer: 1 to 3 slots, a length allowed, expiring after
+        now and at most caps.OFFER_EXPIRY later."""
         slots = list(slots)
         if not 1 <= len(slots) <= caps.SLOTS_PER_OFFER:
             raise ValueError("an offer holds 1 to %d slots, not %d" % (caps.SLOTS_PER_OFFER, len(slots)))
@@ -417,24 +431,53 @@ class Ledger:
             if not s.start_utc < s.end_utc:
                 raise ValueError("a slot must end after it starts")
             rows.append((index, start, end))
-        if type(length_min) is not int or not caps.MIN_LENGTH_MIN <= length_min <= caps.MAX_LENGTH_MIN:
+        if length_min is not None and (type(length_min) is not int
+                                       or not caps.MIN_LENGTH_MIN <= length_min <= caps.MAX_LENGTH_MIN):
             raise ValueError("offer length must be %d to %d minutes, not %r"
                              % (caps.MIN_LENGTH_MIN, caps.MAX_LENGTH_MIN, length_min))
         created, until = _ts(now, "now"), _ts(expires, "expires")
         if not now < expires <= now + caps.OFFER_EXPIRY:
             raise ValueError("an offer expires after now and within %s" % (caps.OFFER_EXPIRY,))
+        return rows, created, until
+
+    def create_offer(self, thread_key, sender, slots, length_min, now, expires, message_id=None) -> int:
+        """One offer record: 1 to 3 absolute slots, expiring after now and at most caps.OFFER_EXPIRY later.
+        A thread gets two offers, ever (the law): a third is refused here as well as held by policy.
+        message_id names the send that carries it: one offer per send."""
+        rows, created, until = self._offer_rows(slots, length_min, now, expires)
         thread = norm_id(thread_key)
+        mid = None if message_id is None else norm_id(message_id)
         with self._tx() as con:
             count = con.execute("SELECT COUNT(*) FROM offers WHERE thread_norm = ?", (thread,)).fetchone()[0]
             if count >= caps.OFFERS_PER_THREAD_EVER:
                 raise ValueError("thread %s already has %d offers; the law allows %d, ever"
                                  % (thread, count, caps.OFFERS_PER_THREAD_EVER))
-            cur = con.execute("INSERT INTO offers (thread_key, thread_norm, sender, length_min, created_utc, expires_utc) "
-                              "VALUES (?, ?, ?, ?, ?, ?)", (thread_key, thread, _addr(sender), length_min, created, until))
+            if mid is not None and con.execute("SELECT 1 FROM offers WHERE mid_norm = ?", (mid,)).fetchone():
+                raise ValueError("send %s already carries an offer" % (mid,))
+            cur = con.execute("INSERT INTO offers (thread_key, thread_norm, sender, length_min, created_utc, expires_utc, "
+                              "mid_norm) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                              (thread_key, thread, _addr(sender), length_min, created, until, mid))
             offer_id = cur.lastrowid
             con.executemany("INSERT INTO offer_slots (offer_id, idx, start_utc, end_utc) VALUES (?, ?, ?, ?)",
                             [(offer_id,) + r for r in rows])
         return offer_id
+
+    def offer_for_send(self, message_id) -> Optional[dict]:
+        """The offer the send with this Message-ID carries, or None."""
+        row = self._one("SELECT * FROM offers WHERE mid_norm = ?", (norm_id(message_id),))
+        return None if row is None else self._offer(row)
+
+    def set_offer_slots(self, offer_id, slots, now, expires):
+        """New times for an offer whose send never went out (ruling 8: the loop looked in Sent first).
+        Still one offer: the thread's count does not change."""
+        rows, created, until = self._offer_rows(slots, None, now, expires)
+        with self._tx() as con:
+            if con.execute("SELECT 1 FROM offers WHERE id = ?", (offer_id,)).fetchone() is None:
+                raise KeyError(offer_id)
+            con.execute("UPDATE offers SET created_utc = ?, expires_utc = ? WHERE id = ?", (created, until, offer_id))
+            con.execute("DELETE FROM offer_slots WHERE offer_id = ?", (offer_id,))
+            con.executemany("INSERT INTO offer_slots (offer_id, idx, start_utc, end_utc) VALUES (?, ?, ?, ?)",
+                            [(offer_id,) + r for r in rows])
 
     def _offer(self, row):
         slots = [Slot(_when(s["start_utc"]), _when(s["end_utc"]))
@@ -597,6 +640,12 @@ class Ledger:
     def action(self, action_id) -> Optional[dict]:
         row = self._one("SELECT * FROM actions WHERE id = ?", (action_id,))
         return None if row is None else self._action(row)
+
+    def actions_for_message(self, message_key) -> List[dict]:
+        """Every action written down for this inbound message, in any state, oldest first."""
+        rows = self._all("SELECT * FROM actions ORDER BY id")
+        want = norm_id(message_key)
+        return [self._action(r) for r in rows if r["message_key"] and norm_id(r["message_key"]) == want]
 
     def queued_actions(self, run_id=None) -> List[dict]:
         """Actions not finished (queued, or started and never finished), oldest first."""

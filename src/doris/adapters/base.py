@@ -21,8 +21,9 @@ class MailAdapter:
         """Every message not yet fetched, oldest first. Raises MailError on any failure."""
         raise NotImplementedError
 
-    def send(self, raw: bytes, envelope_to: List[str], message_id: str) -> None:
-        """Hand one composed message to the server. envelope_to holds the To and the BCC.
+    def send(self, raw: bytes, envelope_to: List[str], message_id: str, template: Optional[str] = None) -> None:
+        """Hand one composed message to the server. envelope_to holds the To and the BCC; template
+        names the file in the sandbox outbox and is ignored live.
         Raises MailError when refused, SendUnknown when the outcome is unknown."""
         raise NotImplementedError
 

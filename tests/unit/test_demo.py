@@ -63,6 +63,11 @@ class DemoDay(unittest.TestCase):
         n = sum(1 for m in self.sent for part in m.walk() if part.get_content_type() == "text/calendar")
         self.assertEqual(n, 3)
 
+    def test_outbox_files_are_named_by_their_template(self):
+        names = sorted(n for n in os.listdir(os.path.join(self.sandbox, "outbox")) if n.endswith(".eml"))
+        self.assertEqual(sorted(n.split("-", 1)[1][:-4] for n in names),
+                         sorted(["T1", "T2", "T4", "T1", "T18", "T4", "S1", "S1", "S2"]), names)
+
     def test_the_chain_verifies(self):
         self.assertTrue(receipts.verify(self.summary.receipts_path).ok)
 

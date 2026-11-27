@@ -81,8 +81,10 @@ def _header_value(value):
 
 
 def _msgid(value):
+    """A Message-ID as one header token, or None: printable ASCII only (RFC 5322), so one stray byte
+    in a sender's header is left out of hers instead of stopping the reply."""
     v = (value or "").strip().strip("<>").strip()
-    if not v or any(c in v for c in "<> \r\n\t"):
+    if not v or any(c in "<>" or not "!" <= c <= "~" for c in v):
         return None
     return "<" + v + ">"
 
@@ -94,8 +96,9 @@ def _date(date):
 
 
 def _addr(value, what):
-    if not value or "@" not in value or any(c in value for c in "<>,;:\r\n \t\"()[]\\"):
-        raise ComposeError("%s must be one bare address" % (what,))
+    if (not value or "@" not in value or any(c in value for c in "<>,;:\r\n \t\"()[]\\")
+            or any(not "!" <= c <= "~" for c in value)):
+        raise ComposeError("%s must be one bare ASCII address" % (what,))
     return value
 
 

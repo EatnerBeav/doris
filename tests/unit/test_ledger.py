@@ -247,6 +247,18 @@ class Sends(Base):
         with self.assertRaises(KeyError):
             self.db.set_send_state("<zz@fastmail.com>", "unknown")
 
+    def test_an_unconfirmed_send_can_take_a_new_body_a_confirmed_one_cannot(self):
+        # a send that never reached Sent may go out with fresh slots under the same Message-ID (ruling 8)
+        self.reply("<a1@fastmail.com>")
+        self.db.set_send_state("<a1@fastmail.com>", "unknown")
+        self.db.reset_send("<a1@fastmail.com>", "f" * 64)
+        self.assertEqual(self.db.send("<a1@fastmail.com>")["body_sha256"], "f" * 64)
+        self.db.set_send_state("<a1@fastmail.com>", "confirmed")
+        with self.assertRaises(ValueError):
+            self.db.reset_send("<a1@fastmail.com>", "e" * 64)
+        with self.assertRaises(KeyError):
+            self.db.reset_send("<zz@fastmail.com>", "e" * 64)
+
     def test_send_kind_is_checked(self):
         with self.assertRaises(ValueError):
             self.reply("<a1@fastmail.com>", kind="reply")
@@ -358,6 +370,23 @@ class Offers(Base):
         self.offer(slots=[slot(4, 20)])
         self.assertEqual(self.db.offered_starts(TH),
                          {slot(2, 18).start_utc, slot(3, 19).start_utc, slot(4, 20).start_utc})
+
+    def test_an_offer_is_found_by_the_send_that_carries_it(self):
+        oid = self.db.create_offer(TH, PRIYA, [slot(2, 18)], 30, T0, T0 + dt.timedelta(days=7),
+                                   message_id="<o1@fastmail.com>")
+        self.assertEqual(self.db.offer_for_send("o1@fastmail.com")["id"], oid)
+        self.assertIsNone(self.db.offer_for_send("<o2@fastmail.com>"))
+        with self.assertRaises(ValueError):          # one offer per send
+            self.db.create_offer(TH, PRIYA, [slot(3, 18)], 30, T0, T0 + dt.timedelta(days=7),
+                                 message_id="<o1@fastmail.com>")
+
+    def test_an_offer_takes_new_slots_without_counting_twice(self):
+        oid = self.offer()
+        self.db.set_offer_slots(oid, [slot(7, 18), slot(8, 18)], T0, T0 + dt.timedelta(days=7))
+        [o] = self.db.open_offers(TH, T0)
+        self.assertEqual(o["slots"], [slot(7, 18), slot(8, 18)])
+        self.assertEqual(self.db.offer_count(TH), 1)
+        self.assertEqual(self.db.offered_starts(TH), {slot(7, 18).start_utc, slot(8, 18).start_utc})
 
     def test_two_offers_per_thread_ever(self):
         self.offer()
@@ -510,6 +539,17 @@ class Queue(Base):
         with self.assertRaises(ValueError):
             self.db.enqueue_action(RUN, K1, "send_reply", {"x": {1, 2}})
         self.assertEqual(self.db.queued_actions(), [])
+
+
+class ActionsForAMessage(Base):
+    def test_every_action_for_a_message_oldest_first(self):
+        self.message()
+        a = self.db.enqueue_action(RUN, K1, "cancel", {"booking_id": "doris-1"})
+        self.db.start_action(a)
+        b = self.db.enqueue_action("run-2", K1, "move", {"booking_id": "doris-2"})
+        self.assertEqual([(x["id"], x["kind"], x["state"]) for x in self.db.actions_for_message("<%s>" % K1)],
+                         [(a, "cancel", "started"), (b, "move", "queued")])
+        self.assertEqual(self.db.actions_for_message("other@x.example"), [])
 
 
 class Spend(Base):
