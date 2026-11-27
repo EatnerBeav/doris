@@ -1587,6 +1587,21 @@ class GetTest(CalFixture):
         self.dav.put(BID + ".ics", vcal(timed("not-hers", S, E)))
         self.fails(CalendarError, self.cal.get, BID)
 
+    def test_anything_but_exactly_her_one_event_is_a_failure_never_her_event(self):
+        """Not the first VEVENT that carries her UID: exactly one VEVENT, hers, that does not repeat."""
+        for data in (vcal(timed(BID, S, E), timed("someone", S, E)),
+                     vcal(timed(BID, S, E), timed(BID, S + DAY, E + DAY, "RECURRENCE-ID:" + stamp(S + DAY))),
+                     vcal(timed(BID, S, E), timed(BID, S, E)),
+                     vcal(timed(BID, S, E, "RRULE:FREQ=DAILY")),
+                     vcal(timed(BID, S, E, "RDATE:" + stamp(S + DAY)))):
+            self.dav.put(BID + ".ics", data)
+            self.fails(CalendarError, self.cal.get, BID)
+
+    def test_her_event_comes_back_with_the_times_and_status_the_server_holds(self):
+        """What the server holds, never what she wrote: the loop compares the two."""
+        self.dav.put(BID + ".ics", vcal(timed(BID, S + DAY, E + DAY, "STATUS:CANCELLED")))
+        self.assertEqual(self.cal.get(BID), Event(BID, "CANCELLED", "", "timed", S + DAY, E + DAY))
+
     def test_an_event_it_cannot_read_is_a_failure_never_none(self):
         for data in (b"garbage", vcal(["UID:" + BID, "DTSTART;VALUE=DATE:99991231"])):
             self.dav.put(BID + ".ics", data)

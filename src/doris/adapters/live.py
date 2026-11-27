@@ -809,8 +809,10 @@ class LiveCalendar(CalendarAdapter):
         return out
 
     def get(self, booking_id):
-        """Her event by booking ID. None only when the server answers 404; any other failure
-        raises (a timeout or lost connection as CalendarTimeout), never None."""
+        """Her event by booking ID, with the times and status the server holds (the caller
+        compares them with what she wrote). A resource holding anything but exactly her one,
+        unrepeated VEVENT is a CalendarError. None only when the server answers 404; any other
+        failure raises (a timeout or lost connection as CalendarTimeout), never None."""
         if not ics.is_booking_id(booking_id):
             raise NotHers("caldav get: not one of her booking IDs")
         step = "caldav get"
@@ -819,13 +821,7 @@ class LiveCalendar(CalendarAdapter):
             return None
         if status != 200:
             raise _failure(CalendarError, step, status=status)
-        try:
-            ev = ics.read_event(body)
-        except _UNREADABLE:
-            raise _failure(CalendarError, step, detail="her event cannot be read") from None
-        if ev.uid != booking_id:
-            raise _failure(CalendarError, step, detail="the event filed under her booking ID carries another UID")
-        return ev
+        return _her_one_event(body, booking_id, step)
 
     # -- writes ----------------------------------------------------------------------------------
     def create_only(self, booking_id, ics_bytes):
@@ -938,6 +934,27 @@ def _xml(body, step):
         return ET.fromstring(body)
     except _XML_UNREADABLE:
         raise _failure(CalendarError, step, detail="the answer cannot be read") from None
+
+
+def _her_one_event(body, booking_id, step):
+    """Her event as the server holds it (its own times and status, whatever she wrote), or a
+    CalendarError when the resource holds anything but exactly one VEVENT, carrying her UID, that
+    does not repeat: never the first of several, never one occurrence of a series."""
+    try:
+        events = ics.read_events(body)
+    except _UNREADABLE:
+        raise _failure(CalendarError, step, detail="her event cannot be read") from None
+    if len(events) != 1:
+        raise _failure(CalendarError, step, detail="the resource under her booking ID holds more than one event")
+    v = events[0]
+    if v.uid != booking_id:
+        raise _failure(CalendarError, step, detail="the event filed under her booking ID carries another UID")
+    if v.rrule is not None or v.rdate or v.recurrence_id:
+        raise _failure(CalendarError, step, detail="the event under her booking ID repeats; hers never do")
+    try:
+        return ics.to_event(v)
+    except _UNREADABLE:
+        raise _failure(CalendarError, step, detail="her event cannot be read") from None
 
 
 def _ics_stamp(moment):
