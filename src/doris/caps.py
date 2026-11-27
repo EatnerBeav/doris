@@ -65,6 +65,12 @@ HOLD_QUOTE_CHARS = 400
 # --- Model prices (USD per million tokens) -------------------------------------------------
 # Read from Anthropic's pricing page at kickoff, never from memory. Each model call's receipt
 # carries its token counts and the cost worked out from these constants.
+# Read Nov 27 2026 from https://platform.claude.com/docs/en/about-claude/pricing (base input and
+# output, global routing, no batch or cache discount). Haiku 5.5's price is for prompts up to
+# 100,000 tokens; hers are a few thousand at most (MAX_TEXT_CHARS).
 MODEL_PRICES_USD_PER_MTOK = {
-    # "model-id": (input, output),  filled in from the pricing page on Nov 27
+    "claude-sonnet-5-5": (2.0, 10.0),     # the runtime model (decision 19)
+    "claude-opus-5-5": (4.0, 20.0),
+    "claude-haiku-5-5": (0.10, 0.50),
+    "claude-fable-5-2": (8.0, 40.0),
 }

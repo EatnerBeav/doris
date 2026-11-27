@@ -249,6 +249,25 @@ class CostTest(unittest.TestCase):
             model.cost_usd("claude-unpriced-model", 1, 1)
 
 
+class PriceTableTest(unittest.TestCase):
+    """The shipped table, read from Anthropic's pricing page on Nov 27 2026 (USD per million tokens)."""
+
+    def test_the_default_model_has_a_price(self):
+        self.assertIn(model.DEFAULT_MODEL, caps.MODEL_PRICES_USD_PER_MTOK)
+
+    def test_the_prices_on_the_page(self):
+        self.assertEqual(caps.MODEL_PRICES_USD_PER_MTOK, {
+            "claude-sonnet-5-5": (2.0, 10.0),
+            "claude-opus-5-5": (4.0, 20.0),
+            "claude-haiku-5-5": (0.10, 0.50),
+            "claude-fable-5-2": (8.0, 40.0),
+        })
+
+    def test_one_classify_call_on_the_default_model(self):
+        # 1,500 tokens in and 300 out: $0.003 + $0.003
+        self.assertAlmostEqual(model.cost_usd(model.DEFAULT_MODEL, 1500, 300), 0.006)
+
+
 class ReplayedTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
