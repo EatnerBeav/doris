@@ -29,9 +29,12 @@ import email.parser
 import email.utils
 import http.client
 import imaplib
+import io
 import re
 import smtplib
+import socket
 import ssl
+import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 import xml.parsers.expat
@@ -716,8 +719,9 @@ class LiveCalendar(CalendarAdapter):
     else in any case. An event it cannot read, or a repeat the server did not expand, is busy
     over the whole span asked about. create_only is a PUT with If-None-Match: *. delete reads
     the resource first and removes it only when it holds her event alone, unchanged since read.
-    Every request is one connection with the timeout given. Before a request goes, a failure is
-    a CalendarError; after, a lost connection or no answer in time is a CalendarTimeout."""
+    Every request is one connection; every call (all of its requests) has one deadline, the
+    timeout given. Before a request goes, a failure is a CalendarError; after, a lost
+    connection or no answer in time is a CalendarTimeout."""
 
     def __init__(self, env, timeout_s=caps.CALENDAR_TIMEOUT_S, http_factory=None):
         user = _address(env)
@@ -732,8 +736,16 @@ class LiveCalendar(CalendarAdapter):
     def _resource(self, booking_id):
         return self.path + urllib.parse.quote(booking_id + ".ics", safe="@")
 
-    def _request(self, step, method, path, body=None, headers=None, read=False):
-        """(status, ETag, body) for one request on a connection of its own."""
+    def _deadline(self):
+        """The one deadline of a call: every request it makes, and every wait in each, ends by then."""
+        return time.monotonic() + self.timeout_s
+
+    def _request(self, step, method, path, body=None, headers=None, read=False, deadline=None):
+        """(status, ETag, body) for one request on a connection of its own, inside the call's one
+        deadline (a fresh one when none is given): connecting, sending and every read get only
+        the time left. A socket timeout alone restarts with each byte, so a server answering a
+        byte at a time would hold the call for as long as it liked."""
+        deadline = self._deadline() if deadline is None else deadline
         sent = dict(headers or {})
         sent["Authorization"] = self._auth.reveal()
         try:
@@ -742,15 +754,22 @@ class LiveCalendar(CalendarAdapter):
             raise _failure(CalendarError, step + " connect", exc) from None
         try:
             try:
+                conn.timeout = _time_left(deadline)          # the TCP connect and the TLS handshake
                 conn.connect()
+                conn.sock = _DeadlineSocket(conn.sock, deadline)
+                _time_left(deadline)                         # none left: the request never went
             except _HTTP_FAILURES as exc:
                 raise _failure(CalendarError, step + " connect", exc) from None
+            resp = None
             try:
                 conn.request(method, path, body=body, headers=sent)
                 resp = conn.getresponse()
                 data = resp.read() if read else b""
             except _HTTP_FAILURES as exc:
                 raise _failure(CalendarTimeout, step, exc) from None
+            finally:
+                if resp is not None:
+                    _quietly(resp.close)
             return resp.status, resp.getheader("ETag"), data
         finally:
             _quietly(conn.close)
@@ -817,9 +836,10 @@ class LiveCalendar(CalendarAdapter):
         if not ics.is_booking_id(booking_id):
             raise NotHers("caldav get: not one of her booking IDs")
         step = "caldav get"
-        status, _, body = self._request(step, "GET", self._resource(booking_id), read=True)
+        deadline = self._deadline()
+        status, _, body = self._request(step, "GET", self._resource(booking_id), read=True, deadline=deadline)
         if status == 404:
-            self._confirm_absent(booking_id, step + " absent check")
+            self._confirm_absent(booking_id, step + " absent check", deadline)
             return None
         if status != 200:
             raise _failure(CalendarError, step, status=status)
@@ -864,9 +884,10 @@ class LiveCalendar(CalendarAdapter):
             raise NotHers("caldav delete: not one of her booking IDs")
         step = "caldav delete"
         path = self._resource(booking_id)
-        status, etag, body = self._request(step + " read", "GET", path, read=True)
+        deadline = self._deadline()
+        status, etag, body = self._request(step + " read", "GET", path, read=True, deadline=deadline)
         if status == 404:
-            self._confirm_absent(booking_id, step + " absent check")
+            self._confirm_absent(booking_id, step + " absent check", deadline)
             return
         if status != 200:
             raise _failure(CalendarError, step + " read", status=status)
@@ -878,22 +899,23 @@ class LiveCalendar(CalendarAdapter):
             raise _failure(NotHers, step, detail="the resource under her booking ID is not her event alone; not deleted")
         if not isinstance(etag, str) or not _STRONG_ETAG.match(etag):
             raise _failure(CalendarError, step, detail="no strong ETag to make the delete conditional; not deleted")
-        status, _, _ = self._request(step, "DELETE", path, headers={"If-Match": etag})
+        status, _, _ = self._request(step, "DELETE", path, headers={"If-Match": etag}, deadline=deadline)
         if status in (200, 204):
             return
         if status == 404:
-            self._confirm_absent(booking_id, step + " absent check")
+            self._confirm_absent(booking_id, step + " absent check", deadline)
             return
         raise _failure(CalendarError, step, status=status)
 
-    def _confirm_absent(self, booking_id, step):
+    def _confirm_absent(self, booking_id, step, deadline):
         """Return only when the collection itself answers a query for events with her UID and
         names none. A 404 on her resource alone is no proof her event is gone: a revoked share or
         a wrong collection answers 404 to everything, and a client may have filed her event under
         another name. Anything else is a CalendarError."""
         uid = booking_id.replace("&", "&amp;").replace("<", "&lt;")     # her IDs carry neither; kept safe anyway
         status, _, body = self._request(step, "REPORT", self.path, (_UID_QUERY % {"uid": uid}).encode("utf-8"),
-                                        {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"}, read=True)
+                                        {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"}, read=True,
+                                        deadline=deadline)
         if status != 207:
             raise _failure(CalendarError, step, status=status)
         if self._multistatus(body, step):
@@ -939,6 +961,74 @@ _QUERY = """<?xml version="1.0" encoding="utf-8"?>
   </C:filter>
 </C:calendar-query>
 """
+
+
+def _time_left(deadline):
+    """Seconds left before the deadline; socket.timeout when there are none."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise socket.timeout("the call's deadline has passed")
+    return left
+
+
+class _DeadlineSocket(object):
+    """A connected socket (plain or TLS) whose every send and read waits only for the time left
+    before one deadline. http.client sends with sendall and reads through makefile("rb"); every
+    other attribute is the socket's own. As with socket.makefile, close() leaves the socket open
+    while a reader made from it is open (http.client closes the connection as soon as it sees
+    the answer will end it, and goes on reading the body through the reader)."""
+
+    def __init__(self, sock, deadline):
+        self._sock = sock
+        self._deadline = deadline
+        self._readers = 0
+        self._closed = False
+
+    def sendall(self, data, *flags):
+        self._sock.settimeout(_time_left(self._deadline))
+        return self._sock.sendall(data, *flags)
+
+    def recv_into(self, buffer):
+        self._sock.settimeout(_time_left(self._deadline))
+        return self._sock.recv_into(buffer)
+
+    def makefile(self, mode="r", *args, **kwargs):
+        if mode != "rb":
+            raise ValueError("only a binary reader")
+        self._readers += 1
+        return io.BufferedReader(_DeadlineReader(self))
+
+    def reader_closed(self):
+        self._readers -= 1
+        if self._closed and self._readers <= 0:
+            self._sock.close()
+
+    def close(self):
+        self._closed = True
+        if self._readers <= 0:
+            self._sock.close()
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
+
+
+class _DeadlineReader(io.RawIOBase):
+    """The raw reader under http.client's response: each read is one wait, bounded by the deadline."""
+
+    def __init__(self, sock):
+        io.RawIOBase.__init__(self)
+        self._sock = sock
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        return self._sock.recv_into(buffer)
+
+    def close(self):
+        if not self.closed:
+            io.RawIOBase.close(self)
+            self._sock.reader_closed()
 
 
 class _DTDRefused(Exception):

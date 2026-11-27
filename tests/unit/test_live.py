@@ -9,6 +9,7 @@ import datetime as dt
 import http.client
 import http.server
 import imaplib
+import io
 import re
 import smtplib
 import socket
@@ -1204,8 +1205,10 @@ class FakeCalDAV(http.server.ThreadingHTTPServer):
         self.report = None            # the REPORT answer's items (None: every resource, unfiltered)
         self.raw_answer = None        # (status, content type, bytes) answering REPORT instead
         self.status = {}              # method -> a status to answer with instead
-        self.fault = {}               # method -> "drop" (close, no answer) | "hang"
+        self.fault = {}               # method -> "drop" (close, no answer) | "hang" | "drip" | "drip_body"
         self.hang_s = 1.5
+        self.drip_s = 0.02            # "drip": the whole answer a byte at a time; "drip_body": the body only
+        self.delay = {}               # method -> seconds to wait before answering as usual
         self.on_request = None        # called (method, resource name) as each request arrives
         self.etags = 0
         self.thread = threading.Thread(target=self.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
@@ -1254,11 +1257,36 @@ class CalDAVHandler(http.server.BaseHTTPRequestHandler):
                 time.sleep(srv.hang_s)
             self.close_connection = True
             return
+        time.sleep(srv.delay.get(self.command, 0))
+        if fault in ("drip", "drip_body"):
+            return self.drip(body, whole=fault == "drip")
+        self.respond(body)
+
+    def respond(self, body):
+        srv = self.server
         if self.headers.get("Authorization") != srv.auth:
             return self.answer(401, b"who", [("WWW-Authenticate", 'Basic realm="fake"')])
         if self.command in srv.status:
             return self.answer(srv.status[self.command], b"no")
         getattr(self, "on_" + self.command)(body)
+
+    def drip(self, body, whole):
+        """The usual answer, sent one byte every drip_s: all of it, or the body after the headers."""
+        real, self.wfile = self.wfile, io.BytesIO()
+        try:
+            self.respond(body)
+            data = self.wfile.getvalue()
+        finally:
+            self.wfile = real
+        start = 0 if whole else data.index(b"\r\n\r\n") + 4
+        self.close_connection = True
+        try:
+            real.write(data[:start])
+            for i in range(start, len(data)):
+                real.write(data[i:i + 1])
+                time.sleep(self.server.drip_s)
+        except OSError:
+            pass                      # the client gave up: that is the point
 
     do_REPORT = do_PUT = do_GET = do_DELETE = any_method
 
@@ -1741,6 +1769,33 @@ class DeleteTest(CalFixture):
         self.dav.status["DELETE"] = 404
         self.fails(CalendarError, self.cal.delete, BID)
         self.assertIn(BID + ".ics", self.dav.resources)
+
+
+class DeadlineTest(CalFixture):
+    """One deadline per call. A socket timeout restarts with every byte, so a server answering a
+    byte at a time would otherwise hold a call (and her loop) for as long as it liked."""
+
+    def test_an_answer_dripped_a_byte_at_a_time_times_out_at_the_calls_deadline(self):
+        cal = self.make_calendar(timeout_s=0.5)
+        for mode in ("drip", "drip_body"):
+            self.dav.fault["REPORT"] = mode
+            started = time.monotonic()
+            self.fails(CalendarTimeout, cal.query, S, E)
+            self.assertLess(time.monotonic() - started, 1.5, mode)
+
+    def test_every_request_of_one_call_shares_its_deadline(self):
+        """get's GET (404) and the query that confirms it: 0.3 s each is over a 0.5 s call."""
+        cal = self.make_calendar(timeout_s=0.5)
+        self.dav.delay.update(GET=0.3, REPORT=0.3)
+        started = time.monotonic()
+        self.fails(CalendarTimeout, cal.get, BID)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_a_call_within_its_deadline_is_unchanged(self):
+        self.dav.put(BID + ".ics", her_event())
+        self.dav.fault["GET"] = "drip_body"
+        self.dav.drip_s = 0.001
+        self.assertEqual(self.make_calendar(timeout_s=5.0).get(BID), ics.read_event(her_event()))
 
 
 class CalDAVTransportTest(unittest.TestCase):
