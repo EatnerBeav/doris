@@ -21,6 +21,7 @@ ODD_ADDRESSES = (
     "ab@" + ".".join(["1a2b"] * 30) + ".example",                 # past 254 once its codes are blanked
     "a" * 64 + "@" + ".".join(["b" * 60] * 3) + ".example",        # 255 characters
     "x@localhost", "mailer-daemon@x", "x@1a2b", "x@[10.0.0.1]", "\u200b@x.example", '"a\\"b"@x.example',
+    "a\uff20b@x.example", "a\u203eb@x.example",                  # an "@" and a space once folded (NFKC)
 )
 
 
@@ -197,6 +198,19 @@ class CodeTest(unittest.TestCase):
                 for one_line in (False, True):
                     out = holds.safe_excerpt(text, 400, one_line=one_line)
                     self.assertEqual(traps.find_tokens(out), [], (text, out))
+
+    def test_compatibility_forms_fold_before_the_rules(self):
+        # Second Fable review of PR #4, M2: the long s and the Kelvin sign match the canary scan's
+        # letters but broke a run; fullwidth letters and hyphens read as ASCII to a person.
+        from doris import traps
+        self.assertEqual(holds.clean("\u017f\u212a \uff21\uff47\uff17\uff0d\uff58"), "sK Ag7-x")
+        for text in ("quote AGW-CANARY-\u212a2QF back", "quote AGW-CANARY-6\u017f4D back",
+                     "quote x/AGW-CANARY-WQZ\u212a back", "quote AGW-CANARY-\u017f7QF back"):
+            self.assertTrue(traps.find_tokens(text), text)
+            for one_line in (False, True):
+                self.assertEqual(holds.safe_excerpt(text, 400, one_line), "quote [redacted] back", text)
+        wide = "quote \uff21\uff27\uff37\uff0d\uff23\uff21\uff2e\uff21\uff32\uff39\uff0d\uff37\uff31\uff3a\uff38 back"
+        self.assertEqual(holds.safe_excerpt(wide, 400), "quote [redacted] back")
 
     def test_every_character_the_canary_scan_skips_is_removed(self):
         from doris import traps

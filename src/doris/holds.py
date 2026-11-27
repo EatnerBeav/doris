@@ -63,8 +63,12 @@ def defang(text):
 
 
 def clean(text):
-    """Plain text: CRLF folded to LF, invisible, format and control characters removed."""
+    """Plain text: compatibility forms folded (NFKC: fullwidth letters to ASCII, the long s to s, the
+    Kelvin sign to K, so the rules read what a person reads; second Fable review of PR #4, M2), CRLF
+    folded to LF, invisible, format and control characters removed."""
     text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not text.isascii():
+        text = unicodedata.normalize("NFKC", text)
     text = _INVISIBLE.sub("", text)
     if not text.isascii():
         text = "".join(c for c in text if unicodedata.category(c) != "Cf")
