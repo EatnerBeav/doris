@@ -219,13 +219,20 @@ def _addr(v, what="address"):
 # No control or format characters (a bidi override).
 _SHOWN_ADDR = re.compile(r'^[^\s<>()\[\]\\,;:"@]+@[^\s<>()\[\]\\,;:"@]+\.[^\s<>()\[\]\\,;:"@.]+$')
 
-# What a notice shows in place of a code, key or token from the mail (decision 77).
+# What a notice shows in place of a code, key or token from the mail (decision 77), and in place of
+# a whole value it cannot show safely (an address too long, or one the line can't carry).
 REDACTED = "[redacted]"
 
 
+def shown_address_ok(v):
+    """True when v can stand as the address a notice shows: one address on one line, or REDACTED."""
+    return isinstance(v, str) and (v == REDACTED or (
+        len(v) <= 254 and bool(_SHOWN_ADDR.match(v.replace(REDACTED, "redacted")))
+        and not any(unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") for c in v)))
+
+
 def _shown_addr(v, what="address"):
-    if (not isinstance(v, str) or len(v) > 254 or not _SHOWN_ADDR.match(v.replace(REDACTED, "redacted"))
-            or any(unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") for c in v)):
+    if not shown_address_ok(v):
         raise TemplateError("%s must be one email address on one line" % (what,))
     return v
 

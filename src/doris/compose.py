@@ -160,7 +160,7 @@ def reply(msg, template_id, slots, doris_addr, message_id, date, ics=None):
         raise ComposeError("bad Message-ID")
     # the sender's own subject, echoed with any code in it blanked (Fable review of PR #4, finding 1);
     # In-Reply-To and References keep their Message-IDs as written, which threading needs
-    subject = _clean(holds.blank_codes(holds.clean(msg.subject)))
+    subject = _clean(holds.shown_subject(msg.subject))
     if not re.match(r"(?i)^re\s*:", subject):
         subject = ("Re: " + subject).rstrip()
     headers = [("From", _addr(doris_addr, "her address")), ("To", _addr(msg.from_addr, "the sender")),

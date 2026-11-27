@@ -26,7 +26,8 @@ _CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 _SCHEME = re.compile(r"(?i)\b(https?|[a-z][a-z0-9+.\-]*)://")
 _IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
-_HOST = re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]*[a-z0-9]\b")
+# Labels are bounded at 63 characters, the most DNS allows, so no label is read more than once over.
+_HOST = re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]\b")
 
 
 def _scheme(m):
@@ -85,6 +86,10 @@ def clean(text):
 # digit or three or more hyphenated words. Times, dates, ordinals, amounts with units (10am, 30th,
 # 6weeks, 60fps), ISO times (01T15), plain words, names with a number (jsmith2026, FY27) and
 # numbers alone stay as written.
+# Every pattern runs in linear time: the whitespace beside a keyword is bounded (32 characters) and
+# no two unbounded runs of the same characters meet (second Fable review of PR #4, H2: "The key is",
+# 60,000 spaces and "!" took 84 seconds). Each caller also reads a value only as far as it can show
+# it (_window).
 REDACTED = templates.REDACTED
 _RUN = re.compile(r"[A-Za-z0-9_+/=]+(?:-+\s*[A-Za-z0-9_+/=]+)*")
 _PARTS = re.compile(r"[-_+/=\s]+")
@@ -95,12 +100,13 @@ _ISO = re.compile(r"(?i)^(?:\d{1,2}|\d{8})t\d{2}(?:\d{2}){0,2}z?$")
 _GROUP = r"(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{3,12}"
 _GROUPS = re.compile(r"(?<![A-Za-z0-9_+/=-])" + _GROUP + r"(?:[ :]" + _GROUP + r"){2,}(?![A-Za-z0-9_+/=-])")
 _WEAK = r"codes?|keys?|tokens?|secrets?"
+_SP = r"\s{1,32}"
 _SECRET = re.compile(
     r"(?i)\b(?P<k>pass(?:word|phrase|code)s?|passwd|pins?|otp|"
-    r"(?:pin|access|security|verification|login|one-time|confirmation|door|gate|alarm|entry)\s+codes?|"
-    r"(?:api|access|secret|private|license|product)\s+keys?|" + _WEAK + r")\b"
-    r"(?P<c>\s*[:=#]\s*|\s+(?:is|was|are|were)\s*:?\s+|\s+)"
-    r"(?P<v>\d+(?:[ .-]\d+)+(?![A-Za-z0-9])|[A-Za-z0-9_+/=]+(?:-+\s*[A-Za-z0-9_+/=]+)*)")
+    r"(?:pin|access|security|verification|login|one-time|confirmation|door|gate|alarm|entry)" + _SP + r"codes?|"
+    r"(?:api|access|secret|private|license|product)" + _SP + r"keys?|" + _WEAK + r")\b"
+    r"(?P<c>\s{0,32}[:=#]\s{0,32}|" + _SP + r"(?:is|was|are|were)(?:\s{0,32}:)?" + _SP + r"|" + _SP + r")"
+    r"(?P<v>\d+(?:[ .-]\d+)+(?![A-Za-z0-9])|[A-Za-z0-9_+/=]+(?:-+\s{0,32}[A-Za-z0-9_+/=]+)*)")
 _WEAK_WORD = re.compile(r"(?i)^(?:" + _WEAK + r")$")
 
 
@@ -146,14 +152,45 @@ def blank_codes(text):
     return _RUN.sub(_run, text)
 
 
-def safe_excerpt(text, limit, one_line=False):
-    """Inbound text made safe to send: invisibles and control characters removed (folded to one
-    line if asked), codes blanked, the first `limit` characters kept and defanged. Defanging adds
-    brackets, so source characters are given up, in proportion, until the defanged text fits."""
-    text = clean(text)
+# --- how far a value is read (second Fable review of PR #4, H2) -----------------------------------
+SCAN_FACTOR = 5          # a value is read at most 5 times as far as it may show (the quote: 2,000)
+SUBJECT_CHARS = 998      # the subject her reply echoes is read this far (RFC 5322's line length)
+ADDRESS_CHARS = 1000     # an address longer than this is never shown (a real one is 254 at most)
+_GROUP_WORD = re.compile(_GROUP + r"(?::" + _GROUP + r")*$")
+
+
+def _window(text, n, one_line=False):
+    """clean(text), folded to one line if asked, at most n characters of it (the raw text is read at
+    most 4n far). A cut may split a code, so where the text is cut its last word, and every word a
+    code joins to it (one ending in a hyphen, a group of a grouped code), become one [redacted]."""
+    text = text or ""
+    cut = len(text) > 4 * n
+    text = clean(text[:4 * n])
     if one_line:
         text = " ".join(text.split())
-    text = blank_codes(text.strip())
+    if not cut and len(text) <= n:
+        return text
+    head = text[:n]
+    end, last = len(head), True
+    while True:
+        j = end
+        while j and head[j - 1].isspace():
+            j -= 1
+        i = j
+        while i and not head[i - 1].isspace():
+            i -= 1
+        word = head[i:j]
+        if not word or not (last or word.endswith("-") or _GROUP_WORD.match(word)):
+            return head[:end] + REDACTED
+        end, last = i, False
+
+
+def safe_excerpt(text, limit, one_line=False):
+    """Inbound text made safe to send: invisibles and control characters removed (folded to one
+    line if asked), read only so far (_window), codes blanked, the first `limit` characters kept and
+    defanged. Defanging adds brackets, so source characters are given up, in proportion, until the
+    defanged text fits."""
+    text = blank_codes(_window(text, limit * SCAN_FACTOR, one_line).strip())
     n = limit
     out = defang(text[:n]).rstrip()
     while len(out) > limit:
@@ -162,10 +199,22 @@ def safe_excerpt(text, limit, one_line=False):
     return out
 
 
+def shown_subject(subject):
+    """The sender's subject as her reply echoes it: plain text, read at most SUBJECT_CHARS far, every
+    code in it blanked (Fable review of PR #4, finding 1)."""
+    return blank_codes(_window(subject, SUBJECT_CHARS))
+
+
 def shown_address(addr):
     """The sender's address as she shows it to the owner: as written, unless a code is in it, which
-    is blanked as in the quote (Fable review of PR #4, finding 2)."""
+    is blanked as in the quote (Fable review of PR #4, finding 2). An address too long to be real
+    is never read: it shows as [redacted]."""
+    addr = addr or ""
+    if len(addr) > 4 * ADDRESS_CHARS:
+        return REDACTED
     addr = clean(addr)
+    if len(addr) > ADDRESS_CHARS:
+        return REDACTED
     local, at, domain = addr.rpartition("@")
     if not at:
         return blank_codes(addr)

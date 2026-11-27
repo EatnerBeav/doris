@@ -1,9 +1,10 @@
 """holds.py: the S1 hold notice's slots, the quote and the defanging."""
 import os
+import time
 import unittest
 from unittest import mock
 
-from doris import holds, templates
+from doris import caps, holds, templates
 from tests.unit.voice_fakes import FakeZones, make_msg, utc
 
 
@@ -165,6 +166,45 @@ class CodeTest(unittest.TestCase):
             ch = chr(cp)
             if skipped.match(ch):
                 self.assertEqual(holds.clean("a" + ch + "b"), "ab", hex(cp))
+
+
+# Second Fable review of PR #4, H2: "The key is", then a long run of spaces, then "!" took 84 seconds
+# to blank on 61ce722 (60,000 spaces); 30,000 take about 20.
+SLOW = "The key is" + " " * 30000 + "!"
+
+
+class SpeedTest(unittest.TestCase):
+    """Every rule runs in linear time, and each value is read only as far as it can be shown."""
+
+    def assertQuick(self, fn, *args):
+        start = time.monotonic()
+        fn(*args)
+        self.assertLess(time.monotonic() - start, 2.0, fn.__name__)
+
+    def test_a_long_run_of_spaces_after_a_keyword(self):
+        self.assertQuick(holds.blank_codes, SLOW)
+        self.assertQuick(holds.blank_codes, "the key is :" + " " * 30000 + "!")
+        self.assertQuick(holds.blank_codes, ("the key is" + " " * 40) * 1000)
+
+    def test_every_value_a_notice_shows_is_quick(self):
+        msg = make_msg(from_name=SLOW, from_addr=SLOW + "@x.example", own_text=SLOW)
+        self.assertQuick(holds.notice_slots, msg, "hold.no_model", utc(2026, 12, 1, 21, 10), [])
+        self.assertQuick(holds.shown_address, SLOW + "@x.example")
+        self.assertQuick(holds.sender_name, "", SLOW + "@x.example")
+        self.assertQuick(holds.safe_excerpt, SLOW, 200, True)
+
+    def test_a_cut_never_leaves_part_of_a_code(self):
+        # A long code shrinks to [redacted], so the place where the quote's window ends is in view.
+        window = caps.HOLD_QUOTE_CHARS * holds.SCAN_FACTOR
+        long_code = "9f86d081" * window
+        for code, pieces in (("QX71 ZK42 MV93", ("QX", "ZK", "MV")),
+                             ("rio- tango- 7qxz", ("rio", "tango", "7q")),
+                             ("password: hunter2", ("hun",))):
+            for at in range(1, len(code) + 2):
+                for head in (long_code[:window - at - 1] + " ", "\u200b" * (4 * window - at)):
+                    q = holds.quote_of(make_msg(own_text=head + code + " and more"))
+                    for piece in pieces:
+                        self.assertNotIn(piece, q, (code, at, q[-40:]))
 
 
 class NoticeSlotsTest(unittest.TestCase):

@@ -3,6 +3,7 @@ import email
 import email.policy
 import hashlib
 import os
+import time
 import unittest
 from unittest import mock
 
@@ -141,6 +142,15 @@ class ReplyTest(Base):
         m = email.message_from_bytes(raw, policy=email.policy.default)
         self.assertEqual(m["Subject"], "Re: Sync [redacted] next week?")
         self.assertEqual(traps.find_tokens(raw.decode("latin-1")), [])
+
+    def test_a_long_subject_is_read_only_so_far(self):
+        # Second Fable review of PR #4, H2: a Subject of "The key is", 12,000 spaces and "!" took 3.6 s.
+        self.inbound = make_msg(subject="The key is" + " " * 30000 + "!")
+        start = time.monotonic()
+        raw, _ = self.reply()
+        self.assertLess(time.monotonic() - start, 2.0)
+        m = email.message_from_bytes(raw, policy=email.policy.default)
+        self.assertEqual(m["Subject"], "Re: The key [redacted]")
 
     def test_non_ascii_subject_encoded(self):
         self.inbound = make_msg(subject="Café chat")
