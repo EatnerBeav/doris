@@ -15,6 +15,7 @@ import smtplib
 import socket
 import socketserver
 import ssl
+import sys
 import threading
 import time
 import traceback
@@ -1334,6 +1335,13 @@ class FakeCalDAV(http.server.ThreadingHTTPServer):
     def put(self, name, data):
         self.etags += 1
         self.resources[name] = ('"etag-%d"' % self.etags, data)
+
+    def handle_error(self, request, client_address):
+        """A client that gave up before the answer was written (the deadline tests' point) is no
+        error of the fake's; anything else is printed as usual."""
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        http.server.ThreadingHTTPServer.handle_error(self, request, client_address)
 
     def methods(self):
         return [r[0] for r in self.requests]
