@@ -33,8 +33,9 @@ ENV_TEXT = ("# a test env file: every host is the fakes' 127.0.0.1\n"
             "DORIS_SMTP_HOST=127.0.0.1\n"
             "DORIS_CALDAV_URL=https://127.0.0.1" + COLLECTION + "\n")
 
-STEPS = ["imap login and inbox count", "sent folder found by its special-use flag", "smtp login, nothing sent",
-         "caldav query, next 7 days", "caldav test event left by an earlier run", "caldav create test event",
+FETCH, FILE = "imap fetch, last 7 days, read-only", "imap file newest INBOX message with the smoke keyword"
+STEPS = ["imap login and inbox count", "sent folder found by its special-use flag", FETCH, FILE,
+         "smtp login, nothing sent", "caldav query, next 7 days", "caldav test event left by an earlier run", "caldav create test event",
          "caldav read test event back, times match", "caldav delete test event", "caldav read after delete, gone"]
 SEND_STEPS = ["smtp send one test message", "sent copy, look 1 (at once)", "sent copy, look 2 (after a short wait)",
               "sent copy found", "sent copy record for a live run"]
@@ -48,8 +49,11 @@ class SmokeFixture(unittest.TestCase):
         self.imap, self.smtp, self.dav = FakeIMAP(), FakeSMTP(), FakeCalDAV()
         for server in (self.imap, self.smtp, self.dav):
             self.addCleanup(server.stop)
-        self.imap.boxes["INBOX"].add(eml(1), u(2026, 11, 27, 9))
-        self.imap.boxes["INBOX"].add(eml(2), u(2026, 11, 27, 10))
+        # INBOX: two messages received in the last hours (the fetch step reads the last 7 days)
+        self.now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        self.inbox = self.imap.boxes["INBOX"]
+        self.inbox.add(eml(1), self.now - dt.timedelta(hours=2))
+        self.inbox.add(eml(2), self.now - dt.timedelta(hours=1))
         self.sent = self.imap.boxes["Sent Items"] = Box(1700000002, special=("\\Sent",))
         self.dir = tempfile.mkdtemp(prefix="doris-smoke-test-")
         self.addCleanup(shutil.rmtree, self.dir, True)
@@ -136,11 +140,14 @@ class SmokeTest(SmokeFixture):
         self.assertEqual(self.run_smoke(), 1)
         self.assertEqual(self.result("smoke"), "FAILED; not run: %s (no --send-to)" % SEND_NOT_RUN)
 
-    def test_without_send_to_nothing_is_sent_and_imap_is_only_read(self):
+    def test_without_send_to_nothing_is_sent_and_imap_writes_only_the_smoke_keyword(self):
         self.run_smoke()
         self.assertEqual(self.smtp.sessions[0]["auth"], DORIS)
         self.assertFalse({"MAIL", "RCPT", "DATA"} & set(self.smtp.verbs()))
-        self.assertLessEqual(set(self.imap.verbs()), READ_ONLY_IMAP)
+        writes = [(verb, args) for verb, args in self.imap.commands if verb not in READ_ONLY_IMAP]
+        self.assertEqual(writes, [("SELECT", '"INBOX"'), ("UID STORE", "2 +FLAGS (doris-smoke)")])
+        self.assertEqual({uid: msg["flags"] for uid, msg in self.inbox.messages.items()},
+                         {1: set(), 2: {"doris-smoke"}})       # \Seen untouched: the fetch only peeks
 
     def test_the_test_event_is_far_ahead_under_one_fixed_booking_id_and_gone_after(self):
         """One fixed ID, so a run that leaves its event behind is cleaned up by the next one."""
@@ -328,6 +335,45 @@ class HaltAndLockTest(SmokeFixture):
         again = supervisor.acquire_lock(self.lock_path())
         self.assertIsNotNone(again)
         again.release()
+
+
+class FetchAndFileTest(SmokeFixture):
+    """fetch_new over the last 7 days, read-only; then file adds the smoke keyword to her newest
+    INBOX message (by the time it arrived), and to nothing else."""
+
+    def test_the_fetch_counts_the_last_7_days_and_the_newest_by_arrival_gets_the_keyword(self):
+        self.inbox.add(eml(3), self.now - dt.timedelta(days=9))          # outside the window
+        self.inbox.add(eml(4), self.now - dt.timedelta(hours=5))         # a higher UID, an older arrival
+        self.assertEqual(self.run_smoke(), 0)
+        self.assertEqual(self.result(FETCH), "ok (3 messages)")
+        self.assertEqual(self.result(FILE), "ok")
+        flagged = {uid: msg["flags"] for uid, msg in self.inbox.messages.items() if msg["flags"]}
+        self.assertEqual(flagged, {2: {"doris-smoke"}})                   # UID 2 arrived last
+        self.assert_no_value()
+
+    def test_with_no_message_in_the_last_7_days_the_file_step_says_it_did_not_run(self):
+        self.inbox.messages.clear()
+        self.inbox.add(eml(5), self.now - dt.timedelta(days=9))
+        self.assertEqual(self.run_smoke(), 0)
+        self.assertEqual(self.result(FETCH), "ok (0 messages)")
+        self.assertEqual(self.result(FILE), "not run (no INBOX message in the last 7 days)")
+        self.assertEqual(self.result("smoke"), "every step that ran passed; not run: %s (no INBOX message in the last "
+                                               "7 days); %s (no --send-to)" % (FILE, SEND_NOT_RUN))
+        self.assertNotIn("UID STORE", self.imap.verbs())
+
+    def test_a_failed_fetch_fails_the_smoke_and_nothing_is_filed(self):
+        self.imap.fault["UID FETCH"] = "no"
+        self.assertEqual(self.run_smoke(), 1)
+        self.assertTrue(self.result(FETCH).startswith("MailError (imap fetch"), self.lines)
+        self.assertEqual(self.result(FILE), "not run (the fetch failed)")
+        self.assertTrue(self.result("smoke").startswith("FAILED; not run: %s (the fetch failed)" % FILE))
+        self.assertNotIn("UID STORE", self.imap.verbs())
+
+    def test_a_keyword_the_server_did_not_keep_fails_the_file_step(self):
+        self.imap.store_ignored = True
+        self.assertEqual(self.run_smoke(), 1)
+        self.assertEqual(self.result(FILE), "MailError (imap file: the server did not keep the keyword)")
+        self.assert_no_value()
 
 
 class SendToTest(SmokeFixture):
@@ -524,7 +570,9 @@ class SetupTest(SmokeFixture):
         with mock.patch.object(live, "_imap_tls", elsewhere):
             self.assertEqual(self.run_smoke(), 1)
         self.assertEqual(self.result("imap login and inbox count"), "MailError (imap inbox count connect: NetworkRefused)")
-        self.assertEqual(self.result("network guard"), "FAILED (2 connections to a host the adapters do not name)")
+        # inbox count, sent folders and the fetch each tried once; the file step never ran
+        self.assertEqual(self.result("network guard"), "FAILED (3 connections to a host the adapters do not name)")
+        self.assertEqual(self.result(FILE), "not run (the fetch failed)")
         self.assertEqual(self.imap.commands, [])
         self.assertIsNone(netguard.active())
 

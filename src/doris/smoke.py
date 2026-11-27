@@ -15,6 +15,12 @@ line names its booking ID (a fixed one, SMOKE_BOOKING_ID) so a person can find i
 Steps, in order; each runs whatever the one before it did:
   imap login and inbox count                 LiveMail.inbox_count (read-only)
   sent folder found by its special-use flag  LiveMail.sent_folders (the \\Sent flag, never a name)
+  imap fetch, last 7 days, read-only         LiveMail.fetch_new with since_utc a week back, counted
+                                             (EXAMINE and BODY.PEEK: nothing about her mail changes)
+  imap file newest INBOX message with the smoke keyword
+                                             LiveMail.file: FILE_KEYWORD on the message that arrived
+                                             last, the only change the smoke makes to her mail; when
+                                             the fetch found none (or failed), a line says it did not run
   smtp login, nothing sent                   LiveMail.check_smtp_login
   caldav query, next 7 days                  LiveCalendar.query, counted
   caldav test event left by an earlier run   a test event an earlier smoke left (cut short, or its
@@ -76,6 +82,10 @@ UTC = _dt.timezone.utc
 DEFAULT_ENV = "/root/doris-secrets/.env"
 SEND_TO_ALLOWED = ("wolf.whizz@fastmail.com", "whizz@fastmail.com")   # the two test inboxes; nothing else
 QUERY_DAYS = 7
+FETCH_DAYS = 7                                   # the fetch step reads the INBOX mail of the last week
+FILE_KEYWORD = "doris-smoke"                     # what the file step adds to her newest INBOX message
+FETCH_STEP = "imap fetch, last %d days, read-only" % FETCH_DAYS
+FILE_STEP = "imap file newest INBOX message with the smoke keyword"
 TEST_EVENT_AHEAD = _dt.timedelta(days=400)       # far past any booking horizon (caps.MAX_HORIZON)
 TEST_EVENT_UTC_HOUR = 11
 TEST_EVENT_LENGTH = _dt.timedelta(minutes=30)
@@ -140,6 +150,22 @@ def check(mail, calendar, out, send_to=None, now=None, record=None):
     passed = [
         _step(out, "imap login and inbox count", lambda: _count(mail.inbox_count(), "message") + " in INBOX"),
         _step(out, "sent folder found by its special-use flag", lambda: _count(len(mail.sent_folders()), "folder")),
+    ]
+    fetched = []
+
+    def fetch():
+        mail.since_utc = now - _dt.timedelta(days=FETCH_DAYS)
+        fetched.extend(mail.fetch_new())
+        return _count(len(fetched), "message")
+    passed.append(_step(out, FETCH_STEP, fetch))
+    if not passed[-1]:
+        not_run.append(_not_run(out, FILE_STEP, "the fetch failed"))
+    elif not fetched:
+        not_run.append(_not_run(out, FILE_STEP, "no INBOX message in the last %d days" % FETCH_DAYS))
+    else:
+        newest = fetched[-1]                     # fetch_new hands them over oldest first, by arrival
+        passed.append(_step(out, FILE_STEP, lambda: mail.file(newest.server_id, FILE_KEYWORD)))
+    passed += [
         _step(out, "smtp login, nothing sent", mail.check_smtp_login),
         _step(out, "caldav query, next 7 days", lambda: _query(calendar, now)),
     ]
