@@ -10,6 +10,7 @@ import os
 import unittest
 
 from doris import ledger as ledger_mod
+from doris import receipts
 from doris.shapes import Slot
 from tests.unit.test_restart import OWNER, Restart, add
 
@@ -37,7 +38,7 @@ LENA = ("Lena Park", "lena@harborline.example")
 LENA_KEY = "20261201.0830.lena.call@harborline.example"
 
 
-def pick(offer_id, text):
+def pick(offer_id, text, sign=True):
     return (b"From: Lena Park <lena@harborline.example>\r\n"
             b"To: Doris <doris.htm@fastmail.com>\r\n"
             b"Subject: Re: Call next week?\r\n"
@@ -47,7 +48,7 @@ def pick(offer_id, text):
             b"References: <" + LENA_KEY.encode("ascii") + b"> " + offer_id.encode("ascii") + b"\r\n"
             b"MIME-Version: 1.0\r\n"
             b"Content-Type: text/plain; charset=\"utf-8\"\r\n"
-            b"Content-Transfer-Encoding: 7bit\r\n\r\n" + text + b"\r\n\r\nLena\r\n")
+            b"Content-Transfer-Encoding: 7bit\r\n\r\n" + text + (b"\r\n\r\nLena\r\n" if sign else b"\r\n"))
 
 
 class Written(Restart):
@@ -100,6 +101,46 @@ class QuarterHourTimes(Written):
             ics = fh.read().decode("ascii")
         self.assertIn("DTSTART:20261203T221500Z", ics)
         self.assertIn("DTEND:20261203T224500Z", ics)
+
+
+class ResendTheOpenOffer(Written):
+    """A reply that names no one offered slot gets the same offer again (T12, ruling 6), her quarter
+    hours included: the gate checks it at the open offer's length (Fable review of PR #3, finding 5)."""
+    text = QuarterHourTimes.text
+
+    def answer(self, text, sign=True):
+        self.run_once()
+        offer = self.offered()
+        (t2,) = [m for t, m in self.sent(LENA[1]) if t == "T2"]
+        add(self.root, "21-lena-reply.eml", pick(t2["Message-ID"], text, sign), {"forwarded": "no"})
+        return offer, self.run_once()
+
+    def assert_resent(self, offer, s, rule):
+        self.assertEqual(self.templates_sent(LENA[1]), ["T2", "T12"])
+        self.assertEqual(self.closing(s, "lena"), ["offer"])
+        self.assertEqual(self.events(), [])
+        self.assertEqual(self.offered(), offer)                 # the same offer, still open: no new record
+        lines = receipts.read_lines(s.receipts_path)
+        (close,) = [l for l in lines if l["kind"] == "decided" and "outcome" in l["payload"]]
+        self.assertEqual(close["why"]["text"], "The reply does not match exactly one offered slot (%s): "
+                                               "send the same offer again." % rule)
+        (send,) = [l["payload"] for l in lines if l["kind"] == "called" and l["payload"]["call"] == "send"]
+        self.assertEqual(send["slots"]["slots"], [receipts.iso(sl.start_utc) for sl in offer])
+        # her quarter hours stay times the sender wrote: the open offer holds them (G9)
+        (checked,) = [l["payload"] for l in lines if l["kind"] == "checked" and l["payload"]["template"] == "T12"]
+        self.assertEqual(checked["checks"]["G9"], {"status": "pass", "checked": 3, "written": True})
+        (t12,) = [m for t, m in self.sent(LENA[1]) if t == "T12"]
+        lines = t12.get_body(("plain",)).get_content().splitlines()
+        self.assertEqual(lines[1:3], ["1. Thu Dec 3, 22:15 UTC (2:15 PM Pacific)",
+                                      "2. Fri Dec 4, 18:45 UTC (10:45 AM Pacific)"])
+
+    def test_yes_to_her_three_slot_offer_gets_the_same_offer_again(self):
+        offer, s = self.answer(b"Yes", sign=False)
+        self.assert_resent(offer, s, "multiple")
+
+    def test_a_near_miss_gets_the_same_offer_again(self):
+        offer, s = self.answer(b"Thursday at 4:45 PM Pacific works for me.")
+        self.assert_resent(offer, s, "near_miss")
 
 
 BOB = ("Bob Stone", "bob@elsewhere.example")

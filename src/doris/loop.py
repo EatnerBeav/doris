@@ -992,10 +992,11 @@ class _Run:
                                 steer_zone=p.zone or slots.PACIFIC)
 
     def resend(self, e, f, plan):
-        """T12: the same open offer again, in both zones; no new offer record."""
+        """T12: the same open offer again, in both zones; no new offer record. T12 states no length,
+        so G9 checks each time at the open offer's own (Fable review of PR #3, finding 5)."""
         offered = [s for o in f.thread.open_offers for s in o["slots"]][:caps.SLOTS_PER_OFFER]
         tslots = {"slots": [s.start_utc for s in offered], "zone": f.parse.zone}
-        if self.reply(e, f, "T12", tslots, offered=offered):
+        if self.reply(e, f, "T12", tslots, offered=offered, length=f.thread.open_offers[0]["length_min"]):
             self.close(e, "decided", plan.outcome, plan.why, template="T12")
 
     def cancel(self, e, f, plan):
