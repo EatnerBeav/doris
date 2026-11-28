@@ -287,6 +287,97 @@ class LiveTest(unittest.TestCase):
         self.assertEqual(model.default_model_id({"DORIS_MODEL": "claude-other"}), "claude-other")
 
 
+class RefusedCall(unittest.TestCase):
+    """Step 2, item 5: a key the API refuses, or a tier without the model, is said once, plainly,
+    with the status and the API's own words, before the per-email holds (model.NOTICE, set for the
+    process by `python -m doris`). Every call still fails closed into a no-model hold, and the
+    receipt's error carries the same status and words. The key is never in either."""
+
+    def setUp(self):
+        for target, name, value in ((caps, "MODEL_PRICES_USD_PER_MTOK", dict(PRICES)), (model, "NOTICE", None)):
+            p = mock.patch.object(target, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.said = []
+        model.NOTICE = model.Notice(self.said.append)
+
+    def live(self, *responses, model_id=SONNET):
+        http = FakeHTTP(*responses)
+        return Model("live", model_id, None, http_post=http, sleep=lambda s: None, scan=lambda m: None,
+                     env={"ANTHROPIC_API_KEY": KEY}), http
+
+    def error(self, kind, message):
+        return json.dumps({"type": "error", "error": {"type": kind, "message": message},
+                           "request_id": "req_test"}).encode("utf-8")
+
+    def test_a_refused_key_is_said_once_with_its_status_and_every_email_is_still_a_no_model_answer(self):
+        body = self.error("authentication_error", "invalid x-api-key")
+        m, http = self.live(*[(401, body)] * 6)
+        answers = [m.classify(PRIYA) for _ in range(3)]
+        self.assertEqual([a.ok for a in answers], [False] * 3)
+        self.assertEqual(len(http.calls), 6)                          # one retry each, as before
+        self.assertEqual(self.said, ["Model call refused (HTTP 401 authentication_error: invalid x-api-key). "
+                                     "Check ANTHROPIC_API_KEY. Until that is fixed, each email the model would "
+                                     "read is held for the owner and nothing is sent to its sender."])
+        self.assertEqual(m.last_error, "model down after one retry: HTTP 401 authentication_error: invalid x-api-key")
+
+    def test_a_tier_without_the_model_names_the_model(self):
+        m, _ = self.live(*[(404, self.error("not_found_error", "model: claude-sonnet-5-5"))] * 2)
+        self.assertFalse(m.classify(PRIYA).ok)
+        (line,) = self.said
+        self.assertIn("(HTTP 404 not_found_error: model: claude-sonnet-5-5)", line)
+        self.assertIn("This key cannot use claude-sonnet-5-5: check its tier, or DORIS_MODEL.", line)
+
+    def test_billing_and_rate_limits_are_said_too(self):
+        m, _ = self.live((402, self.error("billing_error", "Your credit balance is too low.")),
+                         (402, self.error("billing_error", "Your credit balance is too low.")))
+        m.classify(PRIYA)
+        self.assertIn("Check the billing of the key's Anthropic account.", self.said[0])
+        self.said[:] = []
+        model.NOTICE = model.Notice(self.said.append)
+        m, _ = self.live(*[(429, self.error("rate_limit_error", "Number of requests has exceeded your rate limit"))] * 2)
+        m.classify(PRIYA)
+        self.assertIn("The key's tier limit was reached.", self.said[0])
+
+    def test_an_outage_or_a_refusal_that_clears_on_the_retry_is_not_said(self):
+        m, _ = self.live((529, self.error("overloaded_error", "Overloaded")), OSError("reset"))
+        self.assertFalse(m.classify(PRIYA).ok)
+        m, _ = self.live((401, self.error("authentication_error", "invalid x-api-key")), (200, api_body(answer_json())))
+        self.assertTrue(m.classify(PRIYA).ok)
+        m, _ = self.live((500, b"<html>gateway</html>"), (500, b""))
+        self.assertFalse(m.classify(PRIYA).ok)
+        self.assertEqual(self.said, [])
+        self.assertEqual(m.last_error, "model down after one retry: HTTP 500")
+
+    def test_the_key_is_never_said_or_recorded_even_when_the_api_echoes_it(self):
+        m, _ = self.live(*[(401, self.error("authentication_error", "bad key " + KEY))] * 2)
+        m.classify(PRIYA)
+        self.assertNotIn(KEY, self.said[0])
+        self.assertIn("[key]", self.said[0])
+        self.assertNotIn(KEY, m.last_error)
+
+    def test_the_api_words_are_one_short_printable_line(self):
+        m, _ = self.live(*[(400, self.error("invalid_request_error", "line one\nline\ttwo \u2014 " + "x" * 400))] * 2)
+        m.classify(PRIYA)
+        words = m.last_error.split("HTTP 400 ", 1)[1]
+        self.assertLessEqual(len(words), 160)
+        self.assertTrue(words.startswith("invalid_request_error: line one line two x"), words)
+        self.assertTrue(all(" " <= c <= "~" for c in self.said[0]))
+
+    def test_no_hook_and_a_broken_hook_change_nothing(self):
+        model.NOTICE = None
+        m, _ = self.live(*[(401, b"{}")] * 2)
+        self.assertFalse(m.classify(PRIYA).ok)
+
+        def gone(text):
+            raise OSError("no terminal")
+        model.NOTICE = model.Notice(gone)
+        m, _ = self.live(*[(401, b"not json")] * 2)
+        a = m.classify(PRIYA)
+        self.assertFalse(a.ok)
+        self.assertEqual(m.last_error, "model down after one retry: HTTP 401")
+
+
 class CostTest(unittest.TestCase):
     def test_cost_from_caps(self):
         with mock.patch.dict(caps.MODEL_PRICES_USD_PER_MTOK, PRICES):

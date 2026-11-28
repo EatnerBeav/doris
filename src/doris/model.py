@@ -427,6 +427,54 @@ def _yes_man_answer(msg):
     return out
 
 
+# --- a refused call, said once ---------------------------------------------------------------------
+# NOTICE is None, or a function(text) that `python -m doris` sets for the process: her worker's say,
+# print for traps. When the API refuses a call (a 4xx after the retry: the key, its billing, its tier,
+# the model), the terminal is told once, plainly and with the status, before that email's hold line,
+# so a refused key reads as one cause and not as a hold per email. Every refusal is in the receipts.
+NOTICE = None
+
+_REFUSED_HINTS = {
+    401: "Check ANTHROPIC_API_KEY.",
+    402: "Check the billing of the key's Anthropic account.",
+    403: "This key may not use %(model)s: check its tier, or DORIS_MODEL.",
+    404: "This key cannot use %(model)s: check its tier, or DORIS_MODEL.",
+    429: "The key's tier limit was reached.",
+}
+
+
+class Notice(object):
+    """say(text), at most once."""
+
+    def __init__(self, say):
+        self.say, self.said = say, False
+
+    def __call__(self, text):
+        if not self.said:
+            self.said = True
+            self.say(text)
+
+
+def refused_line(status, error, model_id):
+    """The one line for a refused call: the status and the API's own words, what to check, and what
+    happens to the mail meanwhile."""
+    hint = _REFUSED_HINTS.get(status, "") % {"model": model_id}
+    return ("Model call refused (%s).%s Until that is fixed, each email the model would read is held for "
+            "the owner and nothing is sent to its sender." % (error, " " + hint if hint else ""))
+
+
+def _api_error(data):
+    """" <type>: <message>" from an API error body, printable ASCII, at most 160 characters; "" when it
+    can't be read."""
+    try:
+        err = json.loads(data.decode("utf-8")).get("error") or {}
+        parts = [p for p in (err.get("type"), err.get("message")) if isinstance(p, str) and p.strip()]
+    except (ValueError, AttributeError, TypeError, UnicodeDecodeError):
+        return ""
+    text = " ".join(re.sub(r"[^\x20-\x7e]", " ", ": ".join(parts)).split())[:160]
+    return " " + text if text else ""
+
+
 # --- the adapter ------------------------------------------------------------------------------------
 class Model(object):
     """classify(msg) -> ModelAnswer. Never raises: ok=False means no usable answer (no-model hold)."""
@@ -487,17 +535,19 @@ class Model(object):
             return self._fail(h, "sensitive mail (%s): never sent to the model" % (hit,))
         headers = {"x-api-key": key, "anthropic-version": API_VERSION, "content-type": "application/json"}
         body = json.dumps(req).encode("utf-8")
-        error = "no answer"
+        error, refused = "no answer", None
         for attempt in (1, 2):
             if attempt == 2:
                 self.sleep(caps.MODEL_RETRY_WAIT_S)
+            refused = None
             try:
                 status, data = self.http_post(API_URL, headers, body, caps.MODEL_TIMEOUT_S)
             except Exception as exc:
                 error = "call failed: %s" % (type(exc).__name__,)
                 continue
             if status != 200:
-                error = "HTTP %s" % (status,)
+                error = "HTTP %s%s" % (status, _api_error(data))
+                refused = status if isinstance(status, int) and 400 <= status < 500 else None
                 continue
             try:
                 resp = json.loads(data.decode("utf-8"))
@@ -514,6 +564,11 @@ class Model(object):
                                   force_unsure=resp.get("stop_reason") == "refusal")
             self._record(h, text, t_in, t_out, cost)
             return answer
+        if refused is not None and NOTICE is not None:
+            try:
+                NOTICE(refused_line(refused, error, self.model_id).replace(key, "[key]"))
+            except Exception:
+                pass                        # the terminal is gone: the receipts keep the refusal
         return self._fail(h, "model down after one retry: %s" % (error,))
 
     def _record(self, h, raw, t_in, t_out, cost):
