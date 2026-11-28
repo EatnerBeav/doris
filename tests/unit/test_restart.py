@@ -17,7 +17,7 @@ from unittest import mock
 
 from doris import compose
 from doris import ledger as ledger_mod
-from doris import loop, paths, receipts, supervisor
+from doris import loop, receipts, supervisor
 from doris.adapters import sandbox as sandbox_mod
 from doris.shapes import MailError
 from tests.unit import demo_sandbox
@@ -32,7 +32,7 @@ class Crash(BaseException):
 
 def mini_sandbox(tmp, names):
     """A copy of the demo sandbox holding only these inbox files (and their facts)."""
-    root = demo_sandbox.copy_committed(paths.SANDBOX, os.path.join(tmp, "sandbox"))
+    root = demo_sandbox.copy_committed(os.path.join(tmp, "sandbox"))
     inbox = os.path.join(root, "inbox")
     for name in os.listdir(inbox):
         if name.endswith(".eml") and name not in names:

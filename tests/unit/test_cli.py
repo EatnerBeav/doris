@@ -19,7 +19,7 @@ from tests.unit import demo_sandbox
 
 
 def fresh_sandbox(tmp):
-    return demo_sandbox.copy_committed(paths.SANDBOX, os.path.join(tmp, "sandbox"))
+    return demo_sandbox.copy_committed(os.path.join(tmp, "sandbox"))
 
 
 def run_cli(argv):

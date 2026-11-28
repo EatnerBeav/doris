@@ -9,7 +9,7 @@ import threading
 import unittest
 from unittest import mock
 
-from doris import caps, loop, paths, receipts
+from doris import caps, loop, receipts
 from doris.shapes import Slot
 from tests.unit import demo_sandbox
 
@@ -85,7 +85,7 @@ class Counts(unittest.TestCase):
 
 def sandbox_run(tmp, say=None, clock_mode="advance"):
     """The demo day on a fresh copy of sandbox/ as committed, stub model, advancing clock; returns its receipt lines."""
-    sandbox = demo_sandbox.copy_committed(paths.SANDBOX, os.path.join(tmp, "sandbox"))
+    sandbox = demo_sandbox.copy_committed(os.path.join(tmp, "sandbox"))
     cfg = loop.RunConfig(mode="throwaway", run_name="model-stub-sandbox-test", state_dir=os.path.join(tmp, "state"),
                          sandbox_root=sandbox, owner_addr="whizz@fastmail.com", doris_addr="doris.htm@fastmail.com",
                          model_source="stub", clock_mode=clock_mode, say=say)

@@ -13,7 +13,7 @@ import shutil
 import tempfile
 import unittest
 
-from doris import loop, paths, receipts, why
+from doris import loop, receipts, why
 from tests.unit import demo_sandbox
 
 OWNER = "whizz@fastmail.com"
@@ -24,7 +24,7 @@ class DemoDay(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp(prefix="doris-demo-")
-        cls.sandbox = demo_sandbox.copy_committed(paths.SANDBOX, os.path.join(cls.tmp, "sandbox"))
+        cls.sandbox = demo_sandbox.copy_committed(os.path.join(cls.tmp, "sandbox"))
         outbox = os.path.join(cls.sandbox, "outbox")
         cfg = loop.RunConfig(mode="throwaway", run_name="model-stub-sandbox-test", state_dir=os.path.join(cls.tmp, "state"),
                              sandbox_root=cls.sandbox, owner_addr=OWNER, doris_addr=DORIS, model_source="stub",

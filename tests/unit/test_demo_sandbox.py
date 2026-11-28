@@ -1,11 +1,11 @@
-"""demo_sandbox.copy_committed, the copy every demo-day test runs on, with a judge's own mail in sandbox/.
+"""demo_sandbox.copy_committed, the copy every demo-day test runs on, from a sandbox a judge has used.
 
 A judge who follows sandbox/README.md drops their own .eml into sandbox/inbox and adds a line for it to
-inbox/facts.json, then may run the tests. The demo-day tests must still run on the committed fixtures
-only, so the copy holds the demo's fifteen emails and their facts and nothing of the judge's.
+inbox/facts.json; a demo leaves her sends, her booking and a staged event behind. The demo-day tests
+must still run on the committed fixtures only: the demo's fifteen emails and their facts, the owner's
+calendar, an empty outbox.
 
-The judge's mail is planted in the repository's own sandbox/inbox, as a judge would, under a name no
-real file can have; when the test ends it is removed and facts.json is put back byte for byte.
+All of that is planted in a temporary copy of the sandbox, never in the repository's own.
 """
 
 import json
@@ -14,7 +14,6 @@ import shutil
 import tempfile
 import unittest
 
-from doris import paths
 from tests.unit import demo_sandbox
 from tests.unit.test_fixtures import NAMES
 
@@ -33,42 +32,45 @@ JUDGE_EML = (
     "Could Shane show our team how this works, Thursday December 3 at 11:00 AM Pacific?\r\n"
     "\r\n"
     "Robin\r\n").encode("ascii")
+JUDGE_NAME = "14-robin.eml"       # sorts after the demo's fifteen, like README's 14-yourname.eml
 
 
-class AJudgesOwnMailInTheSandbox(unittest.TestCase):
+def write(path, data):
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+
+class ACopyOfASandboxAJudgeHasUsed(unittest.TestCase):
 
     def setUp(self):
-        inbox = os.path.join(paths.SANDBOX, "inbox")
-        facts_path = os.path.join(inbox, "facts.json")
-        with open(facts_path, "rb") as fh:
-            facts_raw = fh.read()
-
-        def put_facts_back():
-            with open(facts_path, "wb") as fh:
-                fh.write(facts_raw)
-        self.addCleanup(put_facts_back)
-
-        # sorts after the demo's fifteen, like README's 14-yourname.eml, and is never a real file's name
-        fd, path = tempfile.mkstemp(prefix="99-judge-", suffix=".eml", dir=inbox)
-        self.addCleanup(os.remove, path)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(JUDGE_EML)
-        self.planted = os.path.basename(path)
-        facts = json.loads(facts_raw.decode("utf-8"))
-        facts[self.planted] = {"forwarded": "yes"}
-        with open(facts_path, "w", encoding="utf-8") as fh:
+        tmp = tempfile.mkdtemp(prefix="doris-copy-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.used = os.path.join(tmp, "used")
+        shutil.copytree(demo_sandbox.SANDBOX, self.used)
+        inbox = os.path.join(self.used, "inbox")
+        write(os.path.join(inbox, JUDGE_NAME), JUDGE_EML)
+        with open(os.path.join(inbox, "facts.json"), encoding="utf-8") as fh:
+            facts = json.load(fh)
+        facts[JUDGE_NAME] = {"forwarded": "yes"}
+        with open(os.path.join(inbox, "facts.json"), "w", encoding="utf-8") as fh:
             json.dump(facts, fh, indent=2)
+        calendar, outbox = os.path.join(self.used, "calendar"), os.path.join(self.used, "outbox")
+        write(os.path.join(calendar, "doris-000000000000000000000000.ics"), b"BEGIN:VCALENDAR\r\n")
+        write(os.path.join(calendar, "staged-lands-between-1.ics"), b"BEGIN:VCALENDAR\r\n")
+        write(os.path.join(outbox, "001-T1.eml"), b"To: priya@northwind.example\r\n")
+        self.copy = demo_sandbox.copy_committed(os.path.join(tmp, "copy"), source=self.used)
 
-        self.tmp = tempfile.mkdtemp(prefix="doris-copy-")
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-
-    def test_the_copy_holds_the_demos_fifteen_emails_and_their_facts_only(self):
-        self.assertIn(self.planted, os.listdir(os.path.join(paths.SANDBOX, "inbox")))
-        copy = demo_sandbox.copy_committed(paths.SANDBOX, os.path.join(self.tmp, "sandbox"))
-        inbox = os.path.join(copy, "inbox")
+    def test_the_inbox_holds_the_demos_fifteen_emails_and_their_facts_only(self):
+        self.assertIn(JUDGE_NAME, os.listdir(os.path.join(self.used, "inbox")))
+        inbox = os.path.join(self.copy, "inbox")
         self.assertEqual(sorted(n for n in os.listdir(inbox) if n.endswith(".eml")), NAMES)
         with open(os.path.join(inbox, "facts.json"), encoding="utf-8") as fh:
             self.assertEqual(sorted(json.load(fh)), NAMES)
+
+    def test_no_booking_staged_event_or_send_of_a_run(self):
+        self.assertEqual(sorted(os.listdir(os.path.join(self.copy, "calendar"))),
+                         demo_sandbox.owner_ics_files(os.path.join(demo_sandbox.SANDBOX, "calendar")))
+        self.assertEqual(os.listdir(os.path.join(self.copy, "outbox")), [".gitkeep"])
 
 
 if __name__ == "__main__":

@@ -22,8 +22,9 @@ import os
 import shutil
 import tempfile
 
-GENERATOR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools",
-                         "build_demo_fixtures.py")
+TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SANDBOX = os.path.join(os.path.dirname(TESTS), "sandbox")      # the repository's own, as doris.paths has it
+GENERATOR = os.path.join(TESTS, "tools", "build_demo_fixtures.py")
 HAND_WRITTEN = ("README.md",)              # committed beside the generated fixtures, not generated
 FACTS = "inbox/facts.json"
 
@@ -57,10 +58,11 @@ def owner_ics_files(calendar):
     return sorted(f for f in os.listdir(calendar) if f.endswith(".ics") and not is_run_event(f))
 
 
-def copy_committed(source, dest):
-    """Copy the committed sandbox at source to dest: the committed files and nothing else, so no
-    booking, staged event or send of a run and no judge's own mail. inbox/facts.json keeps only the
-    demo's emails' lines, laid out as the generator writes it. Returns dest."""
+def copy_committed(dest, source=SANDBOX):
+    """Copy the committed sandbox at source (the repository's own by default) to dest: the committed
+    files and nothing else, so no booking, staged event or send of a run and no judge's own mail.
+    inbox/facts.json keeps only the demo's emails' lines, laid out as the generator writes it.
+    Reads source, never writes it. Returns dest."""
     emails = set(committed_emails())
     for rel in committed_files():
         src = os.path.join(source, *rel.split("/"))
