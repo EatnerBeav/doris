@@ -18,7 +18,7 @@ import unittest
 
 from unittest import mock
 
-from doris import loop, receipts, story, why
+from doris import loop, paths, receipts, story, why
 from tests.unit import demo_sandbox
 
 OWNER = "whizz@fastmail.com"
@@ -102,7 +102,8 @@ class TheDemoDay(unittest.TestCase):
 
     def test_cost_and_gate(self):
         self.assertEqual(self.story["cost"], "Model calls 9, cost none (stub).")
-        self.assertEqual(self.story["gate"], "Gate: 14 checks on her sends and calendar writes, 0 blocked.")
+        self.assertEqual(self.story["gate"], "The gate ran 14 times, once before each send or calendar write; "
+                                             "0 blocked.")
 
     def test_the_scope_names_the_day_the_mode_and_the_zone(self):
         self.assertEqual(self.story["title"], "What Doris did for Shane")
@@ -264,7 +265,7 @@ class SmallDays(unittest.TestCase):
         self.assertEqual(s["state"], "halted")
         self.assertEqual(s["halt"], "Halted at 10:31 AM: Stop pressed on the watch page. Cut off mid-call: "
                                     "calendar_query. 2 queued items dropped. Nothing more goes out until "
-                                    "python -m doris resume.")
+                                    "%s." % paths.command("resume"))
         self.assertEqual(s["scope"], "Tue Dec 1, up to the stop, from her receipts. Times are Pacific.")
 
     def test_a_long_run_caps_the_thread_list_and_says_how_many_more(self):
@@ -274,7 +275,7 @@ class SmallDays(unittest.TestCase):
             d.close("m%d" % n, "file", "policy.file_fyi")
         s = story.build(d.lines)
         self.assertEqual(len(s["threads"]["rows"]), story.MAX_THREADS)
-        self.assertEqual(s["threads"]["more"], "3 more threads: python -m doris replay shows every step.")
+        self.assertEqual(s["threads"]["more"], "3 more threads: %s shows every step." % paths.command("replay"))
 
     def test_a_run_over_two_days_gives_full_dates(self):
         d = Day()
@@ -335,7 +336,7 @@ class WhatTheReceiptsBack(unittest.TestCase):
         with mock.patch.object(story, "build", side_effect=RuntimeError("x")):
             out = story.lines(path, width=1000)
         self.assertEqual(out, ["", "No summary: it could not be built from these receipts (RuntimeError). Check "
-                                   "them with python -m doris verify and python -m doris replay."])
+                                   "them with %s and %s." % (paths.command("verify"), paths.command("replay"))])
 
     def test_a_send_whose_answer_was_lost_counts_once_sent_found_it(self):
         d = Day()
@@ -394,7 +395,8 @@ class WhatTheReceiptsBack(unittest.TestCase):
         d.add("observed", {"step": "start", "mode": "sandbox", "model_source": "stub", "clock": T0})
         d.summary(handled=1)
         s = story.build(d.lines)
-        self.assertEqual((s["state"], s["halt"]), ("finished", ""))
+        self.assertEqual((s["state"], s["halt"]), ("finished", "Stopped at 8:10 AM: Stop pressed on the watch page. "
+                                                           "Then resumed: this covers both runs."))
 
     def test_sensitive_mail_shows_no_name(self):
         d = Day()
@@ -423,6 +425,80 @@ class WhatTheReceiptsBack(unittest.TestCase):
             'Digest to Shane at 8:10 AM: "Handled 1, held 0, human approvals 0." Found in her Sent folder. (The last of 2.)'))
 
 
+class AStopInTheDay(unittest.TestCase):
+    """The README judge run (Sat Nov 28): a stop on the watch page, then resume and a second demo run."""
+
+    def stopped(self, d, ts="2026-11-28T08:58:00Z"):
+        """The supervisor's halted line: written on the wall clock, with its stop timing."""
+        d.add("halted", {"cause": "watch_button", "in_flight": "none", "dropped": [], "stop_to_dead_ms": 140,
+                         "requested_utc": ts, "worker_exit": 0}, "", why.why("halt.watch_button"), ts=ts)
+
+    def test_a_stop_keeps_the_day_on_her_clock_and_says_the_real_time(self):
+        d = booked_day()
+        self.stopped(d)
+        s = story.build(d.lines)
+        self.assertEqual(s["scope"], "Tue Dec 1, up to the stop, from her receipts. Times are Pacific.")
+        self.assertTrue(s["halt"].startswith("Halted Sat Nov 28 at 12:58 AM Pacific, real time, after her 8:10 AM "
+                                             "step: Stop pressed on the watch page."), s["halt"])
+
+    def test_a_command_is_never_split_across_lines(self):
+        d = booked_day()
+        self.stopped(d)
+        cmd = paths.command("resume")
+        for width in range(60, 101):
+            printed = story.render(story.build(d.lines), width)
+            self.assertTrue(any(cmd in line for line in printed), (width, printed))
+
+    def test_a_pick_cut_off_by_a_stop_leaves_their_offer_open(self):
+        d = Day()
+        d.mail("m1", "Marcus Lee", "marcus@lee.example")
+        d.send("m1", "T2", {"slots": ["a", "b", "c"]})
+        d.close("m1", "offer", "policy.offer_no_clear_time", template="T2", slots={"cond": "B7"})
+        d.mail("m2", "Marcus Lee", "marcus@lee.example", thread="m1")
+        d.add("decided", {"step": "plan", "action": "book", "thread": "m1"}, "m2", why.why("policy.pick_books", n=2))
+        d.add("called", {"call": "calendar_query", "target": "span"}, "m2")
+        self.stopped(d)
+        self.assertEqual(story.build(d.lines)["waiting"], "Waiting to pick one of her times: Marcus Lee.")
+
+    def test_a_day_stopped_and_resumed_is_told_whole(self):
+        tmp = tempfile.mkdtemp(prefix="doris-story-runs-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        runs = os.path.join(tmp, "runs")
+
+        def run(name, day, when):
+            os.makedirs(os.path.join(runs, name))
+            path = os.path.join(runs, name, "receipts.jsonl")
+            day.write(path)
+            os.utime(path, (when, when))
+            return path
+
+        before = Day()                       # an earlier day that finished: not this day's
+        before.mail("m0", "Old Mail", "old@x.example")
+        before.close("m0", "file", "policy.file_fyi")
+        before.summary(handled=1, held=0, human_approvals=0)
+        run("a-finished", before, 1000)
+        first = booked_day()                 # this day, up to the stop
+        self.stopped(first)
+        run("b-stopped", first, 2000)
+        second = Day()                       # after resume: the rest of the day
+        second.mail("m3", "Ken Ito", "ken@ito.example")
+        second.check("m3", "send_reply")
+        second.close("m3", "file", "policy.file_fyi")
+        second.summary(handled=1, held=0, human_approvals=0)
+        path = run("c-resumed", second, 3000)
+
+        printed = story.lines(path, width=1000)
+        text = "\n".join(printed)
+        self.assertIn("2 emails came in: 2 handled by her (1 answered, 1 needed no reply), 0 held for Shane. "
+                      "1 meeting on his calendar. 0 human approvals.", text)
+        self.assertIn("Stopped Sat Nov 28 at 12:58 AM Pacific, real time, after her 8:10 AM step: Stop pressed on "
+                      "the watch page. Then resumed: this covers both runs.", text)
+        self.assertIn("The gate ran 3 times", text)
+        self.assertNotIn("Old Mail", text)
+        self.assertIn("Receipts: %d lines in 2 runs, each chain verified." % (len(first.lines) + len(second.lines)),
+                      text)
+
+
 class NothingNew(unittest.TestCase):
     def test_a_run_with_no_new_mail_says_so_in_one_line_and_shows_no_empty_sections(self):
         d = Day()
@@ -434,8 +510,8 @@ class NothingNew(unittest.TestCase):
                                         "0 human approvals.")
         printed = story.render(s, width=1000)
         self.assertEqual(printed, ["", "What Doris did for Shane: Tue Dec 1, from her receipts. Times are Pacific.",
-                                   s["headline"], "", "Model calls 0, cost none (stub). Gate: 0 checks on her "
-                                                      "sends and calendar writes, 0 blocked."])
+                                   s["headline"], "", "Model calls 0, cost none (stub). The gate ran 0 times, "
+                                                      "once before each send or calendar write; 0 blocked."])
 
 
 class FromTheFile(unittest.TestCase):
@@ -457,7 +533,7 @@ class FromTheFile(unittest.TestCase):
         self.assertEqual(printed[-2:], [
             "Receipts: %d lines, chain verified." % len(d.lines),
             "See for yourself: her sent mail in sandbox/outbox/, her bookings in sandbox/calendar/, every step "
-            "with python -m doris replay."])
+            "with %s." % paths.command("replay")])
 
     def test_a_broken_chain_tells_no_story(self):
         d = booked_day()
@@ -471,7 +547,7 @@ class FromTheFile(unittest.TestCase):
         self.assertEqual(len(printed), 2)
         self.assertEqual(printed[0], "")
         self.assertTrue(printed[1].startswith("No summary: the receipt chain is BROKEN at line 2"), printed)
-        self.assertIn("python -m doris verify", printed[1])
+        self.assertIn(paths.command("verify"), printed[1])
 
 
 if __name__ == "__main__":
