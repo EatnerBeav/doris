@@ -77,8 +77,11 @@ def _wall_clock():
 
 
 VerifyResult = namedtuple("VerifyResult", "ok lines first_bad_seq reason")
-VerifyResult.__doc__ = """ok; lines = whole lines that verified (all of them when ok); first_bad_seq = the seq the
-first bad line should have held (None when ok, or when there is no file); reason in plain words."""
+VerifyResult.__doc__ = """ok; lines = whole lines that verified ahead of the first bad one (all of them when ok);
+first_bad_seq = the seq the first bad line should have held (None when ok, or when there is no file); reason
+in plain words. After a re-save with CRLF line endings, ok is never True: when a line is wrong beyond its
+ending, it is the one named and lines counts those ahead of it whose content verified with the CR set aside;
+when only endings changed, the first CRLF line is named and lines counts the byte-exact lines ahead of it."""
 
 _FIELDS = {"ts": str, "run_id": str, "mode": str, "seq": int, "kind": str, "subject": str,
            "payload": dict, "prev": str, "hash": str}
@@ -140,13 +143,13 @@ def _recompute(whole):
 
 
 def _crlf(whole):
-    return "%d of %d lines now end CRLF where Doris wrote LF" % (sum(raw.endswith(b"\r") for raw in whole), len(whole))
+    return "%d of %d lines now end CRLF, not LF" % (sum(raw.endswith(b"\r") for raw in whole), len(whole))
 
 
 def _also_crlf(result, whole):
-    """The same verdict, adding that the line endings were changed as well."""
-    return result._replace(reason="%s; the line endings were changed too (%s) and were set aside for this check"
-                           % (result.reason, _crlf(whole)))
+    """The same verdict, adding that the line endings were changed as well (kept short: replay shows 200
+    characters of a reason)."""
+    return result._replace(reason="%s; also, %s" % (result.reason, _crlf(whole)))
 
 
 def _examine(whole):
@@ -166,8 +169,8 @@ def _examine(whole):
         return _also_crlf(under, whole), content, None
     seq = len(good) + 1
     return VerifyResult(False, len(good), seq,
-                        "broken at seq %d: the line endings were changed: %s (a re-save in PowerShell or some "
-                        "editors does this); with the endings set aside, every line still matches its hash"
+                        "broken at seq %d: the line endings were changed: %s (PowerShell and some editors "
+                        "re-save this way); every line still matches its hash without them"
                         % (seq, _crlf(whole))), good, content
 
 

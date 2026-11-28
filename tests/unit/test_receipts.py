@@ -422,9 +422,10 @@ class Verify(Tmp):
             res = receipts.verify(self.path, finished=finished)
             self.assertEqual((res.ok, res.lines, res.first_bad_seq), (False, 0, 1), res)
             self.assertTrue(res.reason.startswith("broken at seq 1: the line endings were changed"), res)
-            self.assertIn("5 of 5 lines now end CRLF where Doris wrote LF", res.reason)
-            self.assertIn("every line still matches its hash", res.reason)
+            self.assertIn("5 of 5 lines now end CRLF, not LF", res.reason)
+            self.assertIn("every line still matches its hash without them", res.reason)
             self.assertNotIn("canonical", res.reason)
+        self.assertEqual(receipts._check(self.data().split(b"\n")[:-1])[1], [])     # so watch shows no line as verified
 
     def test_a_crlf_resave_with_one_changed_character_names_that_line(self):
         self.five_lines()
@@ -432,8 +433,13 @@ class Verify(Tmp):
         self.assertIn(b'"action":"offer"', lines[2])
         lines[2] = lines[2].replace(b'"action":"offer"', b'"action":"0ffer"')
         self.put_crlf(lines)
-        self.assertBad(3, "broken at seq 3: the hash does not match the line")
-        self.assertIn("5 of 5 lines now end CRLF where Doris wrote LF", receipts.verify(self.path).reason)
+        self.assertBad(3)
+        self.assertEqual(receipts.verify(self.path).reason,
+                         "broken at seq 3: the hash does not match the line; also, 5 of 5 lines now end CRLF, not LF")
+        # watch and the demo's story show the lines _check hands back: the two ahead of the edit, as written
+        result, shown = receipts._check(self.data().split(b"\n")[:-1])
+        self.assertEqual((result.first_bad_seq, [line["seq"] for line in shown]), (3, [1, 2]))
+        self.assertEqual([receipts.canonical(line) for line in shown], lines[:2])
 
     def test_a_crlf_resave_with_a_deleted_line_names_where_it_was(self):
         self.five_lines()
@@ -448,8 +454,9 @@ class Verify(Tmp):
         res = receipts.verify(self.path, finished=True)
         self.assertEqual((res.ok, res.lines, res.first_bad_seq), (False, 3, 4), res)
         self.assertTrue(res.reason.startswith("no closing line"), res)
-        self.assertIn("3 of 3 lines now end CRLF where Doris wrote LF", res.reason)
+        self.assertIn("3 of 3 lines now end CRLF, not LF", res.reason)
         self.assertNotIn("every line still matches", res.reason)
+        self.assertLessEqual(len(res.reason), 200)                        # replay shows 200 characters of a reason
         self.assertEqual(receipts.verify(self.path).first_bad_seq, 1)     # still being written: the endings alone
 
     def test_a_crlf_resave_with_a_torn_tail_names_the_tail(self):
@@ -465,14 +472,15 @@ class Verify(Tmp):
         lines = self.lines()
         self.put(b"".join(l + b"\n" for l in lines[:2]) + b"".join(l + b"\r\n" for l in lines[2:]))
         self.assertBad(3, "broken at seq 3: the line endings were changed")
-        self.assertIn("3 of 5 lines now end CRLF where Doris wrote LF", receipts.verify(self.path).reason)
+        self.assertIn("3 of 5 lines now end CRLF, not LF", receipts.verify(self.path).reason)
 
     def test_an_edit_ahead_of_the_first_crlf_line_is_named_as_before(self):
         self.five_lines()
         lines = self.lines()
         lines[1] = lines[1].replace(b"calendar_query", b"calendar_qverY")
         self.put(b"".join(l + b"\n" for l in lines[:3]) + b"".join(l + b"\r\n" for l in lines[3:]))
-        self.assertBad(2, "the hash does not match the line")
+        self.assertBad(2)
+        self.assertEqual(receipts.verify(self.path).reason, "broken at seq 2: the hash does not match the line")
 
     def test_a_line_wrong_beyond_one_cr_is_named_itself(self):
         self.five_lines()

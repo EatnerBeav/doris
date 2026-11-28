@@ -404,14 +404,14 @@ class Verify(Isolated):
         self.assertIn("seq 5", out)
 
 
-    def changed_copy(self, name, ending=b"\n", change=True, tail=b""):
-        """A copy of the run's receipts with one character of seq 5 changed and every line ending `ending`."""
+    def changed_copy(self, name, ending=b"\n", change=5, tail=b""):
+        """A copy of the run's receipts with one character of seq `change` changed and every line ending `ending`."""
         copy = os.path.join(self.tmp, name)
         with open(self.path, "rb") as fh:
             lines = fh.read().split(b"\n")[:-1]
         if change:
-            self.assertIn(b'"ts":"2026-', lines[4])
-            lines[4] = lines[4].replace(b'"ts":"2026-', b'"ts":"2027-', 1)
+            self.assertIn(b'"ts":"2026-', lines[change - 1])
+            lines[change - 1] = lines[change - 1].replace(b'"ts":"2026-', b'"ts":"2027-', 1)
         with open(copy, "wb") as fh:
             fh.write(b"".join(l + ending for l in lines) + tail)
         return copy, len(lines)
@@ -439,8 +439,15 @@ class Verify(Isolated):
         self.assertRegex(out, r"\ABROKEN at seq 5: the hash does not match the line\. 4 lines verified before it "
                               r"\([^()]*copy\.jsonl\)\.\n\Z")
 
+    def test_one_line_ahead_of_the_break_is_one_line(self):
+        copy, _n = self.changed_copy("second.jsonl", change=2)
+        code, out = run_cli(["verify", copy])
+        self.assertEqual(code, 1, out)
+        self.assertTrue(out.startswith("BROKEN at seq 2: the hash does not match the line. 1 line verified before it ("),
+                        out)
+
     def test_a_torn_tail_is_said_once(self):
-        copy, n = self.changed_copy("torn.jsonl", change=False, tail=b'{"torn')
+        copy, n = self.changed_copy("torn.jsonl", change=0, tail=b'{"torn')
         code, out = run_cli(["verify", copy])
         self.assertEqual(code, 1, out)
         self.assertTrue(out.startswith("BROKEN at seq %d: torn tail: 6 bytes with no whole line. %d lines verified "
@@ -453,17 +460,17 @@ class Verify(Isolated):
         code, out = run_cli(["verify", copy])
         self.assertEqual(code, 1, out)
         self.assertTrue(out.startswith("BROKEN at seq 5: the hash does not match the line; "), out)
-        self.assertIn("%d of %d lines now end CRLF where Doris wrote LF" % (n, n), out)
+        self.assertIn("%d of %d lines now end CRLF, not LF" % (n, n), out)
         self.assertIn(" 4 lines verified before it (", out)
         self.assertNotIn("seq 1:", out)
 
     def test_a_resave_that_changed_only_the_line_endings_says_so_and_still_fails(self):
-        copy, n = self.changed_copy("endings.jsonl", ending=b"\r\n", change=False)
+        copy, n = self.changed_copy("endings.jsonl", ending=b"\r\n", change=0)
         code, out = run_cli(["verify", copy])
         self.assertEqual(code, 1, out)
-        self.assertTrue(out.startswith("BROKEN at seq 1: the line endings were changed: %d of %d lines now end CRLF "
-                                       "where Doris wrote LF" % (n, n)), out)
-        self.assertIn("every line still matches its hash", out)
+        self.assertTrue(out.startswith("BROKEN at seq 1: the line endings were changed: %d of %d lines now end CRLF, "
+                                       "not LF" % (n, n)), out)
+        self.assertIn("every line still matches its hash without them (", out)
         self.assertNotIn("canonical", out)
         self.assertNotIn("0 lines verified", out)
 
