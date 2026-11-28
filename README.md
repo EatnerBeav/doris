@@ -96,7 +96,7 @@ None of the above needs a key, and with no key every command costs $0. To have t
 
 Then run `python3 -m doris demo`. The banner says the model is called live, and each line shows the cost of its call.
 
-- **Keys:** one, `ANTHROPIC_API_KEY`. Every other name in [`.env.example`](.env.example) is for live mail on our own accounts, which no judge needs.
+- **Keys:** one, `ANTHROPIC_API_KEY`. Every other name in [`.env.example`](.env.example) is for live runs on our own accounts, which no judge needs.
 - **Model:** `claude-sonnet-5-5`, one model, called with `urllib` (no SDK).
 - **Tier:** any of Anthropic's published tiers. On the lowest, Start, Claude Sonnet 5.5 allows 4,000 requests and 2,000,000 input tokens a minute ([Anthropic's rate limits](https://platform.claude.com/docs/en/api/rate-limits), read Nov 28, 2026). Her busiest command, `traps`, makes 15 calls one at a time: 27,417 input tokens in about 30 seconds in Trap Pack run 3. A new organization may start on Anthropic's Evaluation tier, whose lower limits are not published; we have not run on it. A call that fails twice (a refused key, a rate limit, a timeout) holds that email, and nothing is sent to its sender.
 - **Limit:** a run stops itself at $5.00 of model spend (gate check G3).
@@ -119,14 +119,14 @@ Judges rate five criteria out of 5, weighted 30, 25, 20, 15 and 10, and add up t
 
 | Criterion | Weight | Where to see it |
 |---|---|---|
-| Autonomy | 30 | `demo` ends with `0 human approvals`, counted from the receipts. Holds are policy, labelled with their reason, and send nothing to the sender. Live, the first live run ([`traces/live-run-20261128T065251Z/`](traces/live-run-20261128T065251Z/)) ran 8 hours on its own: a request for a busy time got three other times, the sender picked one, and she re-checked the calendar, booked it, read it back and sent the confirmation with its `.ics`; 0 held, 0 human approvals |
+| Autonomy | 30 | `demo` ends with `0 human approvals`, counted from the receipts. Holds are policy, labelled with their reason, and send nothing to the sender. Live, the first live run ([`traces/live-run-20261128T065251Z/`](traces/live-run-20261128T065251Z/)) ran 8 hours unattended: our test sender's request for a busy time got three other times, it picked one, and she re-checked the calendar, booked it, read it back and sent the confirmation with its `.ics` (both emails in the first half hour); 0 held, 0 human approvals |
 | Usefulness | 25 | The scheduling job end to end: `sandbox/outbox/` holds the real replies with `.ics` files, time zones written both ways, and the digest. The demo ends with the owner's day told from her receipts |
 | Reliability | 20 | The staged calendar timeout (retried) and the mid-booking collision (recovered) in the demo, the quarantined email, and `traps`. Trap Pack run 3 with the model live, graded by hand against the pack's own key: met 13, safe and silent 7, missed 0, bug 0; run 1's misses are kept beside it ([`tests/trap-pack/RUNS.md`](tests/trap-pack/RUNS.md)) |
-| Engineering | 15 | [AGENT.md](AGENT.md): six steps in one loop (`src/doris/loop.py`), standard library only, each credential and what it cannot do. CI runs the unit tests on Linux, macOS and Windows under Python 3.9 and the latest 3.x, and this README's run lines as written in bash, zsh, cmd, Windows PowerShell 5.1 and PowerShell 7 |
+| Engineering | 15 | [AGENT.md](AGENT.md): six steps in one loop (`src/doris/loop.py`), standard library only, each credential and what it cannot do. CI runs the unit tests on Linux, macOS and Windows under Python 3.9 and the latest 3.x, and this README's `demo`, `verify` and `replay` lines as written in bash, zsh, cmd, Windows PowerShell 5.1 and PowerShell 7 |
 | Demo | 10 | `demo` itself, and the 3-minute video: **pending** (filmed Sunday) |
 | Safety: guardrails | +1 | The gate (`src/doris/gate.py`), every irreversible action in [SAFETY.md](SAFETY.md), and `redteam`: a model that obeys every injection, 0 bad actions in 206 runs |
 | Safety: live monitoring | +1 | `watch` |
-| Safety: kill switch | +1 | `stop` mid-run, with the halt receipt. The first live run was ended this way: worker dead 59 ms after the stop, chain verified |
+| Safety: kill switch | +1 | `stop` mid-run, with the halt receipt. The first live run was ended by `stop` between passes (nothing in flight): worker dead 59 ms after the stop, chain verified |
 | Safety: audit trail | +1 | `receipts.jsonl`, `verify` and `replay`, and every run in [`traces/`](traces/) |
 
 ## Live, on our own test accounts
@@ -140,7 +140,7 @@ To repeat it on your own Fastmail test accounts (optional, never needed to judge
 1. Two accounts: the owner's, and hers. On the owner's, share the calendar with hers and add a forwarding rule to her that skips her own address.
 2. On hers: an app password with mail and calendar access, and an API token with the Email and Email submission scopes.
 3. An env file outside the repo with the names in `.env.example`, passed to each command with `--env PATH`.
-4. `python3 -m doris smoke --env PATH --send-to ADDRESS`. Its sends go only to the addresses in `smoke.SEND_TO_ALLOWED`, which are our two test inboxes, so put your own test addresses there first. Its end-to-end step also needs `WOLF_EMAIL` and `WOLF_JMAP_TOKEN`: a third account, on that list, that sends her the test request.
+4. `python3 -m doris smoke --env PATH --send-to ADDRESS`. Its sends go only to the two addresses in `SEND_TO_ALLOWED` in `src/doris/smoke.py`, which are ours, so first edit that line to your own owner and test-sender addresses: this step needs a change to the source. Its end-to-end step also needs `WOLF_EMAIL` and `WOLF_JMAP_TOKEN`: a third account, on that list and not the owner, that sends her the test request.
 5. `python3 -m doris run --live --fresh --env PATH`. She refuses to start without a smoke from the last 24 hours that found its sent copy, and `--fresh` starts her ledger once, so she reads only mail that arrives after it.
 
 ## Known limits
@@ -149,7 +149,7 @@ To repeat it on your own Fastmail test accounts (optional, never needed to judge
 - Volume: the overnight run stays under 60 emails. The longest live run so far is the first one: 8 hours, 2 emails.
 - A judge with no key sees the model's answers replayed from a real run, not a live call. An email you add yourself has no recorded answer, so with no key it is held.
 - Not built yet: the one follow-up nudge on an unanswered offer, and the check, once a cycle, that her future bookings are still on the calendar.
-- In Trap Pack run 3, 7 of 20 files were safe but silent: nothing unsafe happened, but she did not report what the pack's key wants reported (an impossible date in an invite she never opens, a bill in the wrong encoding, bad sensor rows, a risky install line in a pull request), because she files mail that isn't her job and never opens attachments. Seven of the 13 met were met by holding for the owner rather than doing the key's whole task ([`tests/trap-pack/RUNS.md`](tests/trap-pack/RUNS.md)).
+- In Trap Pack run 3, 7 of 20 files were safe but silent: nothing unsafe happened, but she did not report what the pack's key wants reported (an impossible date in an invite she never opens, a bill in the wrong encoding, bad sensor rows, a risky install line in a pull request), because she files or quarantines mail that isn't her job and never opens attachments. Seven of the 13 met were met by holding for the owner rather than doing the key's whole task ([`tests/trap-pack/RUNS.md`](tests/trap-pack/RUNS.md)).
 - Text moved off-screen in HTML (a large negative position or a zero clip) is not on her hidden-text list yet, so it reaches the model as data ([`tests/trap-pack/RESULTS.md`](tests/trap-pack/RESULTS.md)).
 - Hold notices blank anything shaped like a code, key or token; a code that reads as plain words is quoted as written.
 - `stop` does not reach `traps`, which runs outside the supervisor. A file named `STOP` at the repo root halts it at its next step.
