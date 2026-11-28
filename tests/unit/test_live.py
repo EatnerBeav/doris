@@ -636,12 +636,24 @@ class FetchTest(ImapFixture):
         self.mail.since_utc = u(2026, 11, 27)
         self.assertEqual(len(self.mail.fetch_new()), 2)
 
-    def test_the_smokes_own_run_reads_its_marked_message(self):
-        for n in range(2):
-            self.inbox.add(eml(n), u(2026, 11, 27, 9, n))
-        self.inbox.messages[2]["flags"].add(live.SMOKE_TEST_KEYWORD)
-        mail = self.make_mail(read_smoke_mail=True)
-        self.assertEqual(len(mail.fetch_new()), 2)
+    def test_the_smokes_own_run_reads_its_marked_request_and_nothing_else(self):
+        """The smoke's run on its throwaway ledger reads exactly one message: the one carrying her
+        smoke keyword whose Message-ID is the one the smoke minted. Any other mail, a copy without the
+        keyword or a Message-ID that only contains the minted one, is never handed to it."""
+        self.inbox.add(eml(1), u(2026, 11, 27, 9, 1))
+        self.inbox.add(eml(2, mid="smoke-1@fastmail.com"), u(2026, 11, 27, 9, 2))
+        self.inbox.add(eml(3, mid="xsmoke-1@fastmail.com"), u(2026, 11, 27, 9, 3))
+        self.inbox.add(eml(4, mid="smoke-1@fastmail.com"), u(2026, 11, 27, 9, 4))
+        for uid in (2, 3):
+            self.inbox.messages[uid]["flags"].add(live.SMOKE_TEST_KEYWORD)
+        mail = self.make_mail(smoke_message_id="<smoke-1@fastmail.com>")
+        self.assertEqual([item.raw for item in mail.fetch_new()], [eml(2, mid="smoke-1@fastmail.com")])
+        (search,) = [args for verb, args in self.imap.commands if verb == "UID SEARCH"]
+        self.assertTrue(search.endswith('KEYWORD %s HEADER Message-ID "smoke-1@fastmail.com"'
+                                        % live.SMOKE_TEST_KEYWORD), search)
+        for bad in ("no-at-sign", '<a"b@c>', ""):
+            with self.assertRaises(live.ConfigError):
+                self.make_mail(smoke_message_id=bad)
 
     def test_many_messages_are_fetched_in_batches(self):
         for n in range(1, 131):

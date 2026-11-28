@@ -14,8 +14,8 @@ Every rule of adapters/base.py holds here:
 - Mail: fetch reads INBOX read-only with BODY.PEEK, statelessly; filing is a keyword on her own
   copy. There is no delete, expunge, move, copy, append or forward here. A send is one JMAP
   submission over HTTPS (jmap.JmapSender.send), never retried here. A message carrying her
-  keyword SMOKE_TEST_KEYWORD is the smoke's own test request: fetch never hands it over, except
-  to the smoke's own run (read_smoke_mail).
+  keyword SMOKE_TEST_KEYWORD is the smoke's own test request: fetch never hands it over, and
+  the smoke's own run (smoke_message_id) is handed that one message and nothing else.
 - Calendar: reads times, status and transparency only, never a title; writes create-only;
   deletes only her own event by booking ID.
 - No secret reaches an exception message: errors carry the step, a status code or the
@@ -358,13 +358,14 @@ class LiveMail(MailAdapter):
     (jmap.JmapSender, HTTPS) under her own API token.
 
     fetch_new is stateless: every INBOX message received at or after since_utc (all of them
-    when it is None), oldest first, but never one carrying SMOKE_TEST_KEYWORD unless this is the
-    smoke's own run (read_smoke_mail); the ledger decides what is new. Each IMAP call opens its
-    own connection, logs in, and logs out when done. jmap_factory(host, port, timeout) makes the
+    when it is None), oldest first, but never one carrying SMOKE_TEST_KEYWORD; the ledger decides
+    what is new. With smoke_message_id (the smoke's own run) it hands over only the message that
+    carries SMOKE_TEST_KEYWORD and exactly that Message-ID. Each IMAP call opens its own
+    connection, logs in, and logs out when done. jmap_factory(host, port, timeout) makes the
     sender's connections (a test's fake server); without it they are verified HTTPS."""
 
     def __init__(self, env, doris_addr, timeout_s=caps.MAIL_TIMEOUT_S, since_utc=None,
-                 imap_factory=None, jmap_factory=None, read_smoke_mail=False):
+                 imap_factory=None, jmap_factory=None, smoke_message_id=None):
         login = _address(env)
         if not isinstance(doris_addr, str) or doris_addr.strip().lower() != login.lower():
             raise ConfigError("her address must be %s, the login of her own account" % ENV_ADDRESS)
@@ -375,7 +376,12 @@ class LiveMail(MailAdapter):
         self.imap_port = _port(env, ENV_IMAP_PORT, DEFAULT_IMAP_PORT)
         self.timeout_s = _timeout(timeout_s)
         self.since_utc = since_utc
-        self.read_smoke_mail = bool(read_smoke_mail)
+        self.smoke_message_id = None
+        if smoke_message_id is not None:
+            target = _norm_mid(smoke_message_id) if isinstance(smoke_message_id, str) else ""
+            if not _MESSAGE_ID.match(target):
+                raise ConfigError("the smoke's Message-ID is not one it can search for")
+            self.smoke_message_id = target
         self._imap_factory = imap_factory or _imap_tls
         self._sender = jmap.JmapSender(env, self.doris_addr, timeout_s=self.timeout_s, http_factory=jmap_factory)
 
@@ -487,8 +493,8 @@ class LiveMail(MailAdapter):
     def fetch_new(self):
         """Every INBOX message received at or after since_utc, oldest first (INTERNALDATE, then
         UID), leaving out any carrying SMOKE_TEST_KEYWORD (the smoke's own test request, answered
-        on the smoke's ledger) unless read_smoke_mail is set. Read-only (EXAMINE) and with
-        BODY.PEEK[], so nothing about her mail changes. Each
+        on the smoke's ledger); with smoke_message_id, only that request: the keyword and exactly
+        that Message-ID. Read-only (EXAMINE) and with BODY.PEEK[], so nothing about her mail changes. Each
         message's RFC822.SIZE is read with its date: one over caps.MAX_RAW_BYTES is handed over
         as only its first MAX_RAW_BYTES + 1 octets, never downloaded whole, and the reader holds
         it as oversize. Raises MailError on any failure, including a message the server named
@@ -499,8 +505,10 @@ class LiveMail(MailAdapter):
         with self._imap(step) as conn:
             uidvalidity, _ = self._open(conn, "INBOX", True, step)
             criteria = ("ALL",) if since is None else ("SINCE", _imap_day(since - _DAY))
-            if not self.read_smoke_mail:
+            if self.smoke_message_id is None:
                 criteria += ("NOT", "KEYWORD", SMOKE_TEST_KEYWORD)
+            else:                          # a substring search: each match is read back below
+                criteria += ("KEYWORD", SMOKE_TEST_KEYWORD, "HEADER", "Message-ID", '"%s"' % self.smoke_message_id)
             uids = self._search(conn, criteria, step)
             dated = []
             for batch in _batches(uids):
@@ -522,6 +530,8 @@ class LiveMail(MailAdapter):
                 for received, uid, _ in batch:
                     if uid not in bodies:
                         raise _failure(MailError, step, detail="the server left a message out")
+                    if self.smoke_message_id is not None and self.smoke_message_id not in _message_ids(bodies[uid]):
+                        continue           # it only contains the smoke's Message-ID: never the smoke's to read
                     items.append(InboundItem(server_id=server_id(uidvalidity, uid), raw=bodies[uid],
                                              received_utc=received))
             return items

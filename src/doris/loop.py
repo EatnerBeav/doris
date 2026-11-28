@@ -104,6 +104,14 @@ class RunConfig:
     cycle_s: Optional[float] = None         # the wall-clock grid her waits keep; None: CYCLE, ten minutes
     lifeline: Optional[object] = None       # the worker's tie to its supervisor (supervisor.Lifeline): once it
                                             # is gone she halts herself and writes her own halted line
+    # The smoke's own run (live only; smoke.py): her loop on the smoke's one test request, on a throwaway
+    # ledger of its own (state_dir), obeying the live folder all the same.
+    live_dir: Optional[str] = None          # the live state folder whose HALT, STOP and smoke record she obeys
+                                            # (None: state_dir, as every other run)
+    smoke_message_id: Optional[str] = None  # the one message she reads: the smoke's request, marked with
+                                            # live.SMOKE_TEST_KEYWORD (needs live_dir)
+    calendar_read_only: bool = False        # a create or delete is refused, so no test booking reaches the
+                                            # owner's calendar (the message is held instead)
 
 
 @dataclass
@@ -154,6 +162,30 @@ class _CalendarDown(Exception):
 class _ReadsFailed(Exception):
     """A run until stopped: her inbox could not be read at caps.MAIL_READ_FAILURES_IN_A_ROW cycles
     running. Each failure has its error line; the run ends on its summary, read_failed."""
+
+
+class _ReadOnlyCalendar(object):
+    """The smoke's run: the owner's calendar for reads only. A create or a delete is refused as a
+    CalendarError, which the loop holds on (calendar_down): a test booking never reaches his calendar."""
+    REFUSED = "the smoke's run writes nothing to the owner's calendar"
+
+    def __init__(self, calendar):
+        self._calendar = calendar
+
+    def create_only(self, booking_id, ics_bytes):
+        raise CalendarError(self.REFUSED)
+
+    def delete(self, booking_id):
+        raise CalendarError(self.REFUSED)
+
+    def __getattr__(self, name):                # query, get and the rest: the calendar's own
+        return getattr(self._calendar, name)
+
+
+def compose_ok_message_id(value):
+    """One Message-ID, with or without its brackets: what the smoke mints and her fetch can search for."""
+    from .adapters import live
+    return isinstance(value, str) and bool(live._MESSAGE_ID.match(live._norm_mid(value)))
 
 
 class LiveSettings(object):
@@ -377,6 +409,11 @@ class _Run:
             raise ValueError("clock_mode is fixed or advance, not %r" % (cfg.clock_mode,))
         if cfg.model_source not in model_mod.SOURCES:
             raise ValueError("unknown model source %r" % (cfg.model_source,))
+        if cfg.mode != "live" and (cfg.live_dir is not None or cfg.smoke_message_id is not None
+                                   or cfg.calendar_read_only):
+            raise ValueError("live_dir, smoke_message_id and calendar_read_only are for the smoke's live run only")
+        if cfg.smoke_message_id is not None and (not cfg.live_dir or not compose_ok_message_id(cfg.smoke_message_id)):
+            raise ValueError("smoke_message_id needs live_dir, and it must be one Message-ID")
         if cfg.mode == "live":
             if cfg.sandbox_root is not None or cfg.owner_addr is not None or cfg.doris_addr is not None:
                 raise ValueError("a live run reads both addresses from its env file and has no sandbox")
@@ -396,6 +433,7 @@ class _Run:
                                         or not cfg.cycle_s > 0):
             raise ValueError("cycle_s is a positive number of seconds")
         self.cfg = cfg
+        self.halt_dir = cfg.live_dir or cfg.state_dir   # where her HALT, STOP and smoke record are read
         self.cycle_s = CYCLE.total_seconds() if cfg.cycle_s is None else float(cfg.cycle_s)
         self.mode = cfg.mode
         self.run_id = cfg.run_name
@@ -433,7 +471,7 @@ class _Run:
                           supervisor.WORKER_EXIT_HALTED)
         if cfg.mode == "live":              # every setting from the env file, before anything is made
             self.live = live_settings(cfg.env_path, cfg.model_source)
-            refusal = smoke_refusal(cfg.state_dir, _wall_now())
+            refusal = smoke_refusal(self.halt_dir, _wall_now())
             if refusal is not None:
                 raise Refused(refusal, 2)
             self.cfg = cfg = replace(cfg, owner_addr=self.live.owner_addr, doris_addr=self.live.doris_addr)
@@ -510,8 +548,10 @@ class _Run:
         cal = {} if self.cfg.calendar_timeout_s is None else {"timeout_s": self.cfg.calendar_timeout_s}
         if self.live:
             from .adapters import live
-            return (live.LiveMail(self.live.env, self.cfg.doris_addr, since_utc=self.mail_since),
-                    live.LiveCalendar(self.live.env, **cal))
+            calendar = live.LiveCalendar(self.live.env, **cal)
+            return (live.LiveMail(self.live.env, self.cfg.doris_addr, since_utc=self.mail_since,
+                                  smoke_message_id=self.cfg.smoke_message_id),
+                    _ReadOnlyCalendar(calendar) if self.cfg.calendar_read_only else calendar)
         from .adapters import sandbox
         clock = self.now if self.cfg.clock_mode == "advance" else None
         return (sandbox.SandboxMail(self.cfg.sandbox_root, self.cfg.doris_addr, clock=clock),
@@ -526,7 +566,7 @@ class _Run:
     def halt_cause(self):
         """The halt in force, read from disk now (G1 asks this at every effect). A worker whose
         supervisor is gone is halted even before HALT is down, or when it cannot be written."""
-        cause = supervisor.halt_cause(self.mode, state_dir=self.cfg.state_dir)
+        cause = supervisor.halt_cause(self.mode, state_dir=self.halt_dir)
         if cause is None and self.supervisor_gone():
             return "supervisor_gone"
         return cause
@@ -714,7 +754,7 @@ class _Run:
         kept = {}
         if self.supervisor_gone():
             try:
-                supervisor.request_stop(self.mode, "supervisor_gone", state_dir=self.cfg.state_dir)
+                supervisor.request_stop(self.mode, "supervisor_gone", state_dir=self.halt_dir)
             except Exception:
                 kept = {"halt_file": "unwritten"}      # she stops all the same; a restart is not refused
         lines = receipts.read_lines(self.receipts_path)
@@ -988,7 +1028,7 @@ class _Run:
                                   "side_question": a.side_question, "ok": a.ok, "source": a.source, "raw": a.raw},
                    subject=e.subject)
         if self.ledger.spend(self.run_id) >= self.cfg.budget_usd:
-            supervisor.request_stop(self.mode, "budget_cap", state_dir=self.cfg.state_dir)
+            supervisor.request_stop(self.mode, "budget_cap", state_dir=self.halt_dir)
             raise Halted("budget_cap")
         return a
 
@@ -1501,7 +1541,7 @@ class _Run:
         """G1 to G3 stop her: a known halt cause, or fail closed."""
         cause = g.halt_cause
         if g.first_fail == "G3" and cause == "budget_cap":
-            supervisor.request_stop(self.mode, "budget_cap", state_dir=self.cfg.state_dir)
+            supervisor.request_stop(self.mode, "budget_cap", state_dir=self.halt_dir)
             return cause                    # written to disk, so it survives a restart
         if cause in why_mod.HALT_CAUSES:
             return cause

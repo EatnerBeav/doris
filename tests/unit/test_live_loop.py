@@ -892,6 +892,120 @@ class WolfNeverReadTest(LiveFixture):
                         self.assertNotIn(wolf_token.encode("ascii"), fh.read(), name)
 
 
+WOLF = "wolf.whizz@fastmail.com"
+SMOKE_MID = "<smoke-0123456789abcdef@fastmail.com>"
+
+
+def wolf_request(mid=SMOKE_MID):
+    """The smoke's test request: from the wolf.whizz account to the owner, a call with no exact time."""
+    return ("From: Wolf Whizz <%s>\r\nTo: %s\r\nSubject: Smoke test: a call next week?\r\n"
+            "Date: Tue, 01 Dec 2026 08:01:00 -0800\r\nMessage-ID: %s\r\nMIME-Version: 1.0\r\n"
+            "Content-Type: text/plain; charset=\"utf-8\"\r\n\r\nHi Shane, could we find 30 minutes next week "
+            "to talk about the inbox agent? Any afternoon works for me.\r\n\r\nWolf\r\n" % (WOLF, OWNER, mid)
+            ).encode("ascii")
+
+
+class SmokeRunTest(LiveFixture):
+    """The smoke's own run of her loop (smoke_message_id, live_dir, calendar_read_only): live mode on
+    a throwaway ledger of its own, handed only the smoke's marked request; the live folder's halt,
+    STOP and smoke record are the ones it obeys; and nothing it does reaches the owner's calendar."""
+
+    def setUp(self):
+        super().setUp()
+        self.smoke_state = os.path.join(self.state, "smoke", "s1")
+        ledger_mod.start_fresh(os.path.join(self.smoke_state, "ledger.sqlite"), u(2026, 12, 1, 15, 0))
+        self.inbox.add(request(1), u(2026, 12, 1, 16, 1))                        # Priya's: never the smoke's
+        uid = self.inbox.add(wolf_request(), u(2026, 12, 1, 16, 2))
+        self.inbox.messages[uid]["flags"].add(live.SMOKE_TEST_KEYWORD)
+        self.clock = u(2026, 12, 1, 16, 10)
+        self.with_a_time = False
+        patch = mock.patch.object(loop, "_sleep", lambda seconds: None)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def post(self, url, headers, body, timeout):
+        """The model reads no exact time in the smoke's request (unless with_a_time: then she would book)."""
+        self.posts.append((url, dict(headers), json.loads(body.decode("utf-8"))))
+        answer = model_answer()
+        if not self.with_a_time:
+            fields = json.loads(answer["content"][0]["text"])
+            fields.update(date=None, time24=None, zone=None)
+            answer["content"][0]["text"] = json.dumps(fields)
+        return 200, json.dumps(answer).encode("utf-8")
+
+    def smoke_run(self, **kw):
+        fields = dict(state_dir=self.smoke_state, model_source="live", cycles=1, smoke_message_id=SMOKE_MID,
+                      live_dir=self.state, calendar_read_only=True, retry_wait_s=0.0)
+        fields.update(kw)
+        return self.go(**fields)
+
+    def test_it_reads_the_smokes_request_alone_and_answers_it_with_an_offer(self):
+        s = self.smoke_run()
+        self.assertEqual((s.handled, s.held, s.sends, s.model_calls), (1, 0, 1, 1))
+        self.assertTrue(s.verify_ok)
+        lines = receipts.read_lines(s.receipts_path)
+        observed = [l for l in lines if l["kind"] == "observed" and l["payload"].get("step") != "start"]
+        self.assertEqual(len(observed), 1)
+        with open(s.receipts_path, encoding="utf-8") as fh:
+            self.assertNotIn("live-1@northwind.example", fh.read())               # Priya's never read
+        (sent,) = self.jmap.delivered
+        self.assertEqual(sent[1], [WOLF, OWNER])
+        self.assertEqual(email.message_from_bytes(sent[2])["In-Reply-To"], SMOKE_MID)
+        self.assertEqual([r[0] for r in self.dav.requests if r[0] in ("PUT", "DELETE")], [])
+        with ledger_mod.Ledger(os.path.join(self.smoke_state, "ledger.sqlite"), create=False) as db:
+            self.assertEqual([row[0] for row in db._all("SELECT state FROM sends")], ["confirmed"])
+        self.assertFalse(os.path.exists(os.path.join(self.state, "ledger.sqlite")))   # the live ledger untouched
+
+    def test_a_booking_it_would_make_never_reaches_the_owners_calendar(self):
+        self.inbox.messages.clear()                           # a request with an exact time: she would book
+        uid = self.inbox.add(request(1).replace(b"<live-1@northwind.example>", SMOKE_MID.encode("ascii")),
+                             u(2026, 12, 1, 16, 2))
+        self.inbox.messages[uid]["flags"].add(live.SMOKE_TEST_KEYWORD)
+        self.with_a_time = True
+        s = self.smoke_run()
+        self.assertEqual([r[0] for r in self.dav.requests if r[0] in ("PUT", "DELETE")], [])
+        self.assertEqual(held_outcomes(s), ["hold:calendar_down"])
+        self.assertEqual([rcpts for _, rcpts, _ in self.jmap.delivered], [[OWNER]])   # the owner told, no reply
+
+    def test_the_live_folders_halt_stop_and_smoke_record_are_the_ones_it_obeys(self):
+        supervisor.request_stop("live", "cli", state_dir=self.state)
+        with self.assertRaises(loop.Refused) as cm:
+            self.smoke_run()
+        self.assertEqual(cm.exception.exit_code, supervisor.WORKER_EXIT_HALTED)
+        os.remove(supervisor.halt_file("live", self.state))
+        with open(os.path.join(self.state, "STOP"), "w") as fh:
+            fh.write("")
+        with self.assertRaises(loop.Refused):
+            self.smoke_run()
+        os.remove(os.path.join(self.state, "STOP"))
+        self.prove_smoke(None)
+        with self.assertRaises(loop.Refused) as cm:
+            self.smoke_run()
+        self.assertEqual(str(cm.exception), loop.SMOKE_REFUSAL)
+        self.nothing_contacted()
+
+    def test_a_halt_in_the_live_folder_mid_run_stops_it_before_the_send(self):
+        real = ledger_mod.Ledger.record_send
+
+        def recorded_then_stopped(db, *args, **kw):
+            out = real(db, *args, **kw)
+            supervisor.request_stop("live", "cli", state_dir=self.state)
+            return out
+
+        with mock.patch.object(ledger_mod.Ledger, "record_send", recorded_then_stopped):
+            s = self.smoke_run()
+        self.assertEqual((s.halted, self.jmap.delivered), ("cli", []))
+
+    def test_its_settings_are_for_a_live_run_and_its_message_needs_the_live_folder(self):
+        for extra in ({"live_dir": None}, {"smoke_message_id": "not-a-message-id"}):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                self.smoke_run(**extra)
+        for extra in ({"smoke_message_id": SMOKE_MID}, {"live_dir": self.state}, {"calendar_read_only": True}):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                loop.run(loop.RunConfig(mode="sandbox", run_name="model-stub-sandbox-x", state_dir=self.dir,
+                                        sandbox_root=self.dir, owner_addr=OWNER, doris_addr=DORIS, **extra))
+
+
 class JmapAnswerTest(LiveFixture):
     """The send states over the fake JMAP server's own answers, nothing in LiveMail patched: a
     submission created is handed_over, written down before the Sent look; one turned away (a 4xx,
