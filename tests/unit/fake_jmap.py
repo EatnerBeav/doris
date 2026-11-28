@@ -5,22 +5,35 @@ so a test can prove what Doris never does (a second submission, a Bcc, another h
 server text in an error).
 
 Shared by test_jmap (the sender), test_live (LiveMail sends through it), test_live_loop and
-test_smoke, whose end-to-end test has two accounts, hers and wolf's (for_account, routed). Every
+test_smoke, whose end-to-end test has two accounts, hers and wolf's (for_account, dialling). Every
 value here is made up.
+
+as_fastmail names URLs as Fastmail's real session does: the session on api.fastmail.com, apiUrl,
+uploadUrl and eventSourceUrl on the account's own host below it (phl.api.fastmail.com). dialling
+lets a test's senders reach the fakes under those very host names, through the network guard as
+a real connection goes: only the name lookup below the guard is the test's (Dns).
 """
 import email
 import email.policy
 import http.client
 import http.server
 import json
+import socket
 import threading
 import time
+from unittest import mock
+
+from doris.adapters import jmap
 
 DORIS = "doris.htm@fastmail.com"
 TOKEN = "dummy-jmap-token-for-doris-tests-4242"   # a stand-in: never a real key
 ACCOUNT = "u1a2b3c4"
 SERVER_TEXT = "server-words-never-shown"  # every description the fake writes; never in an error of ours
-FASTMAIL = "https://api.fastmail.com"     # where the real session puts apiUrl and uploadUrl
+SESSION_HOST = "https://api.fastmail.com"        # the session's own host (jmap.SESSION_URL)
+FASTMAIL = "https://phl.api.fastmail.com"        # where the real session puts apiUrl, uploadUrl and eventSourceUrl:
+                                                 # the account's own host below api.fastmail.com (it can move)
+DOWNLOAD = "https://phl-www.fastmailusercontent.com/jmap/download/{accountId}/{blobId}/{name}?type={type}"
+FASTMAIL_HOSTS = ("api.fastmail.com", "phl.api.fastmail.com")   # the names Dns resolves to a fake
 
 CORE = "urn:ietf:params:jmap:core"
 MAIL = "urn:ietf:params:jmap:mail"
@@ -57,6 +70,8 @@ class FakeJMAP(http.server.ThreadingHTTPServer):
         self.primary = {MAIL: ACCOUNT, SUBMISSION: ACCOUNT}
         self.api_url = None         # None: this server's own
         self.upload_url = None
+        self.event_url = None
+        self.download_url = None
         self.session_body = None    # bytes answering the session instead
         self.mailboxes = [{"id": "mb-inbox", "role": "inbox", "name": "Inbox"},
                           {"id": "mb-drafts", "role": "drafts", "name": "Drafts"},
@@ -97,11 +112,15 @@ class FakeJMAP(http.server.ThreadingHTTPServer):
         self.shutdown()
         self.server_close()
 
-    def as_fastmail(self):
-        """Put apiUrl and uploadUrl on https://api.fastmail.com, as the real session does, for a sender
-        whose session URL is the real one and whose transport (jmap._https, patched) dials this fake."""
-        self.api_url = FASTMAIL + "/jmap/api/"
-        self.upload_url = FASTMAIL + "/jmap/upload/{accountId}/"
+    def as_fastmail(self, origin=FASTMAIL):
+        """Name URLs as Fastmail's real session does, for a sender whose session URL is the real one
+        (on api.fastmail.com) and whose transport (jmap._https, patched) dials this fake: apiUrl,
+        uploadUrl and eventSourceUrl on origin, by default the account's own host below
+        api.fastmail.com (https://phl.api.fastmail.com), and downloadUrl on Fastmail's content host."""
+        self.api_url = origin + "/jmap/api/"
+        self.upload_url = origin + "/jmap/upload/{accountId}/"
+        self.event_url = origin + "/jmap/event/"
+        self.download_url = DOWNLOAD
         return self
 
     def next_id(self, prefix):
@@ -128,9 +147,10 @@ class FakeJMAP(http.server.ThreadingHTTPServer):
                 "primaryAccounts": self.primary,
                 "username": self.username,
                 "apiUrl": self.base + "/jmap/api/" if self.api_url is None else self.api_url,
-                "downloadUrl": "https://www.fastmailusercontent.com/jmap/download/{accountId}/{blobId}/{name}?type={type}",
+                "downloadUrl": self.base + "/jmap/download/{accountId}/{blobId}/{name}?type={type}"
+                               if self.download_url is None else self.download_url,
                 "uploadUrl": self.base + "/jmap/upload/{accountId}/" if self.upload_url is None else self.upload_url,
-                "eventSourceUrl": self.base + "/jmap/event/",
+                "eventSourceUrl": self.base + "/jmap/event/" if self.event_url is None else self.event_url,
                 "state": "s1"}
 
     # -- methods (RFC 8621) --------------------------------------------------------------------
@@ -290,21 +310,44 @@ class FakeJMAP(http.server.ThreadingHTTPServer):
 
 def for_account(address, token, name="Wolf"):
     """A fake of another account's own (the smoke's wolf.whizz): its token, its session's username
-    and its identity; apiUrl and uploadUrl on api.fastmail.com, as for hers."""
+    and its identity; its URLs named as Fastmail's session names them, as for hers."""
     server = FakeJMAP().as_fastmail()
     server.token, server.username = token, address
     server.identities = [{"id": "I-" + address.split("@")[0].replace(".", "-"), "email": address, "name": name}]
     return server
 
 
-class Routed(http.client.HTTPConnection):
-    """One connection to api.fastmail.com as a sender sees it, dialled once its request is made: to
-    the fake whose token the request carries (the first fake for any other token). Each account
-    is a fake of its own, as each is its own account at Fastmail."""
+class Dns(object):
+    """Name lookups for a test, below the network guard: each of Fastmail's hosts (FASTMAIL_HOSTS)
+    resolves to a fake on 127.0.0.1, the one `ports` names for that host or else the one `port`
+    holds (Routed sets it for each connection), 127.0.0.1 is itself, and any other name is unknown,
+    so no test looks a name up for real. Patched in as socket.getaddrinfo before a guard is
+    installed, it is asked only for a name every installed guard allows: a sender's connection
+    meets the guard as a real one does (its host name and port at create_connection and
+    getaddrinfo, then the address it resolved to at connect)."""
 
-    def __init__(self, servers, timeout):
-        http.client.HTTPConnection.__init__(self, "127.0.0.1", servers[0].port, timeout=timeout)
-        self.servers = servers
+    def __init__(self, port, real, ports=None):
+        self.port, self.real, self.ports = port, real, dict(ports or {})
+
+    def __call__(self, host, port, *args, **kw):
+        name = host.decode("ascii", "replace") if isinstance(host, bytes) else host
+        if name in FASTMAIL_HOSTS:
+            to = self.ports.get(name, self.port)
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", to))]
+        if name == "127.0.0.1":
+            return self.real(host, port, *args, **kw)
+        raise socket.gaierror(socket.EAI_NONAME, "not a name this test resolves")
+
+
+class Routed(http.client.HTTPConnection):
+    """One connection to the host and port a sender asks for (api.fastmail.com:443 for the session,
+    then the host it names), made once its request is: to the fake whose token the request carries
+    (the first fake for any other token). Each account is a fake of its own, as each is its own
+    account at Fastmail. Plain HTTP in place of TLS; the name goes through the guard, then Dns."""
+
+    def __init__(self, host, port, servers, dns, timeout):
+        http.client.HTTPConnection.__init__(self, host, port, timeout=timeout)
+        self.servers, self.dns = servers, dns
 
     def connect(self):
         if self.sock is None and getattr(self, "routed", False):
@@ -313,15 +356,22 @@ class Routed(http.client.HTTPConnection):
     def request(self, method, url, body=None, headers=None, **kw):
         headers = dict(headers or {})
         token = (headers.get("Authorization") or "")[len("Bearer "):]
-        self.port = {s.token: s for s in reversed(self.servers)}.get(token, self.servers[0]).port
+        self.dns.port = {s.token: s for s in reversed(self.servers)}.get(token, self.servers[0]).port
         self.routed = True
         self.connect()
         return http.client.HTTPConnection.request(self, method, url, body=body, headers=headers, **kw)
 
 
-def routed(*servers):
-    """jmap._https for a test with more than one account: each connection goes to the account its token names."""
-    return lambda host, port, timeout: Routed(list(servers), timeout)
+def dialling(*servers):
+    """The patches (start them before any guard is installed) for a test whose senders reach these
+    fakes as they reach Fastmail: jmap._https makes a Routed connection to the host and port asked
+    for, and socket.getaddrinfo is a Dns that takes Fastmail's hosts to the fakes. With more than one
+    account, each connection goes to the account its token names."""
+    dns = Dns(servers[0].port, socket.getaddrinfo)
+
+    def dial(host, port, timeout):
+        return Routed(host, port, list(servers), dns, timeout)
+    return [mock.patch.object(socket, "getaddrinfo", dns), mock.patch.object(jmap, "_https", dial)]
 
 
 class JMAPHandler(http.server.BaseHTTPRequestHandler):

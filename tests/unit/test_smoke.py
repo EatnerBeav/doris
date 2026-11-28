@@ -2,9 +2,10 @@
 
 The real adapters talk to test_live's fake IMAP and CalDAV servers and fake_jmap's JMAP servers
 on 127.0.0.1 (the adapters' default transports are swapped for plain connections to them), under
-the network guard the smoke installs itself: the env file names 127.0.0.1 as every host it can
-(her sends go to api.fastmail.com, whose connections the fake factory dials: to her account's
-fake, or to wolf.whizz's for the end-to-end test, by the token each request carries). Every test
+the network guard the smoke installs itself: the env file names 127.0.0.1 as every host it can.
+Her sends and wolf's go to api.fastmail.com and the host its session names (phl.api.fastmail.com),
+through the guard under those names (fake_jmap.dialling), then to her account's fake or to
+wolf.whizz's for the end-to-end test, by the token each request carries. Every test
 has its own state/, repo/ and repo/traces/ folders (paths.STATE, paths.REPO and paths.TRACES
 patched), so the live halt, STOP and lock files it reads and takes, and the traces it keeps, are
 never the real ones. The model is the fake answer of a request with no exact time.
@@ -58,6 +59,7 @@ WOLF_PASSWORD = "dummy-wolf-app-pass-6262"             # on wide's env file too;
 API_KEY = "dummy-anthropic-key-for-smoke-tests-6363"
 LINK = "https://meet.example/" + "smoke-e2e-room"
 OWNER_CALENDAR = "dummy-owner-calendar-6464"            # on wide's env file too; nothing reads it
+OWNER_FULL_NAME = "Dummy Owner-Fullname 6565"          # a display name as the owner's calendar may carry: never shown
 E2E_TEXT = ENV_TEXT + ("DORIS_OWNER_ADDRESS=" + OWNER + "\n" "DORIS_MEETING_LINK=" + LINK + "\n"
                        "ANTHROPIC_API_KEY=" + API_KEY + "\n" "WOLF_EMAIL=" + WOLF + "\n"
                        "WOLF_JMAP_TOKEN=" + WOLF_TOKEN + "\n" "WOLF_APP_PASSWORD=" + WOLF_PASSWORD + "\n"
@@ -104,7 +106,7 @@ class SmokeFixture(unittest.TestCase):
                 mock.patch.object(paths, "TRACES", self.traces),
                 mock.patch.object(live, "_imap_tls", lambda host, port, timeout: imaplib.IMAP4(
                     "127.0.0.1", self.imap.port, timeout=timeout)),
-                mock.patch.object(jmap, "_https", fake_jmap.routed(self.jmap, self.wolf)),
+                *fake_jmap.dialling(self.jmap, self.wolf),
                 mock.patch.object(live, "_https", lambda host, port, timeout: http.client.HTTPConnection(
                     "127.0.0.1", self.dav.port, timeout=timeout)),
                 mock.patch.object(model_mod, "_urllib_post", self.post),
@@ -198,7 +200,7 @@ class SmokeTest(SmokeFixture):
         self.assertEqual(self.names(), STEPS + SEND_STEPS + E2E_STEPS + ["smoke"])
         self.assertEqual(self.result("imap login and inbox count"), "ok (2 messages in INBOX)")
         self.assertEqual(self.result("sent folder found by its special-use flag"), "ok (1 folder)")
-        self.assertEqual(self.result(NAME), 'ok ("Bookings with Doris")')
+        self.assertEqual(self.result(NAME), "ok (name read)")
         self.assertEqual(self.result("caldav query, next 7 days"), "ok (0 events)")
         looks_after_a_find = {"test request in her INBOX, look 2 (after another wait)",
                               "her reply in wolf's mailbox, look 2 (after a wait)"}
@@ -425,26 +427,27 @@ class HaltAndLockTest(SmokeFixture):
 
 
 class DisplayNameTest(SmokeFixture):
-    """The calendar's display name is the one server text a line shows, so a person can see which
-    calendar the URL names: as the server reports it, on one line, nothing in it able to move the
-    cursor or turn text around, and cut when long."""
+    """The display name step proves the calendar URL names a calendar that has a name, and its line
+    says only that a name was read: the name (the owner's calendar can carry the owner's full name)
+    is in no line printed, so in no terminal.log, timeline or manifest of a trace kept in a public repo."""
 
-    def test_the_display_name_is_shown_as_the_server_reports_it(self):
-        self.dav.display_name = "  Owner's \"bookings\" & Caf\u00e9  "
+    def test_the_line_says_only_that_a_name_was_read_and_no_trace_file_holds_the_name(self):
+        self.dav.display_name = OWNER_FULL_NAME
         self.assertEqual(self.run_smoke(), 0)
-        self.assertEqual(self.result(NAME), 'ok ("  Owner\'s "bookings" & Caf\u00e9  ")')
+        self.assertEqual(self.result(NAME), "ok (name read)")
+        self.assertNotIn(OWNER_FULL_NAME, "\n".join(self.lines))
+        for name in sorted(os.listdir(self.trace())):
+            with open(os.path.join(self.trace(), name), "rb") as fh:
+                data = fh.read()
+            self.assertNotIn(OWNER_FULL_NAME.encode("utf-8"), data, name)
+            self.assertNotIn(b"Dummy", data, name)
 
-    def test_a_line_end_or_a_direction_mark_in_it_is_shown_escaped_on_the_one_line(self):
+    def test_a_name_with_a_line_end_or_a_direction_mark_still_makes_one_plain_line(self):
         self.dav.display_name = "cal\nsmoke: ok, every step passed\r\t\u202edesrever"
         self.assertEqual(self.run_smoke(), 0)
-        self.assertEqual(self.result(NAME), 'ok ("cal\\nsmoke: ok, every step passed\\r\\t\\u202edesrever")')
+        self.assertEqual(self.result(NAME), "ok (name read)")
         self.assertEqual(len(self.lines), len(STEPS) + 4)          # the two not run, the last line, the trace's
-        self.assertFalse(any("\n" in line or "\r" in line or "\u202e" in line for line in self.lines))
-
-    def test_a_long_display_name_is_cut(self):
-        self.dav.display_name = "x" * 1000
-        self.assertEqual(self.run_smoke(), 0)
-        self.assertEqual(self.result(NAME), 'ok ("%s...")' % ("x" * smoke.DISPLAY_NAME_MAX))
+        self.assertFalse(any("desrever" in line or "\u202e" in line for line in self.lines))
 
     def test_a_calendar_that_reports_no_display_name_fails_that_step(self):
         self.dav.display_name = None
@@ -939,6 +942,49 @@ class EndToEndTest(SmokeFixture):
         self.assertEqual(list(installed[1][0]), ["127.0.0.1", "api.fastmail.com", "api.anthropic.com"])  # her loop's
         self.assertEqual(guard.refused(), [])
         self.assertIsNone(netguard.active())
+
+    def test_both_senders_reach_the_host_their_session_names_only_once_checked(self):
+        """Fastmail's real session names apiUrl and uploadUrl on the account's own host below
+        api.fastmail.com (phl.api.fastmail.com). The smoke's guard and her loop's allow it only once a
+        sender checked its session: wolf's (his request, then the looks for her reply) and hers (the
+        smoke's send, then her loop's reply). Each connection meets the guards under its host's name."""
+        installed = []
+        real_install = netguard.install
+
+        def spy(hosts=()):
+            installed.append(real_install(hosts))
+            return installed[-1]
+        with mock.patch.object(netguard, "install", spy):
+            self.assertEqual(self.run_e2e(), 0)
+        smoke_guard, loop_guard = installed
+        for guard in installed:
+            self.assertNotIn("phl.api.fastmail.com", guard.allowed)
+            self.assertEqual(guard.admitted, {"phl.api.fastmail.com"})
+            self.assertEqual(guard.refused(), [])
+        fastmail = [(a["host"], a["port"]) for a in smoke_guard.attempts
+                    if a["call"] == "create_connection" and a["host"] != "127.0.0.1"]
+        self.assertEqual(fastmail[0], ("api.fastmail.com", 443))
+        self.assertEqual(set(fastmail), {("api.fastmail.com", 443), ("phl.api.fastmail.com", 443)})
+        self.assertEqual(self.wolf.kinds().count("send"), 1)                 # his request went
+        self.assertIn("find", self.wolf.kinds())                            # and his looks for her reply
+        self.assertEqual(self.jmap.kinds().count("send"), 2)                 # the smoke's test message, her reply
+
+    def test_a_session_naming_a_host_outside_api_fastmail_com_fails_its_step_and_allows_nothing(self):
+        self.jmap.as_fastmail("https://evil-api.fastmail.com.attacker")
+        installed = []
+        real_install = netguard.install
+
+        def spy(hosts=()):
+            installed.append(real_install(hosts))
+            return installed[-1]
+        with mock.patch.object(netguard, "install", spy):
+            self.assertEqual(self.run_smoke(), 1)
+        self.assertEqual(self.result("jmap session, nothing sent"),
+                         "MailError (jmap session: apiUrl is not on api.fastmail.com or a host below it, "
+                         "over the session's own scheme and port)")
+        (guard,) = installed
+        self.assertEqual(guard.admitted, set())
+        self.assertEqual(set(self.jmap.kinds()), {"session"})
 
 
 class SmokeTraceTest(SmokeFixture):

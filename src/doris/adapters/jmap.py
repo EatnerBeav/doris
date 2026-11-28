@@ -6,16 +6,20 @@ IMAP and the calendar stays CalDAV (adapters/live.py, whose LiveMail sends throu
 The key: an API token for her own Fastmail account, DORIS_JMAP_TOKEN, scoped "Email" and
 "Email submission" (Fastmail's JMAP takes a Bearer token only; an app password gets 401). It is
 held like live.py's password: never in a repr, an error or a log, and sent only to the session's
-own host. A token with a space, a control or a non-ASCII character in it, or one too short to be
-an API token (MIN_TOKEN_CHARS), is refused before anything connects, naming the setting only.
+host and to the host the session names for apiUrl and uploadUrl once checked (step 1). A token
+with a space, a control or a non-ASCII character in it, or one too short to be an API token
+(MIN_TOKEN_CHARS), is refused before anything connects, naming the setting only.
 The session must be for the account the address setting names (its username), so a token for
 another account never sends as her. The smoke builds a second sender for the wolf.whizz test
 account from its own two settings (address_name, token_name); her loop never reads them.
 
 A send is four requests, each on a connection of its own with the timeout given:
-1. GET the session. It must offer core, mail and submission, name one account for both mail and
-   submission, and put apiUrl and uploadUrl on the session's own scheme, host and port
-   (https://api.fastmail.com). Anything else is refused before another byte goes.
+1. GET the session (https://api.fastmail.com/jmap/session). It must offer core, mail and
+   submission, name one account for both mail and submission, and put apiUrl and uploadUrl on
+   https, port 443 (or none), on api.fastmail.com or a host below it at a label boundary:
+   Fastmail's real session names the account's own host, such as https://phl.api.fastmail.com,
+   and can move the account, so no one regional name is pinned. Anything else is refused before
+   another byte goes. Requests 2 to 4 go to the host and port apiUrl and uploadUrl name.
 2. Mailbox/get and Identity/get in one request: her Drafts and Sent mailboxes by role and the
    identity whose email is hers.
 3. Upload the message, unchanged, as message/rfc822; the server must count its exact size.
@@ -43,9 +47,12 @@ The rules every send of hers keeps:
 find_message reads mail back (Email/query on the Message-ID header, then Email/get): the smoke's
 look for her reply in the wolf.whizz account. It sends and changes nothing.
 
-Host: api.fastmail.com, Fastmail's JMAP session resource (https://api.fastmail.com/jmap/session).
-hosts() names it for the run's network guard. Every connection verifies the server certificate,
-TLS 1.2 or newer.
+Hosts: api.fastmail.com, Fastmail's JMAP session resource (https://api.fastmail.com/jmap/session),
+which hosts() names for the run's network guard; then the host the session names for apiUrl and
+uploadUrl, which the guard cannot know before the session is read: once the session passed the
+check above, the sender tells the guard of it (netguard.admit, which takes only a name below
+api.fastmail.com, on the guards that allow api.fastmail.com). Every connection verifies the server
+certificate, TLS 1.2 or newer.
 """
 
 import collections
@@ -58,7 +65,7 @@ import re
 import ssl
 import urllib.parse
 
-from .. import caps, ics
+from .. import caps, ics, netguard
 from ..shapes import MailError, SendUnknown
 
 # --- the env names this module reads (values live only in the server's .env) -------------------
@@ -94,6 +101,7 @@ _TOKEN = re.compile(r"^[!-~]+\Z")                   # visible ASCII: no space, c
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,255}\Z")        # a JMAP Id (RFC 8620 1.2)
 _ERROR_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,63}\Z")      # a JMAP error type is a plain name
 _URL_PATH = re.compile(r"^/[A-Za-z0-9._~%!$&'()*+,;=:@/-]*\Z")  # RFC 3986 path characters
+_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")  # one DNS label (RFC 1123), as urlsplit lowercases it
 _HTTP_FAILURES = (http.client.HTTPException, OSError, ValueError)
 
 
@@ -118,7 +126,8 @@ class _Secret(object):
 
 
 def hosts() -> list:
-    """The one host the sender connects to. The run's network guard allows it."""
+    """The host the sender connects to first, for its session. The run's network guard allows it;
+    the host the session names is added to the guard once checked (netguard.admit)."""
     return [HOST]
 
 
@@ -161,9 +170,20 @@ def _timeout(value):
     return float(value)
 
 
-def _origin(url, allowed_host):
-    """(scheme, host, port, path) of an absolute http(s) URL on allowed_host with a plain path and
-    no user, query or fragment; None for anything else."""
+def _on_host(host, allowed_host, below):
+    """host is allowed_host itself, or (below) a DNS name below it at a label boundary: whole labels,
+    then "." and allowed_host ("phl.api.fastmail.com"; never "xapi.fastmail.com",
+    "api.fastmail.com.example", ".api.fastmail.com" or a name with a final dot)."""
+    if host == allowed_host:
+        return True
+    if not below or not host.endswith("." + allowed_host):
+        return False
+    return all(_LABEL.match(label) for label in host[:-len(allowed_host) - 1].split("."))
+
+
+def _origin(url, allowed_host, below=False):
+    """(scheme, host, port, path) of an absolute http(s) URL on allowed_host (or, with below, a host
+    below it) with a plain path and no user, query or fragment; None for anything else."""
     if not isinstance(url, str):
         return None
     try:
@@ -174,9 +194,12 @@ def _origin(url, allowed_host):
     scheme = parts.scheme.lower()
     if scheme not in ("https", "http") or "@" in parts.netloc or parts.query or parts.fragment:
         return None
-    if url.endswith(("?", "#")) or not host or host.lower() != allowed_host or not _URL_PATH.match(parts.path):
+    if url.endswith(("?", "#")) or not host or not _URL_PATH.match(parts.path):
         return None
-    return scheme, host.lower(), port or (443 if scheme == "https" else 80), parts.path
+    host = host.lower()
+    if not _on_host(host, allowed_host, below):
+        return None
+    return scheme, host, (443 if scheme == "https" else 80) if port is None else port, parts.path
 
 
 # ------------------------------------------------------------------------------------------------
@@ -381,7 +404,7 @@ def _moved(responses, call_id, email_id):
     return False
 
 
-_Account = collections.namedtuple("_Account", "id api_path upload_path drafts sent identity")
+_Account = collections.namedtuple("_Account", "id api upload drafts sent identity")   # api, upload: (host, port, path)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -395,8 +418,10 @@ class JmapSender(object):
 
     http_factory(host, port, timeout) makes each connection (default: HTTPS that verifies the
     certificate). session_url must be on allowed_host; apiUrl and uploadUrl must then be on the
-    session URL's own scheme, host and port. A plain-http session URL is taken only with a
-    factory of the caller's (a test's fake server), never with the default TLS transport."""
+    session URL's own scheme and port, on allowed_host or a host below it, and each request after
+    the session goes to the host and port they name. A plain-http session URL, or one on a port
+    other than 443, is taken only with a factory of the caller's (a test's fake server), never with
+    the default TLS transport."""
 
     def __init__(self, env, from_addr, timeout_s=caps.MAIL_TIMEOUT_S, http_factory=None,
                  session_url=SESSION_URL, allowed_host=HOST, address_name=ENV_ADDRESS, token_name=ENV_TOKEN):
@@ -411,19 +436,20 @@ class JmapSender(object):
         origin = _origin(session_url, self.allowed_host)
         if origin is None:
             raise ConfigError("the session URL must be a plain URL on %s" % self.allowed_host)
-        if origin[0] != "https" and http_factory is None:
-            raise ConfigError("the session URL must be https")
+        if (origin[0] != "https" or origin[2] != 443) and http_factory is None:
+            raise ConfigError("the session URL must be https, on port 443")
         self._origin = origin[:3]
         self._session_path = origin[3]
         self._http_factory = http_factory or _https
         self.last_copy_in_sent = None   # after a send that went: True in Sent, False maybe still in Drafts
 
     # -- one request -------------------------------------------------------------------------------
-    def _request(self, step, method, path, body=None, content_type=None, after=MailError):
-        """(status, answer bytes) for one request on a connection of its own. Until the request
+    def _request(self, step, method, where, body=None, content_type=None, after=MailError):
+        """(status, answer bytes) for one request on a connection of its own to where, a (host,
+        port, path): the session's, or one the session named and _named checked. Until the request
         has gone in full, a failure is a MailError; once it has, a failure to read the answer is
         an `after` (SendUnknown for the send itself)."""
-        _, host, port = self._origin
+        host, port, path = where
         headers = {"Authorization": self._auth.reveal(), "Accept": "application/json"}
         if content_type:
             headers["Content-Type"] = content_type
@@ -451,11 +477,12 @@ class JmapSender(object):
         finally:
             _quietly(conn.close)
 
-    def _api(self, step, api_path, calls, after=MailError):
-        """The method responses to one API request (RFC 8620 3.3). A 4xx is a request the server
-        turned away (MailError); any other status, or an answer it cannot read, is an `after`."""
+    def _api(self, step, api, calls, after=MailError):
+        """The method responses to one API request (RFC 8620 3.3) to api, the (host, port, path) of
+        apiUrl. A 4xx is a request the server turned away (MailError); any other status, or an
+        answer it cannot read, is an `after`."""
         body = json.dumps({"using": USING, "methodCalls": calls}).encode("utf-8")
-        status, data = self._request(step, "POST", api_path, body, "application/json", after)
+        status, data = self._request(step, "POST", api, body, "application/json", after)
         if status != 200:
             raise _failure(MailError if 400 <= status < 500 else after, step, status=status)
         answer = _json(data)
@@ -465,19 +492,24 @@ class JmapSender(object):
         return responses
 
     # -- steps 1 and 2: the session, her mailboxes and her identity --------------------------------
-    def _own_path(self, url, name, step):
-        """The path of a URL from the session, which must be on the session's own scheme, host
-        and port: the token goes nowhere else."""
-        origin = _origin(url, self.allowed_host)
-        if origin is None or origin[:3] != self._origin:
-            raise _failure(MailError, step, detail="%s is not on the session's own host" % name)
-        return origin[3]
+    def _named(self, url, name, step):
+        """(host, port, path) of a URL the session names, which must be on the session's own scheme
+        and port (https and 443 for Fastmail's), on its host or a host below it at a label boundary:
+        Fastmail names the account's own, such as phl.api.fastmail.com. The token goes nowhere else."""
+        origin = _origin(url, self.allowed_host, below=True)
+        scheme, _, port = self._origin
+        if origin is None or origin[0] != scheme or origin[2] != port:
+            raise _failure(MailError, step, detail="%s is not on %s or a host below it, over the session's own "
+                                                   "scheme and port" % (name, self.allowed_host))
+        return origin[1:]
 
     def _session(self):
-        """(account id, API path, upload path) from the session resource (RFC 8620 2). Its username
-        must be the account's own address: a token for another account sends nothing as this one."""
+        """(account id, apiUrl, uploadUrl) from the session resource (RFC 8620 2), each URL as the
+        (host, port, path) its requests go to. Its username must be the account's own address: a
+        token for another account sends nothing as this one. Once both URLs passed, the run's
+        network guard is told of any host below the session's that they name (netguard.admit)."""
         step = "jmap session"
-        status, data = self._request(step, "GET", self._session_path)
+        status, data = self._request(step, "GET", self._origin[1:] + (self._session_path,))
         if status != 200:
             raise _failure(MailError, step, status=status)
         session = _json(data)
@@ -493,17 +525,19 @@ class JmapSender(object):
         account = primary.get(MAIL) if isinstance(primary, dict) else None
         if not _is_id(account) or primary.get(SUBMISSION) != account:
             raise _failure(MailError, step, detail="mail and submission are not one account")
-        api_path = self._own_path(session.get("apiUrl"), "apiUrl", step)
+        api = self._named(session.get("apiUrl"), "apiUrl", step)
         template = session.get("uploadUrl")
         if not isinstance(template, str) or "{accountId}" not in template:
             raise _failure(MailError, step, detail="uploadUrl has no place for the account")
-        upload_path = self._own_path(template.replace("{accountId}", account), "uploadUrl", step)
-        return account, api_path, upload_path
+        upload = self._named(template.replace("{accountId}", account), "uploadUrl", step)
+        for host in sorted({api[0], upload[0]} - {self.allowed_host}):
+            netguard.admit(host, self.allowed_host)
+        return account, api, upload
 
     def _setup(self):
         """Her account: the session, then her Drafts and Sent mailboxes and her identity in one request."""
-        account, api_path, upload_path = self._session()
-        responses = self._api("jmap setup", api_path, [
+        account, api, upload = self._session()
+        responses = self._api("jmap setup", api, [
             ["Mailbox/get", {"accountId": account, "ids": None, "properties": ["id", "role"]}, "boxes"],
             ["Identity/get", {"accountId": account, "ids": None, "properties": ["id", "email"]}, "who"]])
         boxes = _method(responses, "boxes", "Mailbox/get", "jmap mailboxes")
@@ -515,13 +549,13 @@ class JmapSender(object):
                 and item["email"].strip().lower() == self.from_addr.lower()]
         if not mine or not _is_id(mine[0]):
             raise _failure(MailError, "jmap identity", detail="no identity for the account's address")
-        return _Account(account, api_path, upload_path, drafts, sent, mine[0])
+        return _Account(account, api, upload, drafts, sent, mine[0])
 
     # -- step 3: the upload ------------------------------------------------------------------------
     def _upload(self, account, message):
         """The blob id of the message, uploaded as it is (RFC 8620 6.1)."""
         step = "jmap upload"
-        status, data = self._request(step, "POST", account.upload_path, message, "message/rfc822")
+        status, data = self._request(step, "POST", account.upload, message, "message/rfc822")
         if status not in (200, 201):
             raise _failure(MailError, step, status=status)
         answer = _json(data)
@@ -548,7 +582,7 @@ class JmapSender(object):
                                      "onSuccessUpdateEmail": {"#" + _SUBMIT: {
                                          "mailboxIds/" + account.drafts: None, "mailboxIds/" + account.sent: True,
                                          "keywords/$draft": None}}}, "submit"]]
-        responses = self._api("jmap send", account.api_path, calls, after=SendUnknown)
+        responses = self._api("jmap send", account.api, calls, after=SendUnknown)
         imported, draft = _outcome(responses, "import", "Email/import", _DRAFT)
         submitted, why = _outcome(responses, "submit", "EmailSubmission/set", _SUBMIT)
         email_id = draft.get("id") if imported == "created" and isinstance(draft, dict) else None
@@ -567,7 +601,7 @@ class JmapSender(object):
     def _destroy(self, account, email_id):
         """Remove the draft of a send that did not go. Best effort: never raises."""
         try:
-            self._api("jmap draft cleanup", account.api_path,
+            self._api("jmap draft cleanup", account.api,
                       [["Email/set", {"accountId": account.id, "destroy": [email_id]}, "cleanup"]])
         except Exception:
             pass
@@ -604,8 +638,8 @@ class JmapSender(object):
         target = _norm_mid(message_id) if isinstance(message_id, str) else ""
         if not _MESSAGE_ID.match(target):
             raise _failure(MailError, step, detail="not a Message-ID it can search for")
-        account, api_path, _ = self._session()
-        responses = self._api(step, api_path, [
+        account, api, _ = self._session()
+        responses = self._api(step, api, [
             ["Email/query", {"accountId": account, "filter": {"header": ["Message-ID", target]},
                              "limit": FIND_LIMIT}, "query"],
             ["Email/get", {"accountId": account, "#ids": {"resultOf": "query", "name": "Email/query", "path": "/ids"},

@@ -148,5 +148,68 @@ class RestoreTest(unittest.TestCase):
         self.assertFalse("connect" in socket.socket.__dict__)
 
 
+class AdmitTest(unittest.TestCase):
+    """admit(host, under): a host a service names, checked by the caller, is allowed on every installed
+    guard that allows that service's own host `under` (the JMAP session on api.fastmail.com names
+    apiUrl on phl.api.fastmail.com): only a whole-label name below `under`, never on a guard that
+    does not allow `under`, and only for the life of the guards it was added to."""
+
+    def tearDown(self):
+        while netguard.active() is not None:
+            netguard.active().uninstall()
+
+    def test_a_host_below_an_allowed_one_is_allowed_once_admitted(self):
+        guard = netguard.install(("api.fastmail.com",))
+        self.assertFalse(guard.allows("phl.api.fastmail.com"))
+        self.assertTrue(netguard.admit("phl.api.fastmail.com", "api.fastmail.com"))
+        self.assertTrue(guard.allows("phl.api.fastmail.com"))
+        self.assertTrue(guard.allows("PHL.Api.FastMail.com."))
+        self.assertEqual(guard.allowed, frozenset(["api.fastmail.com"]))      # what it was installed with
+        self.assertEqual(guard.admitted, {"phl.api.fastmail.com"})
+        self.assertTrue(netguard.admit("a.b-2.api.fastmail.com", "API.FastMail.com"))
+
+    def test_only_a_whole_label_name_below_it_is_admitted(self):
+        guard = netguard.install(("api.fastmail.com",))
+        for bad in ("xapi.fastmail.com", "evil-api.fastmail.com.attacker", "api.fastmail.com.attacker",
+                    "phl.api.fastmail.com.attacker", "fastmail.com", "attacker.example", ".api.fastmail.com",
+                    "a..api.fastmail.com", "-a.api.fastmail.com", "a-.api.fastmail.com", "a_b.api.fastmail.com",
+                    "a b.api.fastmail.com", "a%2e.api.fastmail.com", "\u0430.api.fastmail.com", "", None, 7):
+            self.assertFalse(netguard.admit(bad, "api.fastmail.com"), bad)
+        self.assertFalse(netguard.admit("phl.api.fastmail.com", ""))
+        self.assertEqual(guard.admitted, set())
+        self.assertFalse(guard.allows("xapi.fastmail.com"))
+
+    def test_only_a_guard_that_allows_the_service_is_told_and_any_other_still_refuses(self):
+        outer = netguard.install(("api.fastmail.com", "127.0.0.1"))
+        inner = netguard.install(("127.0.0.1",))                # as a traps guard: it allows no Fastmail host
+        self.assertFalse(netguard.admit("phl.api.fastmail.com", "api.fastmail.com"))
+        self.assertTrue(outer.allows("phl.api.fastmail.com"))
+        self.assertFalse(inner.allows("phl.api.fastmail.com"))
+        with self.assertRaises(netguard.NetworkRefused):
+            socket.create_connection(("phl.api.fastmail.com", 443), timeout=1)      # refused before any lookup
+        self.assertFalse(outer.attempts[-1]["allowed"])
+
+    def test_nested_guards_that_both_allow_the_service_are_both_told(self):
+        outer = netguard.install(("api.fastmail.com",))
+        inner = netguard.install(("api.fastmail.com", "api.anthropic.com"))
+        self.assertTrue(netguard.admit("phl.api.fastmail.com", "api.fastmail.com"))
+        self.assertTrue(outer.allows("phl.api.fastmail.com") and inner.allows("phl.api.fastmail.com"))
+
+    def test_an_admitted_host_goes_with_its_guard_and_without_a_guard_nothing_is_admitted(self):
+        self.assertFalse(netguard.admit("phl.api.fastmail.com", "api.fastmail.com"))
+        guard = netguard.install(("api.fastmail.com",))
+        netguard.admit("phl.api.fastmail.com", "api.fastmail.com")
+        guard.uninstall()
+        again = netguard.install(("api.fastmail.com",))
+        self.assertFalse(again.allows("phl.api.fastmail.com"))
+
+    def test_a_host_admitted_by_a_name_it_was_admitted_under_is_not_a_parent_itself(self):
+        """Only what a guard was installed with can be a parent: an admitted host admits nothing below it."""
+        guard = netguard.install(("api.fastmail.com",))
+        netguard.admit("phl.api.fastmail.com", "api.fastmail.com")
+        self.assertFalse(netguard.admit("x.phl.api.fastmail.com", "phl.api.fastmail.com"))
+        self.assertFalse(guard.allows("x.phl.api.fastmail.com"))
+
+
 if __name__ == "__main__":
     unittest.main()

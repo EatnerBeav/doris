@@ -14,9 +14,10 @@ import traceback
 import unittest
 from unittest import mock
 
-from doris import caps, compose, ics
+from doris import caps, compose, ics, netguard
 from doris.adapters import jmap
 from doris.shapes import MailError, SendUnknown
+from tests.unit import fake_jmap
 from tests.unit.fake_jmap import ACCOUNT, CORE, MAIL, SERVER_TEXT, SUBMISSION, TOKEN, FakeJMAP
 from tests.unit.test_live import BID, LINK, SLOT, eml, her_event, u
 
@@ -430,6 +431,168 @@ class SessionTest(JmapFixture):
         started = time.monotonic()
         self.fails()
         self.assertLess(time.monotonic() - started, 1.4)
+
+
+# ===========================================================================================
+# The host the session names (Fastmail's real session: apiUrl and uploadUrl on the account's own
+# host below api.fastmail.com, such as phl.api.fastmail.com, which Fastmail can move)
+# ===========================================================================================
+# Origins no apiUrl or uploadUrl may name: not https, not port 443, or not api.fastmail.com or a
+# whole-label name below it. The token never goes to any of them.
+NOT_FASTMAIL = ("https://evil-api.fastmail.com.attacker", "https://xapi.fastmail.com", "https://api.fastmail.com.attacker",
+                "https://phl.api.fastmail.com.attacker", "https://fastmail.com", "https://attacker.example",
+                "https://.api.fastmail.com", "https://phl..api.fastmail.com", "https://phl.api.fastmail.com.",
+                "https://-phl.api.fastmail.com", "https://phl-.api.fastmail.com", "https://ph_l.api.fastmail.com",
+                "https://phl%2Eapi.fastmail.com", "https://127.0.0.1", "https://[::1]",
+                "http://phl.api.fastmail.com", "http://api.fastmail.com", "https://phl.api.fastmail.com:8443",
+                "https://phl.api.fastmail.com:80", "https://api.fastmail.com:444", "https://phl.api.fastmail.com:0",
+                "https://user@phl.api.fastmail.com", "https://user:pw@phl.api.fastmail.com")
+
+
+class SessionHostTest(unittest.TestCase):
+    """The real session URL (on api.fastmail.com) and a transport that dials the fake whatever the
+    host, recording the host and port asked for: the session names apiUrl and uploadUrl as
+    Fastmail's does (fake_jmap.as_fastmail). Taken only over https, on port 443 (or none), on
+    api.fastmail.com or a host below it at a label boundary; anything else is refused before the
+    token goes anywhere but the session."""
+
+    def setUp(self):
+        self.jmap = FakeJMAP().as_fastmail()
+        self.addCleanup(self.jmap.stop)
+        self.dialed = []
+        self.sender = jmap.JmapSender(env(), DORIS, timeout_s=2.0, http_factory=self.factory)
+
+    def factory(self, host, port, timeout):
+        self.dialed.append((host, port))
+        return http.client.HTTPConnection("127.0.0.1", self.jmap.port, timeout=timeout)
+
+    def test_the_session_on_api_fastmail_com_names_the_accounts_own_host_and_the_rest_goes_there(self):
+        self.assertIsNone(self.sender.send(reply_bytes(), [PROSPECT], MID))
+        self.assertEqual(self.jmap.kinds(), ["session", "setup", "upload", "send"])
+        self.assertEqual(self.dialed, [("api.fastmail.com", 443)] + [("phl.api.fastmail.com", 443)] * 3)
+        self.assertEqual(self.jmap.delivered, [(DORIS, [PROSPECT], reply_bytes())])
+        self.assertEqual(self.sender.find_message(MID), ["sent"])
+        self.assertEqual(self.dialed[4:], [("api.fastmail.com", 443), ("phl.api.fastmail.com", 443)])
+
+    def test_everything_after_the_session_lands_on_the_host_it_names(self):
+        """Two servers, as at Fastmail: the session's own on api.fastmail.com, and the account's own
+        on phl.api.fastmail.com, which holds her mailboxes. Nothing after the session goes to the first."""
+        regional = FakeJMAP()
+        self.addCleanup(regional.stop)
+        ports = {"api.fastmail.com": self.jmap.port, "phl.api.fastmail.com": regional.port}
+
+        def by_host(host, port, timeout):
+            self.dialed.append((host, port))
+            return http.client.HTTPConnection("127.0.0.1", ports[host], timeout=timeout)
+        sender = jmap.JmapSender(env(), DORIS, timeout_s=2.0, http_factory=by_host)
+        self.assertIsNone(sender.send(reply_bytes(), [PROSPECT], MID))
+        self.assertEqual(self.jmap.kinds(), ["session"])
+        self.assertEqual(regional.kinds(), ["setup", "upload", "send"])
+        self.assertEqual((self.jmap.delivered, regional.delivered), ([], [(DORIS, [PROSPECT], reply_bytes())]))
+        self.assertEqual(sender.find_message(MID), ["sent"])
+        self.assertEqual((self.jmap.kinds(), regional.kinds()[-1]), (["session", "session"], "find"))
+
+    def test_api_url_on_api_fastmail_com_itself_is_taken_too(self):
+        self.jmap.as_fastmail(fake_jmap.SESSION_HOST)
+        self.assertIsNone(self.sender.send(reply_bytes(), [PROSPECT], MID))
+        self.assertEqual(self.dialed, [("api.fastmail.com", 443)] * 4)
+
+    def test_any_host_below_api_fastmail_com_on_port_443_or_none_is_taken(self):
+        for origin, host in (("https://phl.api.fastmail.com:443", "phl.api.fastmail.com"),
+                             ("https://nyc1.api.fastmail.com", "nyc1.api.fastmail.com"),
+                             ("https://a.b-2.api.fastmail.com", "a.b-2.api.fastmail.com"),
+                             ("https://PHL.Api.FastMail.com", "phl.api.fastmail.com")):
+            del self.dialed[:]
+            self.jmap.as_fastmail(origin)
+            self.assertIsNone(self.sender.check_login(), origin)
+            self.assertEqual(self.dialed, [("api.fastmail.com", 443), (host, 443)], origin)
+
+    def test_an_api_url_not_on_https_443_below_api_fastmail_com_is_refused_and_never_dialled(self):
+        for origin in NOT_FASTMAIL:
+            self.jmap.as_fastmail(origin)
+            self.jmap.upload_url = fake_jmap.FASTMAIL + "/jmap/upload/{accountId}/"
+            with self.assertRaises(MailError, msg=origin) as cm:
+                self.sender.send(reply_bytes(), [PROSPECT], MID)
+            self.assertNotIsInstance(cm.exception, SendUnknown)
+            self.assertIn("apiUrl", str(cm.exception), origin)
+            secret_free(self, cm.exception)
+        self.assertEqual(set(self.dialed), {("api.fastmail.com", 443)})    # the session alone: the token went nowhere else
+        self.assertEqual(set(self.jmap.kinds()), {"session"})
+        self.assertEqual(self.jmap.uploads, [])
+
+    def test_an_upload_url_not_on_https_443_below_api_fastmail_com_is_refused_and_never_dialled(self):
+        for origin in NOT_FASTMAIL:
+            self.jmap.upload_url = origin + "/jmap/upload/{accountId}/"
+            with self.assertRaises(MailError, msg=origin) as cm:
+                self.sender.send(reply_bytes(), [PROSPECT], MID)
+            self.assertIn("uploadUrl", str(cm.exception), origin)
+            secret_free(self, cm.exception)
+        self.assertEqual(set(self.dialed), {("api.fastmail.com", 443)})
+        self.assertEqual(set(self.jmap.kinds()), {"session"})
+        self.assertEqual(self.jmap.uploads, [])
+
+    def test_the_session_url_itself_must_be_on_port_443_with_the_default_transport(self):
+        with self.assertRaises(jmap.ConfigError):
+            jmap.JmapSender(env(), DORIS, session_url="https://api.fastmail.com:8443/jmap/session")
+
+
+class SessionHostGuardTest(unittest.TestCase):
+    """Under a run's network guard, which allows api.fastmail.com (as live.hosts names it) and not
+    the host the session names: that host is allowed only once the sender checked the session, and
+    every connection meets the guard by the host's own name and port (fake_jmap.dialling: only the
+    name lookup below the guard is the test's)."""
+
+    def setUp(self):
+        self.jmap = FakeJMAP().as_fastmail()
+        self.addCleanup(self.jmap.stop)
+        patches = fake_jmap.dialling(self.jmap)
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.dns = patches[0].new
+        self.guard = netguard.install(["api.fastmail.com"])
+        self.addCleanup(self.guard.uninstall)
+        self.sender = jmap.JmapSender(env(), DORIS, timeout_s=2.0)        # the default transport (patched)
+
+    def dialled(self):
+        return [(a["host"], a["port"], a["allowed"]) for a in self.guard.attempts if a["call"] == "create_connection"]
+
+    def test_the_named_host_is_allowed_only_once_the_session_passed_then_reached_by_its_name(self):
+        self.assertFalse(self.guard.allows("phl.api.fastmail.com"))
+        self.assertIsNone(self.sender.send(reply_bytes(), [PROSPECT], MID))
+        self.assertTrue(self.guard.allows("phl.api.fastmail.com"))
+        self.assertEqual(self.dialled(), [("api.fastmail.com", 443, True)] + [("phl.api.fastmail.com", 443, True)] * 3)
+        self.assertEqual(self.guard.refused_count(), 0)
+        self.assertEqual(len(self.jmap.delivered), 1)
+
+    def test_a_host_the_check_refuses_is_never_allowed_or_dialled(self):
+        for origin in ("https://xapi.fastmail.com", "https://evil-api.fastmail.com.attacker",
+                       "https://phl.api.fastmail.com:8443", "http://phl.api.fastmail.com"):
+            self.jmap.as_fastmail(origin)
+            with self.assertRaises(MailError, msg=origin):
+                self.sender.check_login()
+        self.assertEqual(self.guard.admitted, set())
+        self.assertEqual(set(self.dialled()), {("api.fastmail.com", 443, True)})
+        self.assertEqual(set(self.jmap.kinds()), {"session"})
+
+    def test_the_requests_land_on_the_named_host_by_its_own_name_through_the_guard(self):
+        """The session's server and the account's own, each behind its own name (Dns, below the guard)."""
+        regional = FakeJMAP()
+        self.addCleanup(regional.stop)
+        self.dns.ports["phl.api.fastmail.com"] = regional.port
+        self.assertIsNone(self.sender.send(reply_bytes(), [PROSPECT], MID))
+        self.assertEqual(self.jmap.kinds(), ["session"])
+        self.assertEqual(regional.kinds(), ["setup", "upload", "send"])
+        self.assertEqual(self.dialled(), [("api.fastmail.com", 443, True)] + [("phl.api.fastmail.com", 443, True)] * 3)
+
+    def test_a_guard_never_told_of_the_named_host_refuses_it(self):
+        """The check alone is not enough to connect: a guard that was not told of the host refuses it."""
+        with mock.patch.object(netguard, "admit", lambda host, under: False):
+            with self.assertRaises(MailError) as cm:
+                self.sender.check_login()
+        self.assertIn("NetworkRefused", str(cm.exception))
+        self.assertEqual(self.dialled()[-1], ("phl.api.fastmail.com", 443, False))
+        self.assertEqual(self.jmap.kinds(), ["session"])
 
 
 class SetupTest(JmapFixture):

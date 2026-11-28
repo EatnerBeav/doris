@@ -11,10 +11,10 @@ Usage: python -m doris smoke [--env PATH] [--send-to ADDRESS]
 Each step prints one plain line: its name, then ok (with a count where it counts something), or
 the failure's class name with the adapter's own text, which carries a step, a status code or an
 exception's class name and never a value. No line names an address, a password, a folder, a
-calendar or an event, with two exceptions: one line shows the calendar's display name as the
-server reports it (so a person can see which calendar the URL names; see _shown), and when the
-test event may still be on the calendar, a line names its booking ID (a fixed one,
-SMOKE_BOOKING_ID) so a person can find it.
+calendar or an event, with one exception: when the test event may still be on the calendar, a
+line names its booking ID (a fixed one, SMOKE_BOOKING_ID) so a person can find it. The calendar's
+display name is read and never shown (it can be the owner's full name, and every line goes to a
+trace kept in a public repo): its line says only "ok (name read)".
 
 Steps, in order; each runs whatever the one before it did:
   imap login and inbox count                 LiveMail.inbox_count (read-only)
@@ -27,7 +27,7 @@ Steps, in order; each runs whatever the one before it did:
                                              the fetch found none (or failed), a line says it did not run
   jmap session, nothing sent                 LiveMail.check_send_login: her JMAP session (the token,
                                              its scopes, her account), mailboxes and identity
-  caldav calendar display name               LiveCalendar.display_name, shown as the server reports it
+  caldav calendar display name               LiveCalendar.display_name: the calendar has one; never shown
   caldav query, next 7 days                  LiveCalendar.query, counted
   caldav test event left by an earlier run   a test event an earlier smoke left (cut short, or its
                                              delete failed) is deleted first
@@ -80,8 +80,10 @@ timeline.txt and terminal.log (every line printed); its last line names the fold
 only when every step ran and passed.
 
 Every connection goes through the network guard, allowing only live.hosts(env) (and, for the
-end-to-end test, the model's: loop.model_hosts()), so a host the adapters reach without naming it
-fails the smoke. A smoke is a live run's peer: it refuses to
+end-to-end test, the model's: loop.model_hosts()), and the host a JMAP session names for apiUrl
+and uploadUrl once the sender checked it (jmap: below api.fastmail.com, https, port 443), for her
+sender and wolf's alike, so a host the adapters reach without naming it fails the smoke. A smoke
+is a live run's peer: it refuses to
 start while a halt is in force for live (HALT, or a STOP file) and holds the live ledger lock
 (state/live/ledger.lock) from before its first connection to after its last, so it never runs
 beside a live run and no live run starts while it runs.
@@ -132,7 +134,6 @@ SMOKE_BOOKING_ID = "doris-smoke-test"
 CLEANUP_TRIES = 3                                # the test event's delete, a short wait apart
 CLEANUP_WAIT_S = caps.CALENDAR_RETRY_WAIT_S
 SENT_LOOK_WAIT_S = caps.SENT_LOOK_WAIT_S         # between the two looks in Sent, as a live run waits
-DISPLAY_NAME_MAX = 120                           # characters of the calendar's display name a line shows
 SEND_NOT_RUN = "jmap send one test message, then its copy in Sent"   # its line when there is no --send-to
 TEST_TEXT = "A test message from Doris's live smoke check. Nothing to do and nothing to answer."
 
@@ -235,7 +236,7 @@ def check(mail, calendar, out, send_to=None, now=None, record=None, e2e=None, e2
         passed.append(_step(out, FILE_STEP, lambda: mail.file(newest.server_id, FILE_KEYWORD)))
     passed += [
         _step(out, "jmap session, nothing sent", mail.check_send_login),
-        _step(out, "caldav calendar display name", lambda: '"%s"' % _shown(calendar.display_name())),
+        _step(out, "caldav calendar display name", lambda: _name_read(calendar.display_name())),
         _step(out, "caldav query, next 7 days", lambda: _query(calendar, now)),
     ]
     passed += _calendar_round_trip(calendar, out, now)
@@ -257,13 +258,10 @@ def check(mail, calendar, out, send_to=None, now=None, record=None, e2e=None, e2
     return all(passed) and not out.failed, list(out.not_run)
 
 
-def _shown(text):
-    """A server's text as part of one printable line: as it came, but cut to DISPLAY_NAME_MAX
-    characters, and each character that is not printable (a line end, a tab, a control, a
-    direction mark that would turn the text around) written as its escape, e.g. \\n or \\u202e."""
-    cut = text[:DISPLAY_NAME_MAX]
-    shown = "".join(ch if ch.isprintable() else ascii(ch)[1:-1] for ch in cut)
-    return shown + ("..." if len(text) > DISPLAY_NAME_MAX else "")
+def _name_read(name):
+    """The display name step's note: that the calendar has a name (display_name raises when it has
+    none), never the name, which can be the owner's full name and would reach a public trace."""
+    return "name read"
 
 
 def _query(calendar, now):

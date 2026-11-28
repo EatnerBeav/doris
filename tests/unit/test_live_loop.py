@@ -31,6 +31,7 @@ from doris import caps, compose, envfile, ledger as ledger_mod
 from doris import loop, model as model_mod, netguard, paths, receipts, sentrecord, smoke, supervisor, templates
 from doris.adapters import jmap, live
 from doris.shapes import MailError, SendUnknown
+from tests.unit import fake_jmap
 from tests.unit.fake_jmap import TOKEN, FakeJMAP
 from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, u
 
@@ -181,8 +182,7 @@ class LiveFixture(EnvFolder):
         for patch in (
                 mock.patch.object(live, "_imap_tls", lambda host, port, timeout: imaplib.IMAP4(
                     "127.0.0.1", self.imap.port, timeout=timeout)),
-                mock.patch.object(jmap, "_https", lambda host, port, timeout: http.client.HTTPConnection(
-                    "127.0.0.1", self.jmap.port, timeout=timeout)),
+                *fake_jmap.dialling(self.jmap),          # her sends meet the guard under Fastmail's own host names
                 mock.patch.object(live, "_https", lambda host, port, timeout: http.client.HTTPConnection(
                     "127.0.0.1", self.dav.port, timeout=timeout)),
                 mock.patch.object(model_mod, "_urllib_post", self.post),
@@ -413,6 +413,52 @@ class LiveRunTest(LiveFixture):
         self.assertEqual(installed, [("127.0.0.1", "api.fastmail.com")] * 2
                          + [("127.0.0.1", "api.fastmail.com", "api.anthropic.com")])
         self.assertIsNone(netguard.active())
+
+
+class SessionHostTest(LiveFixture):
+    """Fastmail's real session names apiUrl and uploadUrl on the account's own host below
+    api.fastmail.com (phl.api.fastmail.com), which it can move: her guard, installed with the env
+    file's hosts, allows that host only once her sender checked the session (https, port 443,
+    api.fastmail.com or a name below it), and her sends reach it under its own name through her guard."""
+
+    def guards(self):
+        installed = []
+        real_install = netguard.install
+
+        def spy(hosts=()):
+            installed.append(real_install(hosts))
+            return installed[-1]
+        patch = mock.patch.object(netguard, "install", spy)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return installed
+
+    @staticmethod
+    def dialled(guard):
+        return [(a["host"], a["port"], a["allowed"]) for a in guard.attempts
+                if a["call"] == "create_connection" and a["host"] != "127.0.0.1"]
+
+    def test_her_send_reaches_the_host_the_session_names_through_her_guard_once_checked(self):
+        installed = self.guards()
+        s = self.started_fresh_then_asked()
+        self.assertEqual((s.handled, len(self.jmap.delivered)), (1, 1))
+        guard = installed[-1]
+        self.assertNotIn("phl.api.fastmail.com", guard.allowed)              # never allowed up front
+        self.assertEqual(guard.admitted, {"phl.api.fastmail.com"})
+        dialled = self.dialled(guard)
+        self.assertEqual(dialled[:4], [("api.fastmail.com", 443, True)] + [("phl.api.fastmail.com", 443, True)] * 3)
+        self.assertEqual(set(dialled), {("api.fastmail.com", 443, True), ("phl.api.fastmail.com", 443, True)})
+        self.assertEqual(guard.refused_count(), 0)
+
+    def test_a_session_naming_a_host_outside_api_fastmail_com_sends_nothing_and_allows_nothing(self):
+        installed = self.guards()
+        self.jmap.as_fastmail("https://xapi.fastmail.com")
+        self.started_fresh_then_asked()
+        self.assertEqual(self.jmap.delivered, [])
+        self.assertEqual(set(self.jmap.kinds()), {"session"})
+        guard = installed[-1]
+        self.assertEqual(guard.admitted, set())
+        self.assertEqual(set(self.dialled(guard)), {("api.fastmail.com", 443, True)})
 
 
 # ===========================================================================================

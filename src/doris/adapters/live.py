@@ -24,8 +24,9 @@ Every rule of adapters/base.py holds here:
 
 Hosts (Fastmail's own help pages, read Nov 27 2026: "Server names and ports",
 fastmail.help/hc/en-us/articles/1500000278342): IMAP imap.fastmail.com:993 (SSL/TLS), JMAP
-https://api.fastmail.com/jmap/session (jmap.HOST), CalDAV https://caldav.fastmail.com/.
-hosts(env) names exactly the hosts these adapters connect to, for the run's network guard.
+https://api.fastmail.com/jmap/session (jmap.HOST; its session names the account's own API host
+below it, such as phl.api.fastmail.com), CalDAV https://caldav.fastmail.com/. hosts(env) names the
+hosts these adapters connect to first, for the run's network guard.
 """
 
 import base64
@@ -191,9 +192,10 @@ def _timeout(value):
 
 
 def hosts(env) -> list:
-    """Every host the two adapters connect to, each once: her IMAP server, the JMAP host her sends
-    go to (jmap.HOST) and the calendar URL's host. The run's network guard allows these and
-    nothing else."""
+    """Every host the two adapters connect to first, each once: her IMAP server, her JMAP session's
+    host (jmap.HOST) and the calendar URL's host. The run's network guard allows these, then the
+    host her JMAP session names for apiUrl and uploadUrl once her sender checked it (jmap,
+    netguard.admit), and nothing else."""
     found = []
     for host in (_host(env, ENV_IMAP_HOST, DEFAULT_IMAP_HOST), jmap.HOST, _caldav(env)[0]):
         if host not in found:

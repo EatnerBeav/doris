@@ -31,7 +31,7 @@ from doris.adapters import live
 from doris.adapters.base import CalendarAdapter, MailAdapter
 from doris.shapes import (AlreadyExists, CalendarError, CalendarTimeout, Event, InboundItem, MailError, NotHers,
                           SendUnknown, Slot)
-from tests.unit.fake_jmap import TOKEN, FakeJMAP
+from tests.unit.fake_jmap import SESSION_HOST, TOKEN, FakeJMAP
 
 UTC = dt.timezone.utc
 DORIS = "doris.htm@fastmail.com"
@@ -1041,8 +1041,9 @@ def reply_bytes(mid=MID, sender=DORIS, extra=b""):
 
 
 class JmapSendFixture(unittest.TestCase):
-    """LiveMail with its JMAP transport dialing fake_jmap's server: the real session URL, so every
-    URL the session names is on api.fastmail.com, as Fastmail's are."""
+    """LiveMail with its JMAP transport dialing fake_jmap's server: the real session URL on
+    api.fastmail.com, whose session names apiUrl and uploadUrl on the account's own host below it
+    (phl.api.fastmail.com), as Fastmail's does."""
 
     def setUp(self):
         self.jmap = FakeJMAP().as_fastmail()
@@ -1074,8 +1075,13 @@ class SendTest(JmapSendFixture):
         self.assertIsNone(self.mail.send(reply_bytes(), [PROSPECT, OWNER], MID, template="T2"))
         self.assertEqual(self.jmap.delivered, [(DORIS, [PROSPECT, OWNER], reply_bytes())])
         self.assertEqual(self.jmap.kinds(), ["session", "setup", "upload", "send"])
-        self.assertEqual(self.dialed, [("api.fastmail.com", 443, 2.0)] * 4)
+        self.assertEqual(self.dialed, [("api.fastmail.com", 443, 2.0)] + [("phl.api.fastmail.com", 443, 2.0)] * 3)
         self.assertIs(self.mail.last_copy_in_sent, True)
+
+    def test_a_session_that_names_api_fastmail_com_itself_sends_there(self):
+        self.jmap.as_fastmail(SESSION_HOST)
+        self.assertIsNone(self.mail.send(reply_bytes(), [PROSPECT], MID))
+        self.assertEqual(self.dialed, [("api.fastmail.com", 443, 2.0)] * 4)
 
     def test_what_the_sender_refuses_reaches_no_server(self):
         for raw, to, mid in ((reply_bytes(extra=b"Bcc: hidden@example.com\r\n"), [PROSPECT], MID),

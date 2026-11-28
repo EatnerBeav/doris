@@ -8,8 +8,16 @@ with a stub or replayed model allow no host at all (invariant I4).
 
 An address the guard cannot read (a Unix socket path, an unknown family) is refused: fail closed.
 Guards nest; a connect goes out only when every installed guard allows it.
+
+`admit(host, under)` allows one more host on every installed guard that allows `under`, for a
+host that service named and the caller checked: Fastmail's JMAP session on api.fastmail.com names
+apiUrl and uploadUrl on the account's own host below it (such as phl.api.fastmail.com, which
+Fastmail can move), so that host cannot be on the list before the session is read. Only a
+whole-label DNS name below `under` is taken, and only a host a guard was installed with can be a
+parent. A guard that does not allow `under` is never told, so it still refuses the host.
 """
 
+import re
 import socket
 import threading
 from typing import Any, Dict, Iterable, List
@@ -17,6 +25,7 @@ from typing import Any, Dict, Iterable, List
 _STACK = []             # installed guards, innermost last; every one must allow a host
 _SAVED = None           # the originals, put back when the last guard is uninstalled
 _LOCK = threading.RLock()
+_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")     # one DNS label (RFC 1123), lowercase
 
 
 class NetworkRefused(ConnectionRefusedError):
@@ -39,6 +48,7 @@ def _split(address):
 class Guard:
     def __init__(self, allowed_hosts):
         self.allowed = frozenset(_norm(h) for h in allowed_hosts)
+        self.admitted = set()        # hosts below an allowed one, each added once a caller checked it (admit)
         self.attempts = []           # type: List[Dict[str, Any]]
         self._resolved = set()       # IP addresses looked up from an allowed name
         self._lock = threading.Lock()
@@ -46,7 +56,7 @@ class Guard:
     # -- queries ------------------------------------------------------------------------
     def allows(self, host):
         h = _norm(host)
-        return h in self.allowed or h in self._resolved
+        return h in self.allowed or h in self.admitted or h in self._resolved
 
     def refused(self):
         return [a for a in self.attempts if not a["allowed"]]
@@ -166,3 +176,32 @@ def active():
     """The innermost installed guard, or None."""
     with _LOCK:
         return _STACK[-1] if _STACK else None
+
+
+def below(host, under):
+    """True when host is a DNS name below `under` at a label boundary: one or more whole labels,
+    then ".", then `under` ("phl.api.fastmail.com" is below "api.fastmail.com"; "xapi.fastmail.com",
+    "api.fastmail.com.example" and ".api.fastmail.com" are not). Case and a final dot do not count."""
+    if not isinstance(host, str) or not isinstance(under, str):
+        return False
+    host, under = _norm(host), _norm(under)
+    if not under or not host.endswith("." + under):
+        return False
+    return all(_LABEL.match(label) for label in host[:-len(under) - 1].split("."))
+
+
+def admit(host, under):
+    """Allow host on every installed guard that was installed allowing `under`, when host is below
+    `under` (below): a host that service named and the caller checked, such as the account's own
+    JMAP host that Fastmail's session on api.fastmail.com names. A guard that does not allow `under`
+    stays as it is, so it still refuses host; what is admitted lasts as long as each guard does.
+    True when every installed guard now allows host; False otherwise (no guard, or one that does
+    not allow `under`, or a host that is not below it, which no guard is told of)."""
+    if not below(host, under):
+        return False
+    name, parent = _norm(host), _norm(under)
+    with _LOCK:
+        for guard in _STACK:
+            if parent in guard.allowed:
+                guard.admitted.add(name)
+        return bool(_STACK) and all(guard.allows(name) for guard in _STACK)
