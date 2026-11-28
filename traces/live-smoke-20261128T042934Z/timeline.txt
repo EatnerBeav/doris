@@ -1,0 +1,19 @@
+2026-11-28T04:29:35Z  imap login and inbox count: ok (0 messages in INBOX)
+2026-11-28T04:29:36Z  sent folder found by its special-use flag: ok (1 folder)
+2026-11-28T04:29:36Z  imap fetch, last 7 days, read-only: ok (0 messages)
+2026-11-28T04:29:36Z  imap file newest INBOX message with the smoke keyword: not run (no INBOX message in the last 7 days)
+2026-11-28T04:29:37Z  jmap session, nothing sent: MailError (jmap session: apiUrl is not on the session's own host)
+2026-11-28T04:29:37Z  caldav calendar display name: ok ("B Shane Bornstein")
+2026-11-28T04:29:37Z  caldav query, next 7 days: ok (6 events)
+2026-11-28T04:29:38Z  caldav test event left by an earlier run: ok (none)
+2026-11-28T04:29:38Z  caldav create test event: ok
+2026-11-28T04:29:38Z  caldav read test event back, times match: ok
+2026-11-28T04:29:39Z  caldav delete test event: ok
+2026-11-28T04:29:39Z  caldav read after delete, gone: ok
+2026-11-28T04:29:39Z  jmap send one test message: MailError (jmap session: apiUrl is not on the session's own host)
+2026-11-28T04:29:40Z  sent copy, look 1 (at once): not found yet
+2026-11-28T04:29:46Z  sent copy, look 2 (after a short wait): not found
+2026-11-28T04:29:46Z  sent copy found: FAILED (not found on either look)
+2026-11-28T04:29:46Z  sent copy record for a live run: not written (the copy was not found)
+2026-11-28T04:29:46Z  end-to-end test from wolf: not run (no sent copy record from this smoke: her loop answers only after a smoke found its copy in Sent)
+2026-11-28T04:29:46Z  smoke: FAILED; not run: imap file newest INBOX message with the smoke keyword (no INBOX message in the last 7 days); end-to-end test from wolf (no sent copy record from this smoke: her loop answers only after a smoke found its copy in Sent)
