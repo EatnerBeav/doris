@@ -16,6 +16,7 @@ Times are rendered from UTC by code (templates.md, ruling 10):
 
 import datetime as _dt
 import html
+import json
 import os
 import re
 import unicodedata
@@ -229,9 +230,33 @@ def _link_pattern(for_bytes):
 
 
 def redact_link(text):
-    """text with every form of the meeting link replaced by "[meeting link]"; not a str: as it is."""
+    """text with every form of the meeting link replaced by "[meeting link]"; and when the link still
+    shows once HTML entities or %-escapes are undone (has_link: https://meet.example/room%2D1), the
+    whole of text is "[meeting link]", since those forms have no edges to cut at. Not a str: as it is."""
     rx = _link_pattern(False) if isinstance(text, str) else None
-    return rx.sub(LINK_SHOWN, text) if rx is not None else text
+    if rx is None:
+        return text
+    out = rx.sub(LINK_SHOWN, text)
+    return LINK_SHOWN if has_link(out) else out
+
+
+def redact_json_text(text):
+    """A model's raw answer (JSON text) as redact_link leaves it, except where that would blank the
+    whole text for a link only an unescaped form shows: then each string in the JSON goes through
+    redact_link instead (redact_values), so the answer keeps its shape and a replay reads the same
+    answer, with only the string that showed the link blanked. Text that is not a JSON object or
+    list, or that still shows the link, is blanked whole."""
+    out = redact_link(text)
+    if out != LINK_SHOWN or not isinstance(text, str) or text == LINK_SHOWN:
+        return out
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        return out
+    if not isinstance(obj, (dict, list)):
+        return out
+    again = json.dumps(redact_values(obj), ensure_ascii=False)
+    return out if has_link(again) else again
 
 
 def redact_values(value):

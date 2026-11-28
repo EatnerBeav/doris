@@ -513,10 +513,11 @@ class Model(object):
         return self._fail(h, "model down after one retry: %s" % (error,))
 
     def _record(self, h, raw, t_in, t_out, cost):
-        """The answer appended for later replay, the run's meeting link in it as "[meeting link]"."""
+        """The answer appended for later replay, the run's meeting link in it as "[meeting link]"
+        (redact_json_text: the answer keeps its shape, so a replay reads the same answer)."""
         if not self.record_path:
             return
-        raw = templates.redact_link(raw)
+        raw = templates.redact_json_text(raw)
         line = json.dumps({"request_sha256": h, "model_id": self.model_id, "raw": raw, "tokens_in": t_in,
                            "tokens_out": t_out, "cost_usd": cost}, sort_keys=True, ensure_ascii=True)
         try:

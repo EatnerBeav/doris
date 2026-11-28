@@ -1,4 +1,5 @@
 """templates.py: the only sentences Doris can send, filled by code from typed slots."""
+import json
 import os
 import unittest
 from unittest import mock
@@ -85,6 +86,37 @@ class RedactLinkTest(Base):
                          (b"Subject: Re: the room\r\n\r\nJoin: [meeting link] now\r\n"
                           b"<a href=3D\"[meeting link]\">here</a>\r\n", 2))
         self.assertEqual(templates.redact_link_bytes(b"no room here"), (b"no room here", 0))
+
+    def test_a_string_that_shows_the_link_only_once_unescaped_is_blanked_whole(self):
+        """Review of 7e1a9fa, item 1: a %-escaped link in a body or a From display name reached receipts
+        and recorded answers, since has_link undoes %-escapes and HTML entities and redact_link did not."""
+        for text in ("Join https://meet.example/redact%2Droom now", "https%3A%2F%2Fmeet.example%2Fredact-room",
+                     "Room &lt;https://meet.example/redact-&#114;oom&gt;", "Priya via meet.example/redact%2droom",
+                     "%s, then https://meet.example/redact%%2Droom" % self.ROOM):
+            with self.subTest(text=text):
+                self.assertEqual(templates.redact_link(text), templates.LINK_SHOWN)
+        self.assertEqual(templates.redact_values({"from_name": "Priya via https://meet.example/redact%2Droom",
+                                                  "n": [1, "meet.example%2Fredact-room"]}),
+                         {"from_name": templates.LINK_SHOWN, "n": [1, templates.LINK_SHOWN]})
+        for text in ("https://meet.example/other%2Droom", "100%25 sure, 50% off", "a &amp; b"):
+            with self.subTest(text=text):
+                self.assertEqual(templates.redact_link(text), text)       # nothing else is blanked
+
+    def test_a_json_answer_loses_only_the_string_that_shows_the_link_once_unescaped(self):
+        """A model's raw answer (a receipt's classified raw, a recorded answer) keeps its shape, so a
+        replay reads the same answer: only the string that shows the link is blanked."""
+        raw = json.dumps({"cls": "meeting_request", "pick": None,
+                          "side_question_quote": "Is https://meet.example/redact%2Droom right?"})
+        out = templates.redact_json_text(raw)
+        self.assertEqual(json.loads(out), {"cls": "meeting_request", "pick": None,
+                                           "side_question_quote": templates.LINK_SHOWN})
+        self.assertFalse(templates.has_link(out))
+        plain = json.dumps({"q": "Is %s right?" % self.ROOM})
+        self.assertEqual(templates.redact_json_text(plain), json.dumps({"q": "Is [meeting link] right?"}))
+        for text in ("not json https://meet.example/redact%2Droom", '{"https://meet.example/redact%2Droom": 1}'):
+            with self.subTest(text=text):
+                self.assertEqual(templates.redact_json_text(text), templates.LINK_SHOWN)
+        self.assertEqual(templates.redact_json_text('{"cls": "fyi"}'), '{"cls": "fyi"}')   # as it came
 
     def test_the_check_finds_the_link_however_a_decoded_part_still_spells_it(self):
         for text in ("see https://meet.example/redact-room", "https%3A%2F%2Fmeet.example%2Fredact-room",

@@ -1062,7 +1062,8 @@ class _Run:
         e.injection_seen = bool(a.injection_seen)
         self.write("classified", {"cls": a.cls, "date": a.date, "time24": a.time24, "zone": a.zone,
                                   "length_min": a.length_min, "pick": a.pick, "injection_seen": a.injection_seen,
-                                  "side_question": a.side_question, "ok": a.ok, "source": a.source, "raw": a.raw},
+                                  "side_question": a.side_question, "ok": a.ok, "source": a.source,
+                                  "raw": templates.redact_json_text(a.raw)},     # keeps its shape: see there
                    subject=e.subject)
         if self.ledger.spend(self.run_id) >= self.cfg.budget_usd:
             supervisor.request_stop(self.mode, "budget_cap", state_dir=self.halt_dir)

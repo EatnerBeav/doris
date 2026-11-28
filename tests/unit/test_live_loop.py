@@ -11,6 +11,7 @@ import datetime as dt
 import email
 import email.policy
 import hashlib
+import html
 import http.client
 import imaplib
 import io
@@ -22,6 +23,7 @@ import sys
 import tempfile
 import traceback
 import unittest
+import urllib.parse
 from unittest import mock
 
 from doris import __main__ as cli
@@ -479,6 +481,32 @@ class MeetingLinkTest(LiveFixture):
         self.assertEqual(seen["copy_redacted"], "meeting_link")
         with open(os.path.join(s.run_dir, seen["message_copy"]), "rb") as fh:
             self.assertEqual(fh.read().count(b"[meeting link]"), 3)
+
+    def test_a_percent_escaped_link_in_the_body_or_the_from_name_reaches_nothing_she_keeps(self):
+        """Review of 7e1a9fa, item 1: https://meet.example/live%2Dloop-room in the body and the From
+        display name reached the observed from_name, the classified raw and the recorded answer."""
+        escaped = LINK.replace("live-loop", "live%2Dloop")
+        self.answer("meeting_request", quote="Is %s the right room?" % escaped)
+        self.go(fresh=True, model_source="live")
+        ask = ("Hi, could Shane do Wednesday, December 2 at 1:00 PM Central for 30 minutes? Is %s the right "
+               "room?\r\n\r\nPriya\r\n" % escaped)
+        mail = priya_mail(1, ask.encode("ascii")).replace(b"From: Priya Raman <",
+                                                          b'From: "Priya via %s" <' % escaped.encode("ascii"))
+        self.inbox.add(mail, u(2026, 12, 1, 16, 2))
+        self.clock = u(2026, 12, 1, 16, 10)
+        answers = os.path.join(self.state, "recorded-answers.jsonl")
+        s = self.go(model_source="live", record_path=answers)
+        self.assertEqual((s.handled, s.verify_ok), (1, True))
+        unescaped = [(name, html.unescape(urllib.parse.unquote_to_bytes(data).decode("latin-1")).encode("latin-1"))
+                     for name, data in self.files()]
+        self.assertEqual([name for name, data in unescaped if room_in(data)], [])
+        (seen,) = self.observed(s).values()
+        self.assertEqual(seen["from_name"], "[meeting link]")
+        (classified,) = [l["payload"] for l in receipts.read_lines(s.receipts_path) if l["kind"] == "classified"]
+        self.assertEqual(json.loads(classified["raw"])["side_question_quote"], "[meeting link]")   # still the answer
+        with open(answers, encoding="utf-8") as fh:
+            recorded = json.loads(json.loads(fh.read())["raw"])
+        self.assertEqual((recorded["cls"], recorded["side_question_quote"]), ("meeting_request", "[meeting link]"))
 
     def test_a_copy_keeps_its_bytes_loses_the_link_or_is_not_kept_when_only_decoding_shows_it(self):
         self.answer("fyi")
