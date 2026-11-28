@@ -614,7 +614,8 @@ class StopMidCall(unittest.TestCase):
                 deadline = time.monotonic() + WAIT_S
                 while time.monotonic() < deadline:
                     snap = state_json(server)
-                    if snap["state"] == "waiting":
+                    # the model's own call waits too, for an instant; the stop is meant for the slow calendar
+                    if snap["state"] == "waiting" and "calendar_query" in snap["panes"][0]["value"]:
                         seen["waiting"] = snap["panes"][0]["value"]
                         break
                     time.sleep(0.05)
