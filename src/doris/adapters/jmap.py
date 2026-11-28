@@ -1,12 +1,16 @@
 """Her sends over Fastmail's JMAP API (RFC 8620 core, RFC 8621 mail and submission), not SMTP.
 
-The droplet blocks outbound SMTP (25, 465, 587) and lets 443 out, so the send moves to HTTPS.
-Reading stays IMAP and the calendar stays CalDAV (adapters/live.py); this module only sends.
+The law: live mail is sent via Fastmail JMAP over HTTPS (DigitalOcean blocks SMTP). Reading stays
+IMAP and the calendar stays CalDAV (adapters/live.py, whose LiveMail sends through this module).
 
 The key: an API token for her own Fastmail account, DORIS_JMAP_TOKEN, scoped "Email" and
 "Email submission" (Fastmail's JMAP takes a Bearer token only; an app password gets 401). It is
 held like live.py's password: never in a repr, an error or a log, and sent only to the session's
-own host.
+own host. A token with a space, a control or a non-ASCII character in it, or one too short to be
+an API token (MIN_TOKEN_CHARS), is refused before anything connects, naming the setting only.
+The session must be for the account the address setting names (its username), so a token for
+another account never sends as her. The smoke builds a second sender for the wolf.whizz test
+account from its own two settings (address_name, token_name); her loop never reads them.
 
 A send is four requests, each on a connection of its own with the timeout given:
 1. GET the session. It must offer core, mail and submission, name one account for both mail and
@@ -31,14 +35,22 @@ The rules of live.py's SMTP send hold here:
   it again. No step is ever retried here.
 - A created submission is a send, even when moving her copy to Sent failed. last_copy_in_sent is
   then False: her copy may sit in Drafts, where a lookup in Sent will not find it.
+- Every part of the message is inline text/plain or her own .ics, as live.py's SMTP send required
+  (review 14): checked before any connection with the rest.
 - Errors carry the step and an HTTP status, a JMAP error type or an exception class name: never a
   header, a body, the token or server text.
 
+find_message reads mail back (Email/query on the Message-ID header, then Email/get): the smoke's
+look for her reply in the wolf.whizz account. It sends and changes nothing.
+
 Host: api.fastmail.com, Fastmail's JMAP session resource (https://api.fastmail.com/jmap/session).
-hosts() names it for the run's network guard. Every connection verifies the server certificate.
+hosts() names it for the run's network guard. Every connection verifies the server certificate,
+TLS 1.2 or newer.
 """
 
 import collections
+import email.parser
+import email.policy
 import email.utils
 import http.client
 import json
@@ -46,12 +58,15 @@ import re
 import ssl
 import urllib.parse
 
-from .. import caps
+from .. import caps, ics
 from ..shapes import MailError, SendUnknown
 
 # --- the env names this module reads (values live only in the server's .env) -------------------
 ENV_ADDRESS = "DORIS_MAIL_ADDRESS"     # her address: the From, the envelope sender, her identity's email
 ENV_TOKEN = "DORIS_JMAP_TOKEN"         # her API token (scopes: Email, Email submission)
+ENV_NAMES = (ENV_ADDRESS, ENV_TOKEN)
+MIN_TOKEN_CHARS = 32                   # Fastmail's API tokens run to about 70 characters; fewer is a paste gone wrong
+MAX_TOKEN_CHARS = 4096
 
 HOST = "api.fastmail.com"
 SESSION_URL = "https://api.fastmail.com/jmap/session"
@@ -62,7 +77,10 @@ SUBMISSION = "urn:ietf:params:jmap:submission"
 USING = [CORE, MAIL, SUBMISSION]
 
 MAX_ANSWER_BYTES = 4 * 1024 * 1024     # a longer answer is one it does not read
+FIND_LIMIT = 50                        # messages one look for a Message-ID reads at most
 _DRAFT, _SUBMIT = "draft", "send"      # creation ids within the one send request
+# Mailbox roles (RFC 8621 2, the IANA registry) a found message's place is named by; any other is "other".
+ROLES = ("all", "archive", "drafts", "flagged", "important", "inbox", "junk", "sent", "subscribed", "trash")
 
 # Every pattern that validates a whole value ends in \Z: in Python, $ also matches before a final
 # newline. _ADDRESS, _MESSAGE_ID and _HEADER_FIELD are live.py's, so both senders refuse alike.
@@ -71,7 +89,8 @@ _ADDRESS = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0
 _MESSAGE_ID = re.compile(r"^[!#-;=?A-\[\]-~]{1,200}@[!#-;=?A-\[\]-~]{1,200}\Z")   # printable, no space " < > @ \
 _HEADER_FIELD = re.compile(rb"([!-9;-~]+)[ \t]*:")  # a field name; RFC 5322's obsolete syntax allows blanks before the colon
 _NEVER_HEADERS = ("bcc", "resent-bcc")             # the owner's copy rides on the envelope, never in a header
-_TOKEN = re.compile(r"^[!-~]{1,4096}\Z")            # visible ASCII: what a header value can carry
+_MIME_HEADERS = ("Content-Type", "Content-Transfer-Encoding", "Content-Disposition")
+_TOKEN = re.compile(r"^[!-~]+\Z")                   # visible ASCII: no space, control or non-ASCII character
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,255}\Z")        # a JMAP Id (RFC 8620 1.2)
 _ERROR_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,63}\Z")      # a JMAP error type is a plain name
 _URL_PATH = re.compile(r"^/[A-Za-z0-9._~%!$&'()*+,;=:@/-]*\Z")  # RFC 3986 path characters
@@ -111,21 +130,28 @@ def _value(env, name):
     return value.strip() if isinstance(value, str) else ""
 
 
-def _address(env):
-    value = _value(env, ENV_ADDRESS)
+def _address(env, name=ENV_ADDRESS):
+    value = _value(env, name)
     if not value:
-        raise ConfigError("%s is not set" % ENV_ADDRESS)
+        raise ConfigError("%s is not set" % name)
     if not _ADDRESS.match(value):
-        raise ConfigError("%s is not one bare email address" % ENV_ADDRESS)
+        raise ConfigError("%s is not one bare email address" % name)
     return value
 
 
-def _bearer(env):
-    value = _value(env, ENV_TOKEN)
-    if not value:
-        raise ConfigError("%s is not set" % ENV_TOKEN)
+def _bearer(env, name=ENV_TOKEN):
+    """The Authorization header value for the token setting `name`, held as a secret. The value is
+    taken as it is, never trimmed: a space at either end is a paste gone wrong, refused like one
+    inside. ConfigError names the setting, never its value."""
+    value = env.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError("%s is not set" % name)
     if not _TOKEN.match(value):
-        raise ConfigError("%s has a character a header cannot carry" % ENV_TOKEN)
+        raise ConfigError("%s has a space, a control or a non-ASCII character in it, which no API token has" % name)
+    if len(value) < MIN_TOKEN_CHARS:
+        raise ConfigError("%s is too short to be an API token" % name)
+    if len(value) > MAX_TOKEN_CHARS:
+        raise ConfigError("%s is too long to be an API token" % name)
     return _Secret("Bearer " + value)
 
 
@@ -156,9 +182,17 @@ def _origin(url, allowed_host):
 # ------------------------------------------------------------------------------------------------
 # Small shared pieces (live.py's, copied so that neither module imports the other's private names)
 # ------------------------------------------------------------------------------------------------
+def _tls():
+    """A client context that verifies the server's certificate and name, TLS 1.2 or newer: Python
+    3.9's default context sets no floor of its own (as live._tls, review 15)."""
+    ctx = ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    return ctx
+
+
 def _https(host, port, timeout):
-    """HTTPS that verifies the server's certificate and name."""
-    return http.client.HTTPSConnection(host, port, timeout=timeout, context=ssl.create_default_context())
+    """HTTPS that verifies the server's certificate and name, TLS 1.2 or newer."""
+    return http.client.HTTPSConnection(host, port, timeout=timeout, context=_tls())
 
 
 def _failure(cls, step, exc=None, status=None, detail=None):
@@ -206,10 +240,41 @@ def _header_fields(message):
     return fields
 
 
-def _checked(raw, envelope_to, message_id, doris_addr, step):
+def _parts_ok(message):
+    """True when every part of the message is inline text/plain (no file name) or her own .ics
+    (text/calendar whose content is her fixed form, ics.fields_ok), alone or inside one
+    multipart/mixed, and the MIME structure reads without a defect or a doubled Content-* header
+    (two readers could see two different messages). Never raises: what it cannot read is False."""
+    try:
+        root = email.parser.BytesParser(policy=email.policy.compat32).parsebytes(message)
+        if root.is_multipart():
+            if root.get_content_type() != "multipart/mixed":
+                return False
+            leaves = root.get_payload()
+        else:
+            leaves = [root]
+        for part in [root] + list(leaves):
+            if part.defects or any(len(part.get_all(name) or ()) > 1 for name in _MIME_HEADERS):
+                return False
+        for part in leaves:
+            kind = part.get_content_type()
+            if part.is_multipart() or kind not in ("text/plain", "text/calendar"):
+                return False
+            if kind == "text/plain" and (part.get_filename() is not None
+                                         or part.get_content_disposition() == "attachment"):
+                return False
+            if kind == "text/calendar" and not ics.fields_ok(part.get_payload(decode=True)):
+                return False
+        return True
+    except Exception:          # a check that cannot run fails closed
+        return False
+
+
+def _checked(raw, envelope_to, message_id, from_addr, step):
     """(the message with CRLF line ends, the recipients), or a MailError before any connection:
-    bytes only; no Bcc or Resent-Bcc header; exactly one From, hers; exactly one Message-ID,
-    the one the caller recorded; every recipient one bare address. As LiveMail._checked."""
+    bytes only; no Bcc or Resent-Bcc header; exactly one From, the account's own address alone;
+    exactly one Message-ID, the one the caller recorded; every part text/plain or her own .ics
+    (_parts_ok); every recipient one bare address."""
     def refuse(why):
         return _failure(MailError, step, detail="refused before connecting: " + why)
     if not isinstance(raw, (bytes, bytearray)) or not raw:
@@ -223,12 +288,14 @@ def _checked(raw, envelope_to, message_id, doris_addr, step):
         raise refuse("the message has a Bcc header")
     froms = [value for name, value in fields if name == "from"]
     senders = email.utils.getaddresses([froms[0].decode("utf-8", "replace")]) if len(froms) == 1 else []
-    if len(senders) != 1 or senders[0][1].lower() != doris_addr.lower():
-        raise refuse("the message is not from her address alone")
+    if len(senders) != 1 or senders[0][1].lower() != from_addr.lower():
+        raise refuse("the message is not from the account's own address alone")
     target = _norm_mid(message_id) if isinstance(message_id, str) else ""
     mids = [_norm_mid(value.decode("ascii", "replace")) for name, value in fields if name == "message-id"]
     if not _MESSAGE_ID.match(target) or mids != [target]:
         raise refuse("the message does not carry exactly the Message-ID given")
+    if not _parts_ok(message):
+        raise refuse("a part is not text/plain or her own .ics")
     if (not isinstance(envelope_to, (list, tuple)) or not envelope_to
             or not all(isinstance(addr, str) and _ADDRESS.match(addr) for addr in envelope_to)):
         raise refuse("the envelope is not a list of bare addresses")
@@ -321,21 +388,24 @@ _Account = collections.namedtuple("_Account", "id api_path upload_path drafts se
 # The sender
 # ------------------------------------------------------------------------------------------------
 class JmapSender(object):
-    """Sends her mail through Fastmail's JMAP API under her own API token. send has LiveMail.send's
-    contract; check_login proves the token, the account, her mailboxes and her identity.
+    """Sends mail through Fastmail's JMAP API under one account's API token: hers (DORIS_MAIL_ADDRESS,
+    DORIS_JMAP_TOKEN) by default, or the account address_name and token_name name (the smoke's
+    wolf.whizz sender). send has LiveMail.send's contract; check_login proves the token, the
+    account, its mailboxes and its identity; find_message reads mail back.
 
     http_factory(host, port, timeout) makes each connection (default: HTTPS that verifies the
     certificate). session_url must be on allowed_host; apiUrl and uploadUrl must then be on the
     session URL's own scheme, host and port. A plain-http session URL is taken only with a
     factory of the caller's (a test's fake server), never with the default TLS transport."""
 
-    def __init__(self, env, doris_addr, timeout_s=caps.MAIL_TIMEOUT_S, http_factory=None,
-                 session_url=SESSION_URL, allowed_host=HOST):
-        login = _address(env)
-        if not isinstance(doris_addr, str) or doris_addr.strip().lower() != login.lower():
-            raise ConfigError("her address must be %s, the address of her own account" % ENV_ADDRESS)
-        self.doris_addr = doris_addr.strip()
-        self._auth = _bearer(env)
+    def __init__(self, env, from_addr, timeout_s=caps.MAIL_TIMEOUT_S, http_factory=None,
+                 session_url=SESSION_URL, allowed_host=HOST, address_name=ENV_ADDRESS, token_name=ENV_TOKEN):
+        self.address_name, self.token_name = str(address_name), str(token_name)
+        login = _address(env, self.address_name)
+        if not isinstance(from_addr, str) or from_addr.strip().lower() != login.lower():
+            raise ConfigError("the address must be %s, the address of the account's own" % self.address_name)
+        self.from_addr = from_addr.strip()
+        self._auth = _bearer(env, self.token_name)
         self.timeout_s = _timeout(timeout_s)
         self.allowed_host = str(allowed_host).strip().lower()
         origin = _origin(session_url, self.allowed_host)
@@ -404,7 +474,8 @@ class JmapSender(object):
         return origin[3]
 
     def _session(self):
-        """(account id, API path, upload path) from the session resource (RFC 8620 2)."""
+        """(account id, API path, upload path) from the session resource (RFC 8620 2). Its username
+        must be the account's own address: a token for another account sends nothing as this one."""
         step = "jmap session"
         status, data = self._request(step, "GET", self._session_path)
         if status != 200:
@@ -412,6 +483,9 @@ class JmapSender(object):
         session = _json(data)
         if not isinstance(session, dict):
             raise _failure(MailError, step, detail="the answer cannot be read")
+        username = session.get("username")
+        if not isinstance(username, str) or username.strip().lower() != self.from_addr.lower():
+            raise _failure(MailError, step, detail="the session is not for the account %s names" % self.address_name)
         capabilities = session.get("capabilities")
         if not isinstance(capabilities, dict) or not all(name in capabilities for name in USING):
             raise _failure(MailError, step, detail="the token does not reach core, mail and submission")
@@ -438,9 +512,9 @@ class JmapSender(object):
         who = _method(responses, "who", "Identity/get", "jmap identity")
         items = who.get("list") if isinstance(who.get("list"), list) else []
         mine = [item.get("id") for item in items if isinstance(item, dict) and isinstance(item.get("email"), str)
-                and item["email"].strip().lower() == self.doris_addr.lower()]
+                and item["email"].strip().lower() == self.from_addr.lower()]
         if not mine or not _is_id(mine[0]):
-            raise _failure(MailError, "jmap identity", detail="no identity for her address")
+            raise _failure(MailError, "jmap identity", detail="no identity for the account's address")
         return _Account(account, api_path, upload_path, drafts, sent, mine[0])
 
     # -- step 3: the upload ------------------------------------------------------------------------
@@ -462,7 +536,7 @@ class JmapSender(object):
     # -- step 4: import and submit in one request --------------------------------------------------
     def _submit(self, account, blob_id, recipients):
         """Email/import into Drafts, then EmailSubmission/set for it (RFC 8621 4.8, 7.5)."""
-        envelope = {"mailFrom": {"email": self.doris_addr, "parameters": None},
+        envelope = {"mailFrom": {"email": self.from_addr, "parameters": None},
                     "rcptTo": [{"email": rcpt, "parameters": None} for rcpt in recipients]}
         calls = [
             ["Email/import", {"accountId": account.id, "emails": {_DRAFT: {
@@ -500,21 +574,67 @@ class JmapSender(object):
 
     # -- the interface -------------------------------------------------------------------------------
     def send(self, raw, envelope_to, message_id, template=None):
-        """Hand one message to her JMAP server: her address as the envelope sender, exactly
-        envelope_to as the recipients, raw as it is (CRLF line ends). One submission request,
-        never a retry. template is accepted for the interface and not used.
+        """Hand one message to the JMAP server: the account's address as the envelope sender,
+        exactly envelope_to as the recipients, raw as it is (CRLF line ends). One submission
+        request, never a retry. template is accepted for the interface and not used.
 
         Returns None when the server took it. MailError: it did not go. SendUnknown: the
         submission request went and no readable answer came back; the caller looks in Sent and
         nothing here sends it again. After a send that went, last_copy_in_sent says whether her
         copy reached Sent (False: it may sit in Drafts)."""
         self.last_copy_in_sent = None
-        message, recipients = _checked(raw, envelope_to, message_id, self.doris_addr, "jmap send")
+        message, recipients = _checked(raw, envelope_to, message_id, self.from_addr, "jmap send")
         account = self._setup()
         blob_id = self._upload(account, message)
         self._submit(account, blob_id, recipients)
 
     def check_login(self):
-        """Read the session, her mailboxes and her identity: proves the token, its scopes, the
-        account, Drafts, Sent and her identity. Sends and uploads nothing. Raises MailError."""
+        """Read the session, the account's mailboxes and its identity: proves the token, its scopes,
+        the account, Drafts, Sent and the identity. Sends and uploads nothing. Raises MailError."""
         self._setup()
+
+    def find_message(self, message_id):
+        """Where the message whose Message-ID is exactly this one sits in the account: the sorted
+        roles (ROLES, else "other") of the mailboxes holding it, or None when no message has it.
+        One request after the session: Email/query on the Message-ID header (a contains search, so
+        each message it names is read back and kept only when its messageId is this one), Email/get
+        of those, and the mailboxes' roles. Reads only. MailError when it cannot tell: an error or
+        an answer it cannot read, or a message the query named that the get left out."""
+        step = "jmap find"
+        target = _norm_mid(message_id) if isinstance(message_id, str) else ""
+        if not _MESSAGE_ID.match(target):
+            raise _failure(MailError, step, detail="not a Message-ID it can search for")
+        account, api_path, _ = self._session()
+        responses = self._api(step, api_path, [
+            ["Email/query", {"accountId": account, "filter": {"header": ["Message-ID", target]},
+                             "limit": FIND_LIMIT}, "query"],
+            ["Email/get", {"accountId": account, "#ids": {"resultOf": "query", "name": "Email/query", "path": "/ids"},
+                           "properties": ["messageId", "mailboxIds"]}, "read"],
+            ["Mailbox/get", {"accountId": account, "ids": None, "properties": ["id", "role"]}, "boxes"]])
+        ids = _method(responses, "query", "Email/query", step).get("ids")
+        if not isinstance(ids, list) or not all(_is_id(i) for i in ids):
+            raise _failure(MailError, step, detail="the answer cannot be read")
+        items = _method(responses, "read", "Email/get", step).get("list")
+        boxes = _method(responses, "boxes", "Mailbox/get", step).get("list")
+        if not isinstance(items, list) or not isinstance(boxes, list):
+            raise _failure(MailError, step, detail="the answer cannot be read")
+        read = {item.get("id"): item for item in items if isinstance(item, dict)}
+        if any(i not in read for i in ids):
+            raise _failure(MailError, step, detail="a message the query named could not be read; cannot tell")
+        role_of = {box.get("id"): box.get("role") for box in boxes if isinstance(box, dict)}
+        places = set()
+        for i in ids:
+            mids, where = read[i].get("messageId"), read[i].get("mailboxIds")
+            if not (isinstance(mids, list) and any(isinstance(m, str) and _norm_mid(m) == target for m in mids)):
+                continue
+            if not isinstance(where, dict) or not where:
+                raise _failure(MailError, step, detail="a message it found names no mailbox; cannot tell")
+            for box_id, on in where.items():
+                if on is True:
+                    role = role_of.get(box_id)
+                    places.add(role if role in ROLES else "other")
+        if places:
+            return sorted(places)
+        if len(ids) >= FIND_LIMIT:
+            raise _failure(MailError, step, detail="more messages matched than one look reads; cannot tell")
+        return None

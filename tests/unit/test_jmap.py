@@ -5,6 +5,9 @@ place of TLS, through the sender's factory hook). The fake keeps a mailbox of it
 what it was sent, so a test can prove what Doris never does (a second submission, a Bcc, another
 host, a token or server text in an error).
 """
+import base64
+import email
+import email.policy
 import http.client
 import http.server
 import json
@@ -15,16 +18,19 @@ import traceback
 import unittest
 from unittest import mock
 
-from doris import caps
+from doris import caps, compose, ics
 from doris.adapters import jmap
 from doris.shapes import MailError, SendUnknown
+from tests.unit.test_live import BID, LINK, SLOT, eml, her_event, u
 
 DORIS = "doris.htm@fastmail.com"
 OWNER = "whizz@fastmail.com"
 PROSPECT = "prospect@example.com"
-TOKEN = "dummy-jmap-token-4242"          # a stand-in: never a real key
+TOKEN = "dummy-jmap-token-for-doris-tests-4242"   # a stand-in: never a real key
 MID = "<5d1e0c2b9a@fastmail.com>"
 ACCOUNT = "u1a2b3c4"
+WOLF = "wolf.whizz@fastmail.com"
+WOLF_TOKEN = "dummy-wolf-jmap-token-for-smoke-tests-7373"   # a stand-in: never a real key
 SERVER_TEXT = "server-words-never-shown"  # every description the fake writes; never in an error of ours
 
 CORE = "urn:ietf:params:jmap:core"
@@ -45,6 +51,40 @@ def reply_bytes(mid=MID, sender=DORIS, extra=b""):
             b"\r\nHello.\r\n.a line that starts with a dot\r\n")
 
 
+def header_text(raw, name):
+    """The decoded value of one header field of a message, or "" without it."""
+    msg = email.message_from_bytes(raw, policy=email.policy.compat32)
+    return str(msg.get(name) or "")
+
+
+def message_ids(raw):
+    """What a JMAP server reports as an email's messageId: the ids in its Message-ID header, no brackets."""
+    value = header_text(raw, "message-id").strip()
+    return [value.strip("<>")] if value else None
+
+
+def mime(*parts, kind="multipart/mixed"):
+    """A message from her: the (part headers, part body) pairs inside one multipart of this kind,
+    or (kind None) one part alone."""
+    head = (b"From: " + DORIS.encode() + b"\r\nTo: " + PROSPECT.encode() + b"\r\nSubject: Re: hello\r\n"
+            b"Date: Fri, 27 Nov 2026 18:00:00 +0000\r\nMessage-ID: " + MID.encode() + b"\r\nMIME-Version: 1.0\r\n")
+    if kind is None:
+        (headers, body), = parts
+        return head + headers + b"\r\n" + body
+    out = head + b'Content-Type: ' + kind.encode() + b'; boundary="b0"\r\n\r\n'
+    for headers, body in parts:
+        out += b"--b0\r\n" + headers + b"\r\n" + body + b"\r\n"
+    return out + b"--b0--\r\n"
+
+
+TEXT_PART = (b'Content-Type: text/plain; charset="utf-8"\r\n', b"Hello.\r\n")
+
+
+def ics_part(data, content_type=b'text/calendar; charset="utf-8"; method=PUBLISH'):
+    return (b"Content-Type: " + content_type + b'\r\nContent-Disposition: attachment; filename="call.ics"\r\n'
+            b"Content-Transfer-Encoding: base64\r\n", base64.encodebytes(data).replace(b"\n", b"\r\n"))
+
+
 def secret_free(test, exc):
     """Neither the token nor anything the server wrote appears in anything an error prints."""
     printed = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
@@ -63,6 +103,7 @@ class FakeJMAP(http.server.ThreadingHTTPServer):
     def __init__(self):
         http.server.ThreadingHTTPServer.__init__(self, ("127.0.0.1", 0), JMAPHandler)
         self.token = TOKEN
+        self.username = DORIS       # the session's username: the account the token is for
         self.requests = []          # (kind, method, path, headers with lowercase names, body)
         self.capabilities = [CORE, MAIL, SUBMISSION]
         self.primary = {MAIL: ACCOUNT, SUBMISSION: ACCOUNT}
@@ -125,7 +166,7 @@ class FakeJMAP(http.server.ThreadingHTTPServer):
                 "accounts": {ACCOUNT: {"name": DORIS, "isPersonal": True, "isReadOnly": False,
                                        "accountCapabilities": {MAIL: {}, SUBMISSION: {}}}},
                 "primaryAccounts": self.primary,
-                "username": DORIS,
+                "username": self.username,
                 "apiUrl": self.base + "/jmap/api/" if self.api_url is None else self.api_url,
                 "downloadUrl": "https://www.fastmailusercontent.com/jmap/download/{accountId}/{blobId}/{name}?type={type}",
                 "uploadUrl": self.base + "/jmap/upload/{accountId}/" if self.upload_url is None else self.upload_url,
@@ -133,13 +174,37 @@ class FakeJMAP(http.server.ThreadingHTTPServer):
                 "state": "s1"}
 
     # -- methods (RFC 8621) --------------------------------------------------------------------
-    NEEDS = {"Mailbox/get": MAIL, "Email/import": MAIL, "Email/set": MAIL,
+    NEEDS = {"Mailbox/get": MAIL, "Email/import": MAIL, "Email/set": MAIL, "Email/query": MAIL, "Email/get": MAIL,
              "Identity/get": SUBMISSION, "EmailSubmission/set": SUBMISSION}
+
+    def deliver(self, raw, role="inbox"):
+        """A message that reached this account (another account's mail to it), in the mailbox with this role."""
+        box = [m["id"] for m in self.mailboxes if m["role"] == role][0]
+        eid = self.next_id("M")
+        self.emails[eid] = {"blobId": None, "mailboxIds": {box: True}, "keywords": {}, "bytes": raw}
+        return eid
+
+    @staticmethod
+    def resolve(args, responses):
+        """A back-reference (RFC 8620 3.7) to a top-level list of an earlier answer, as Doris uses them."""
+        out = {}
+        for key, value in args.items():
+            if key.startswith("#"):
+                (found,) = [a for n, a, c in responses if c == value["resultOf"] and n == value["name"]]
+                out[key[1:]] = found[value["path"].lstrip("/")]
+            else:
+                out[key] = value
+        return out
 
     def api(self, request):
         using = request.get("using") or []
         created_ids, responses = {}, []
         for name, args, call_id in request["methodCalls"]:
+            try:
+                args = self.resolve(args, responses)
+            except ValueError:                     # the call it refers to answered with an error
+                responses.append(["error", {"type": "invalidResultReference"}, call_id])
+                continue
             if CORE not in using or self.NEEDS.get(name) not in using:
                 out = [["error", {"type": "unknownMethod"}, call_id]]
             elif args.get("accountId") != ACCOUNT:
@@ -225,6 +290,27 @@ class FakeJMAP(http.server.ThreadingHTTPServer):
                                       "updated": updated or None, "notUpdated": not_updated or None}, call_id])
         return out
 
+    def m_Email_query(self, args, call_id, created_ids):
+        field, text = (list((args.get("filter") or {}).get("header") or []) + [None, None])[:2]
+        ids = [eid for eid, em in self.emails.items()
+               if field is not None and field.lower() == "message-id"
+               and (text or "").lower() in header_text(em["bytes"], "message-id").lower()]
+        return [["Email/query", {"accountId": ACCOUNT, "queryState": "q1", "canCalculateChanges": False,
+                                 "position": 0, "ids": ids[:args.get("limit") or 256]}, call_id]]
+
+    def m_Email_get(self, args, call_id, created_ids):
+        props = args.get("properties")
+        found, missing = [], []
+        for eid in args.get("ids") or []:
+            em = self.emails.get(eid)
+            if em is None:
+                missing.append(eid)
+                continue
+            item = {"id": eid, "messageId": message_ids(em["bytes"]), "mailboxIds": dict(em["mailboxIds"]),
+                    "subject": SERVER_TEXT}
+            found.append({k: v for k, v in item.items() if props is None or k in props or k == "id"})
+        return [["Email/get", {"accountId": ACCOUNT, "state": "e1", "list": found, "notFound": missing}, call_id]]
+
     def m_Email_set(self, args, call_id, created_ids):
         destroyed, not_destroyed = [], {}
         for eid in args.get("destroy") or []:
@@ -264,6 +350,8 @@ class JMAPHandler(http.server.BaseHTTPRequestHandler):
                 return "send"
             if "Email/set" in names:
                 return "destroy"
+            if "Email/query" in names:
+                return "find"
             return "setup"
         return "other"
 
@@ -289,7 +377,7 @@ class JMAPHandler(http.server.BaseHTTPRequestHandler):
             srv.uploads.append((self.headers.get("Content-Type"), body))
             result = (201, {"accountId": ACCOUNT, "blobId": blob_id, "type": self.headers.get("Content-Type"),
                             "size": len(body) + srv.size_skew})
-        elif kind in ("setup", "send", "destroy"):
+        elif kind in ("setup", "send", "destroy", "find"):
             result = (200, srv.api(json.loads(body)))
             if kind == "send" and srv.rewrite is not None:
                 result = (200, srv.rewrite(result[1]))
@@ -335,14 +423,46 @@ class SettingsTest(unittest.TestCase):
             jmap.JmapSender(env(), OWNER)
         with self.assertRaises(jmap.ConfigError):
             jmap.JmapSender(env(DORIS_MAIL_ADDRESS="Doris <%s>" % DORIS), DORIS)
-        self.assertEqual(jmap.JmapSender(env(), DORIS.upper()).doris_addr, DORIS.upper())
+        self.assertEqual(jmap.JmapSender(env(), DORIS.upper()).from_addr, DORIS.upper())
 
     def test_a_token_that_cannot_ride_in_a_header_is_refused_without_showing_it(self):
-        for bad in ("dummy token with spaces", "dummy-token\r\nX-Evil: 1", "dummy-töken", "dummy\ttoken"):
+        for bad in ("dummy token with spaces in it, long enough", "dummy-token-long-enough-to-pass\r\nX-Evil: 1",
+                    "dummy-töken-long-enough-to-pass-the-length", "dummy\ttoken-long-enough-to-pass-the-length",
+                    " " + TOKEN, TOKEN + " ", TOKEN + "\n", TOKEN + "\x00", TOKEN + "\x7f", TOKEN + "\u00a0",
+                    TOKEN + "\u200b"):
             with self.assertRaises(jmap.ConfigError, msg=repr(bad)) as cm:
                 jmap.JmapSender(env(DORIS_JMAP_TOKEN=bad), DORIS)
             self.assertIn("DORIS_JMAP_TOKEN", str(cm.exception))
-            self.assertNotIn(bad, str(cm.exception))
+            self.assertNotIn(bad.strip(), str(cm.exception))
+            self.assertEqual(len(str(cm.exception).splitlines()), 1)
+
+    def test_an_implausibly_short_token_is_refused_and_no_vendor_prefix_is_asked_for(self):
+        for bad in ("x", "dummy", "dummy-token-1234", "d" * (jmap.MIN_TOKEN_CHARS - 1)):
+            with self.assertRaises(jmap.ConfigError, msg=bad) as cm:
+                jmap.JmapSender(env(DORIS_JMAP_TOKEN=bad), DORIS)
+            self.assertEqual(str(cm.exception), "DORIS_JMAP_TOKEN is too short to be an API token")
+        self.assertGreaterEqual(jmap.MIN_TOKEN_CHARS, 20)
+        for good in ("d" * jmap.MIN_TOKEN_CHARS, "dummy-no-vendor-prefix-0123456789abcdef", "fmu1-" + "d" * 60):
+            jmap.JmapSender(env(DORIS_JMAP_TOKEN=good), DORIS)
+        with self.assertRaises(jmap.ConfigError):
+            jmap.JmapSender(env(DORIS_JMAP_TOKEN="d" * 5000), DORIS)
+
+    def test_another_account_is_named_by_its_own_settings_and_reads_no_other(self):
+        """The smoke's wolf.whizz sender: WOLF_EMAIL and WOLF_JMAP_TOKEN, never her names."""
+        wolf_env = {"WOLF_EMAIL": WOLF, "WOLF_JMAP_TOKEN": WOLF_TOKEN}
+        sender = jmap.JmapSender(wolf_env, WOLF, address_name="WOLF_EMAIL", token_name="WOLF_JMAP_TOKEN")
+        self.assertEqual(sender.from_addr, WOLF)
+        for missing in ("WOLF_EMAIL", "WOLF_JMAP_TOKEN"):
+            given = dict(wolf_env, DORIS_MAIL_ADDRESS=DORIS, DORIS_JMAP_TOKEN=TOKEN)
+            del given[missing]
+            with self.assertRaises(jmap.ConfigError) as cm:
+                jmap.JmapSender(given, WOLF, address_name="WOLF_EMAIL", token_name="WOLF_JMAP_TOKEN")
+            self.assertEqual(str(cm.exception), "%s is not set" % missing)
+        with self.assertRaises(jmap.ConfigError) as cm:
+            jmap.JmapSender(wolf_env, DORIS, address_name="WOLF_EMAIL", token_name="WOLF_JMAP_TOKEN")
+        self.assertIn("WOLF_EMAIL", str(cm.exception))
+        for text in (repr(sender), str(sender), repr(vars(sender))):
+            self.assertNotIn(WOLF_TOKEN, text)
 
     def test_the_timeout_must_be_a_positive_number(self):
         for bad in (0, -1, True, "5"):
@@ -387,7 +507,28 @@ class DefaultTransportTest(unittest.TestCase):
         self.assertEqual((seen["host"], seen["port"], seen["timeout"]), ("api.fastmail.com", 443, 7.0))
         self.assertEqual(seen["context"].verify_mode, ssl.CERT_REQUIRED)
         self.assertTrue(seen["context"].check_hostname)
+        self.assertEqual(seen["context"].minimum_version, ssl.TLSVersion.TLSv1_2)
         secret_free(self, cm.exception)
+
+    def test_tls_is_1_2_or_newer_even_where_the_default_context_allows_older(self):
+        """As live.py's connections (review 15): Python 3.9's default context sets no floor of its own."""
+        real = ssl.create_default_context
+
+        def as_on_3_9(*args, **kw):
+            ctx = real(*args, **kw)
+            ctx.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+            return ctx
+        seen = {}
+
+        def fake(host, port=None, timeout=None, context=None, **kw):
+            seen["context"] = context
+            raise ConnectionRefusedError("stop here")
+        with mock.patch.object(ssl, "create_default_context", as_on_3_9), \
+                mock.patch.object(http.client, "HTTPSConnection", fake):
+            with self.assertRaises(MailError):
+                jmap.JmapSender(env(), DORIS).check_login()
+        self.assertEqual(seen["context"].minimum_version, ssl.TLSVersion.TLSv1_2)
+        self.assertEqual(seen["context"].verify_mode, ssl.CERT_REQUIRED)
 
 
 # ===========================================================================================
@@ -414,7 +555,7 @@ class JmapFixture(unittest.TestCase):
         for host, port, _ in self.dialed:
             self.assertEqual((host, port), ("127.0.0.1", self.jmap.port))
         for kind, method, path, headers, body in self.jmap.requests:
-            self.assertIn(kind, ("session", "setup", "upload", "send", "destroy"))
+            self.assertIn(kind, ("session", "setup", "upload", "send", "destroy", "find"))
             self.assertEqual(headers.get("authorization"), "Bearer " + TOKEN)
             self.assertNotIn(TOKEN.encode(), path.encode() + body)    # the header only, never a URL or body
 
@@ -475,6 +616,27 @@ class RefusalTest(JmapFixture):
                     ["<%s>" % PROSPECT], ["Name <%s>" % PROSPECT], [PROSPECT + "\n"], None):
             self.refused(reply_bytes(), bad, MID)
 
+    def test_a_part_other_than_text_or_her_own_ics_is_refused_before_connecting(self):
+        """The only-her-.ics rule (review 14) holds in the sender too, not only upstream."""
+        attendee = her_event(method="PUBLISH").replace(b"STATUS:CONFIRMED",
+                                                       b"STATUS:CONFIRMED\r\nATTENDEE:mailto:x@example.com")
+        for raw in (
+                mime(TEXT_PART, (b'Content-Type: application/pdf\r\nContent-Disposition: attachment; filename="a.pdf"'
+                                 b"\r\nContent-Transfer-Encoding: base64\r\n", base64.encodebytes(b"%PDF-1.4"))),
+                mime(TEXT_PART, (b'Content-Type: text/html; charset="utf-8"\r\n', b"<p>Hello.</p>"),
+                     kind="multipart/alternative"),
+                mime(TEXT_PART, ics_part(attendee)),
+                mime(TEXT_PART, ics_part(b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n")),
+                mime(TEXT_PART, (b"Content-Type: message/rfc822\r\n", eml(1))),
+                mime(TEXT_PART, (b'Content-Type: text/plain\r\nContent-Disposition: attachment; filename="notes.txt"\r\n',
+                                 b"a file, not her words")),
+                mime(TEXT_PART, (b'Content-Type: multipart/mixed; boundary="b1"\r\n',
+                                 b"--b1\r\nContent-Type: text/plain\r\n\r\nnested\r\n--b1--")),
+                mime((b"Content-Type: text/html\r\n", b"<p>Hello.</p>\r\n"), kind=None),
+                mime((b"Content-Type: application/octet-stream\r\n", b"\x00\x01"), kind=None)):
+            err = self.refused(raw, [PROSPECT], MID)
+            self.assertIn("refused before connecting", str(err))
+
 
 # ===========================================================================================
 # The session (RFC 8620 2) and her mailboxes and identity: check_login
@@ -514,6 +676,20 @@ class SessionTest(JmapFixture):
         self.jmap.token, self.jmap.status["session"] = TOKEN, 403
         self.assertEqual(str(self.fails()), "jmap session: 403")
         self.assertEqual(self.jmap.kinds(), ["session", "session"])
+
+    def test_a_session_for_another_account_is_refused_before_anything_more_is_sent(self):
+        """The token answers for one account; it must be the one DORIS_MAIL_ADDRESS names."""
+        for other in (OWNER, "doris.htm@fastmail.com.example", "", None, 7, ["doris.htm@fastmail.com"]):
+            self.jmap.username = other
+            err = self.fails()
+            self.assertEqual(str(err), "jmap session: the session is not for the account DORIS_MAIL_ADDRESS names")
+            self.assertIn("not for the account", str(self.fails(lambda: self.sender.send(reply_bytes(), [PROSPECT], MID))))
+        self.assertEqual(set(self.jmap.kinds()), {"session"})
+        self.assertEqual(self.jmap.uploads, [])
+
+    def test_the_sessions_username_is_matched_whatever_its_case(self):
+        self.jmap.username = "  Doris.HTM@FastMail.com "
+        self.assertIsNone(self.sender.check_login())
 
     def test_a_session_answer_that_cannot_be_read_is_a_mail_error(self):
         for body in (b"not json", b"[1, 2]", b'{"apiUrl": 7}', b"{}", b'{"capabilities": []}', b"\xff\xfe",
@@ -688,6 +864,17 @@ class SendTest(JmapFixture):
         self.sender.send(reply_bytes().replace(b"\r\n", b"\n"), [PROSPECT], MID)
         self.assertEqual(self.jmap.uploads, [("message/rfc822", reply_bytes())])
         self.assertEqual(self.jmap.submissions[0]["envelope"]["rcptTo"], [{"email": PROSPECT, "parameters": None}])
+
+    def test_her_reply_with_her_own_ics_goes_as_the_composer_builds_it(self):
+        headers = [("From", DORIS), ("To", PROSPECT), ("Subject", "Re: hello"),
+                   ("Date", "Fri, 27 Nov 2026 18:00:00 +0000"), ("Message-ID", MID), ("Auto-Submitted", "auto-replied")]
+        for method, status in (("PUBLISH", "CONFIRMED"), ("CANCEL", "CANCELLED")):
+            data = ics.build_event(BID, SLOT, LINK, status, 1, u(2026, 11, 27, 12), method)
+            raw = compose._build(headers, compose.with_signature("Booked."), data, method, MID)
+            self.sender.send(raw, [PROSPECT, OWNER], MID)
+            self.assertEqual(self.jmap.submissions[-1]["bytes"], raw)
+        self.sender.send(mime(TEXT_PART, ics_part(her_event(method="PUBLISH"))), [PROSPECT], MID)
+        self.assertEqual(len(self.jmap.submissions), 3)
 
     def test_the_template_name_is_accepted_and_ignored(self):
         self.sender.send(reply_bytes(), [PROSPECT], MID, template="T1")
@@ -864,6 +1051,107 @@ class SubmitTest(JmapFixture):
         self.assertIsNone(self.sender.send(reply_bytes(), [PROSPECT], MID))
         self.assertIs(self.sender.last_copy_in_sent, False)
         self.assert_one_try()
+
+
+# ===========================================================================================
+# Reading a message back: the smoke's look for her reply in wolf.whizz's mailbox
+# ===========================================================================================
+def arrived(mid, sender=DORIS, to=WOLF):
+    return (b"From: " + sender.encode() + b"\r\nTo: " + to.encode() + b"\r\nSubject: Re: a call\r\n"
+            b"Message-ID: " + mid.encode() + b"\r\n\r\nHello.\r\n")
+
+
+class FindTest(JmapFixture):
+
+    def fails(self, *args):
+        with self.assertRaises(MailError) as cm:
+            self.sender.find_message(*args)
+        self.assertNotIsInstance(cm.exception, SendUnknown)
+        secret_free(self, cm.exception)
+        return cm.exception
+
+    def tearDown(self):
+        self.assertEqual((self.jmap.uploads, self.jmap.submissions), ([], []))     # reading writes nothing
+        JmapFixture.tearDown(self)
+
+    def test_a_message_that_arrived_is_found_by_its_message_id_with_the_role_of_its_mailbox(self):
+        self.jmap.deliver(arrived(MID))
+        self.assertEqual(self.sender.find_message(MID), ["inbox"])
+        self.assertEqual(self.sender.find_message(MID.strip("<>")), ["inbox"])
+
+    def test_a_copy_filed_as_junk_is_found_and_says_so(self):
+        self.jmap.mailboxes.append({"id": "mb-junk", "role": "junk", "name": "Spam"})
+        self.jmap.deliver(arrived(MID), role="junk")
+        self.assertEqual(self.sender.find_message(MID), ["junk"])
+        self.jmap.deliver(arrived(MID))
+        self.assertEqual(self.sender.find_message(MID), ["inbox", "junk"])
+
+    def test_one_request_asks_for_the_header_the_ids_it_names_and_the_mailbox_roles(self):
+        self.jmap.deliver(arrived(MID))
+        self.sender.find_message(MID)
+        self.assertEqual(self.jmap.kinds(), ["session", "find"])
+        (calls,) = self.jmap.calls("find")
+        self.assertEqual([c[0] for c in calls], ["Email/query", "Email/get", "Mailbox/get"])
+        self.assertEqual(calls[0][1]["filter"], {"header": ["Message-ID", MID.strip("<>")]})
+        self.assertEqual(calls[1][1]["#ids"], {"resultOf": calls[0][2], "name": "Email/query", "path": "/ids"})
+        self.assertEqual(calls[1][1]["properties"], ["messageId", "mailboxIds"])
+
+    def test_no_message_with_it_is_none(self):
+        self.jmap.deliver(arrived("<another@fastmail.com>"))
+        self.assertIsNone(self.sender.find_message(MID))
+
+    def test_a_message_that_only_contains_the_id_is_not_a_match(self):
+        """The header search is a contains; only a messageId equal to it counts."""
+        self.jmap.deliver(arrived("<x" + MID.strip("<>") + ">"))
+        self.assertIsNone(self.sender.find_message(MID))
+
+    def test_a_message_in_a_mailbox_with_no_role_is_found_in_other(self):
+        self.jmap.mailboxes.append({"id": "mb-folder", "role": None, "name": SERVER_TEXT})
+        eid = self.jmap.deliver(arrived(MID))
+        self.jmap.emails[eid]["mailboxIds"] = {"mb-folder": True}
+        self.assertEqual(self.sender.find_message(MID), ["other"])
+
+    def test_an_id_it_cannot_search_for_is_refused_before_any_request(self):
+        for bad in ("", None, "no-at-sign", "<a b@c>", '<"q"@c>'):
+            self.fails(bad)
+        self.assertEqual(self.jmap.requests, [])
+
+    def test_a_message_the_query_named_that_the_get_left_out_is_a_mail_error_never_none(self):
+        self.jmap.deliver(arrived(MID))
+        real = self.jmap.m_Email_get
+        self.jmap.m_Email_get = lambda args, call_id, created: [[
+            "Email/get", {"accountId": ACCOUNT, "list": [], "notFound": list(args["ids"])}, call_id]]
+        self.assertIn("cannot tell", str(self.fails(MID)))
+        self.jmap.m_Email_get = real
+
+    def test_an_error_answer_or_one_it_cannot_read_is_a_mail_error_never_none(self):
+        self.jmap.deliver(arrived(MID))
+        for name in ("Email/query", "Email/get", "Mailbox/get"):
+            self.jmap.method_error = {name: "serverFail"}
+            self.assertEqual(str(self.fails(MID)), "jmap find: serverFail")
+        self.jmap.method_error = {}
+        for fault in ("drop", "garbage", 500):
+            self.jmap.fault["find"] = fault
+            self.fails(MID)
+        self.jmap.fault = {}
+        self.jmap.omit = {"Email/get"}
+        self.fails(MID)
+
+    def test_a_session_for_another_account_is_refused_before_the_query(self):
+        self.jmap.username = OWNER
+        self.fails(MID)
+        self.assertEqual(self.jmap.kinds(), ["session"])
+
+    def test_it_reads_with_another_accounts_token_when_built_with_its_names(self):
+        self.jmap.token, self.jmap.username = WOLF_TOKEN, WOLF
+        self.jmap.identities = [{"id": "I-wolf", "email": WOLF}]
+        self.jmap.deliver(arrived(MID))
+        sender = jmap.JmapSender({"WOLF_EMAIL": WOLF, "WOLF_JMAP_TOKEN": WOLF_TOKEN}, WOLF, timeout_s=2.0,
+                                 http_factory=self.factory, session_url=self.jmap.base + "/jmap/session",
+                                 allowed_host="127.0.0.1", address_name="WOLF_EMAIL", token_name="WOLF_JMAP_TOKEN")
+        self.assertEqual(sender.find_message(MID), ["inbox"])
+        self.assertEqual({r[3].get("authorization") for r in self.jmap.requests}, {"Bearer " + WOLF_TOKEN})
+        del self.jmap.requests[:]        # the fixture's teardown checks her token on what is left: nothing
 
 
 if __name__ == "__main__":
