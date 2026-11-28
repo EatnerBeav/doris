@@ -1,14 +1,14 @@
 # Tracker: every scored item
 
-Updated Fri Nov 27, 6:55 PM Pacific. One line per item the judges score, from the project law (Never cut, commands, Dates) and the Nov 26 brief check. Times are Pacific.
+Updated Fri Nov 27, 7:10 PM Pacific. One line per item the judges score, from the project law (Never cut, commands, Dates) and the Nov 26 brief check. Times are Pacific.
 
 Status words: **done** = in the code on main and tested; **built** = in the code, the proof still to show; **in progress**; **not started**; **blocked** (says on what).
 
 | # | Item | Scores | Status | Owner thread | Due |
 |---|---|---|---|---|---|
 | 1 | Live sending over JMAP and tonight's end-to-end live smoke (wolf.whizz to whizz@, the forward to Doris, her reply through JMAP, the read-back) | Autonomy, Reliability | in progress: both tokens answer the JMAP session; sending being wired test-first on PR #2 | Kickoff (Wolf) | Fri night |
-| 2 | `replay` (audit): step-through of one finished run, chain checked first | Audit trail +1 | in progress: PR #8 up (step-through of any run or trace folder, chain checked first), in review | Build the replay audit command | Sat 8:00 AM |
-| 3 | Watch page: the four labels (current step, tool calls, decisions, cost so far) and a code-written why on every decision | Live monitoring +1 | in progress: every decided, checked, held and halted receipt carries a code-written why; the page is PR #9 (local only, Stop calls the same stop), in review | Build the live watch page | Sat 10:00 AM |
+| 2 | `replay` (audit): step-through of one finished run, chain checked first | Audit trail +1 | built: PR #8 review-clean (two Fable reviews, 55 tests, CI green); merges and gets its CLI line after PR #2 | Build the replay audit command | Sat 8:00 AM |
+| 3 | Watch page: the four labels (current step, tool calls, decisions, cost so far) and a code-written why on every decision | Live monitoring +1 | built: PR #9 review-clean (two Fable reviews, CI green): local page, the four labels, every decision's why, Stop calls the same stop; merges and gets its CLI line after PR #2 | Build the live watch page | Sat 10:00 AM |
 | 4 | Halt receipt naming the call in flight and the dropped queue | Kill switch +1 | built: the halted line carries `in_flight` and `dropped`. To show on camera, Stop landing mid-call | Kickoff (Wolf) | Sat 4:00 PM rehearsal |
 | 5 | Yes-man redteam proof: a model that obeys every injection, 0 bad actions | Guardrails +1, Reliability | in progress: PR #10 (draft): 0 bad actions in 152 runs over 24 cases (20 Trap Pack files, demo day, two cap cases, Stop mid model call), in review | Prove the gate with a yes-man model | Sat 12:00 PM |
 | 6 | One calendar timeout with retry in the demo | Reliability, Demo | done: the demo's `timeout-once` fault; she retries and books | Kickoff (Wolf) | done |
