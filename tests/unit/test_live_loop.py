@@ -27,6 +27,7 @@ from doris import __main__ as cli
 from doris import caps, compose, ledger as ledger_mod
 from doris import loop, model as model_mod, netguard, paths, receipts, sentrecord, smoke, supervisor, templates
 from doris.adapters import live
+from doris.shapes import MailError
 from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, FakeSMTP, u
 
 LINK = "https://meet.example/" + "live-loop-room"
@@ -584,6 +585,95 @@ class LongRunTest(LiveFixture):
         self.go(cycles=2, cycle_s=600.0)
         self.assertAlmostEqual(sum(fake.slept), 1200.0 - 1000.25)
         self.assertLessEqual(max(fake.slept), loop.HALT_POLL_S)
+
+    def fetches_failing(self, failing, then=None):
+        """LiveMail.fetch_new, patched for the test: the calls numbered in `failing` (from 1) raise
+        MailError, the others read the inbox; then(n) runs before call n. Returns the call log."""
+        real, calls = live.LiveMail.fetch_new, []
+
+        def fetch(mail):
+            calls.append(len(calls) + 1)
+            if then is not None:
+                then(calls[-1])
+            if calls[-1] in failing:
+                raise MailError("imap fetch: timeout")
+            return real(mail)
+
+        patch = mock.patch.object(live.LiveMail, "fetch_new", fetch)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return calls
+
+    def fetch_results(self, summary):
+        """(ok, the wall-clock wait before it) for each mail_fetch, in order."""
+        lines = receipts.read_lines(summary.receipts_path)
+        calls = {l["seq"] for l in lines if l["kind"] == "called" and l["payload"]["call"] == "mail_fetch"}
+        return [l["payload"]["ok"] for l in lines if l["kind"] == "result" and l["payload"]["call_seq"] in calls]
+
+    def test_a_failed_inbox_read_is_an_error_line_and_her_next_cycle_reads_again(self):
+        """Review finding 4: in a run until stopped, a read that fails is never an empty inbox and never
+        the end: an error line, a wait for her next cycle, and the mail is read then."""
+        self.go(fresh=True)
+        self.inbox.add(request(1), u(2026, 12, 1, 16, 2))
+        self.clock = u(2026, 12, 1, 16, 10)
+        calls = self.fetches_failing({1})
+        fake = FakeTime(1000.0, lambda: self.smtp.delivered and supervisor.request_stop("live", "cli",
+                                                                                         state_dir=self.state))
+        self.use(fake)
+        s = self.go(cycles=None, cycle_s=600.0)
+        self.assertEqual((s.read_failed, s.halted), (False, "cli"))
+        self.assertEqual((s.handled, s.sends, s.bookings), (1, 1, 1))
+        self.assertEqual(self.fetch_results(s)[:2], [False, True])     # the failure, then her next cycle's read
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertEqual(fake.slept[:1], [1.0])                      # she waited before reading again
+        lines = receipts.read_lines(s.receipts_path)
+        (error,) = [l["payload"] for l in lines if l["kind"] == "error"]
+        self.assertEqual((error["step"], error["error"], error["failed_in_a_row"], error["ends_after"]),
+                         ("fetch", "MailError: imap fetch: timeout", 1, caps.MAIL_READ_FAILURES_IN_A_ROW))
+        self.assertEqual([l["kind"] for l in lines[-2:]], ["halted", "summary"])
+        self.assertTrue(s.verify_ok)
+        self.assertEqual(self.said[0], "Tue Dec 1, 8:10 AM Pacific  Inbox not read: MailError (error line written). "
+                                       "She tries again at her next cycle (1 failed in a row; the run ends at %d)."
+                         % caps.MAIL_READ_FAILURES_IN_A_ROW)
+
+    def test_reads_failing_in_a_row_end_the_run_with_its_closing_line(self):
+        n = caps.MAIL_READ_FAILURES_IN_A_ROW
+        self.assertGreaterEqual(n, 3)
+        self.go(fresh=True)
+        calls = self.fetches_failing(set(range(1, 1000)))
+        fake = FakeTime(1000.0)
+        self.use(fake)
+        s = self.go(cycles=None, cycle_s=600.0)                     # ends by itself: no stop comes
+        self.assertEqual((s.read_failed, s.halted), (True, None))
+        self.assertEqual(len(calls), n)
+        self.assertAlmostEqual(sum(fake.slept), 200.0 + 600.0 * (n - 2))    # a whole cycle between two reads
+        lines = receipts.read_lines(s.receipts_path)
+        errors = [l["payload"] for l in lines if l["kind"] == "error"]
+        self.assertEqual([(e["step"], e["failed_in_a_row"]) for e in errors], [("fetch", k) for k in range(1, n + 1)])
+        self.assertEqual(lines[-1]["kind"], "summary")
+        self.assertEqual((lines[-1]["payload"]["read_failed"], lines[-1]["payload"]["errors"]), (True, n))
+        self.assertTrue(s.verify_ok)
+
+    def test_a_good_read_starts_the_count_again(self):
+        n = caps.MAIL_READ_FAILURES_IN_A_ROW
+        self.go(fresh=True)
+        failing = set(range(1, n)) | set(range(n + 1, 2 * n))       # n - 1 failures, one read, n - 1 again
+        calls = self.fetches_failing(failing, then=lambda k: k == 2 * n and supervisor.request_stop(
+            "live", "cli", state_dir=self.state))
+        self.use(FakeTime(1000.0))
+        s = self.go(cycles=None, cycle_s=600.0)
+        self.assertEqual((s.read_failed, s.halted), (False, "cli"))
+        self.assertEqual(len(calls), 2 * n)
+        errors = [l["payload"]["failed_in_a_row"] for l in receipts.read_lines(s.receipts_path) if l["kind"] == "error"]
+        self.assertEqual(errors, list(range(1, n)) * 2)
+        self.assertTrue(s.verify_ok)
+
+    def test_a_finite_run_still_ends_on_its_one_failed_read(self):
+        self.go(fresh=True)
+        self.fetches_failing({1})
+        s = self.go(cycles=2, cycle_s=600.0)
+        self.assertTrue(s.read_failed)
+        self.assertEqual(self.fetch_results(s), [False])
 
     def test_a_halt_while_she_waits_ends_a_run_that_would_go_on_until_stopped(self):
         from doris import supervisor

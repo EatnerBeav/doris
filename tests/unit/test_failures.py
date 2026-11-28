@@ -14,7 +14,7 @@ from unittest import mock
 
 from doris import __main__ as cli
 from doris import ledger as ledger_mod
-from doris import loop, receipts
+from doris import caps, loop, receipts
 from tests.unit.test_restart import DORIS, OWNER, Restart, add, edit
 
 PRIYA = "priya@northwind.example"
@@ -181,6 +181,33 @@ class InboxReadFails(Restart):
         self.assertEqual(code, 1, out.getvalue())
         self.assertIn("inbox could not be read", out.getvalue())
         self.assertNotIn("Done:", out.getvalue())
+
+    def test_a_run_until_stopped_reads_again_each_cycle_and_ends_after_failures_in_a_row(self):
+        """Review finding 4: one failed read no longer ends `run`; caps.MAIL_READ_FAILURES_IN_A_ROW do."""
+        shutil.rmtree(os.path.join(self.root, "inbox"))
+        config = os.path.join(self.tmp, "config.json")
+        with open(config, "w", encoding="utf-8") as fh:
+            json.dump({"mode": "throwaway", "run_name": "run-worker", "state_dir": self.state,
+                       "sandbox_root": self.root, "owner_addr": OWNER, "doris_addr": DORIS,
+                       "model_source": "stub", "clock_mode": "advance", "retry_wait_s": 0,
+                       "cycles": None, "cycle_s": 1.0}, fh)
+        clock = [1000.0]
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(loop, "_time", lambda: clock[0]), \
+                mock.patch.object(loop, "_sleep", sleep):
+            code = cli.worker([config])
+        n = caps.MAIL_READ_FAILURES_IN_A_ROW
+        said = out.getvalue()
+        self.assertEqual(code, 1, said)
+        self.assertEqual(said.count("Inbox not read: MailError (error line written). She tries again at her next "
+                                    "cycle"), n - 1)
+        self.assertIn("Stopped: the inbox could not be read %d times in a row, so the run ended there" % n, said)
+        self.assertIn("chain verified", said)
+        self.assertNotIn("Done:", said)
 
 
 if __name__ == "__main__":

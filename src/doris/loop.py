@@ -148,6 +148,11 @@ class _CalendarDown(Exception):
         self.code = code
 
 
+class _ReadsFailed(Exception):
+    """A run until stopped: her inbox could not be read at caps.MAIL_READ_FAILURES_IN_A_ROW cycles
+    running. Each failure has its error line; the run ends on its summary, read_failed."""
+
+
 class LiveSettings(object):
     """What a live run takes from its env file. Its repr shows no value: the env holds her app
     password and the model key, and the link and the addresses are the env file's too."""
@@ -405,6 +410,7 @@ class _Run:
         self.clean_readbacks = set()
         self.redo = set()
         self.batch_keys = set()
+        self.read_failures = 0              # a run until stopped: her failed inbox reads in a row
 
     # --- opening and closing ---------------------------------------------------------------
     def open(self):
@@ -602,17 +608,37 @@ class _Run:
         cycle. On the sandbox's advancing clock a later pass first steps her clock to her next cycle
         and reads what is in by then (a judge's new email), before any later arrival. In a run until
         stopped with the digest on (`run`), each pass ends with the day's digest once it is due."""
-        self.drain()
-        self.daily_digest()
+        self.one_pass(first=True)
         done = 1
         while self.cfg.cycles is None or done < self.cfg.cycles:
             self.wait_for_cycle()
-            if self.cfg.clock_mode == "advance":
+            self.one_pass()
+            done += 1
+
+    def one_pass(self, first=False):
+        """One pass over the inbox, then the day's digest when due. A read that fails is never an
+        empty inbox (Contract 7). A finite run (the demo, traps) ends on it. A run until stopped
+        writes an error line and reads again at her next cycle; caps.MAIL_READ_FAILURES_IN_A_ROW
+        failures running end it on its summary (read_failed). One good read starts the count again."""
+        try:
+            if not first and self.cfg.clock_mode == "advance":
                 self.t = next_cycle(self.t + _dt.timedelta(seconds=1))
                 self.batch(self.fetch())
             self.drain()
-            self.daily_digest()
-            done += 1
+        except MailError as exc:
+            if self.cfg.cycles is not None:
+                raise
+            self.read_failures += 1
+            limit = caps.MAIL_READ_FAILURES_IN_A_ROW
+            self.error(None, "fetch", exc, failed_in_a_row=self.read_failures, ends_after=limit)
+            if self.read_failures >= limit:
+                raise _ReadsFailed() from None
+            self.say("%s  Inbox not read: %s (error line written). She tries again at her next cycle (%d failed "
+                     "in a row; the run ends at %d)." % (templates.fmt_pacific(self.now()), type(exc).__name__,
+                                                         self.read_failures, limit))
+        else:
+            self.read_failures = 0
+        self.daily_digest()
 
     def wait_for_cycle(self):
         """Until her next cycle: the next point on a wall-clock grid of cycle_s seconds. She looks for
@@ -1743,8 +1769,10 @@ def run(cfg):
                 raise
             r.write_halted(h.cause)
         except MailError as exc:
-            r.error(None, "fetch", exc)     # a refused read ends the run, and the summary says so
+            r.error(None, "fetch", exc)     # a finite run's one refused read ends it, and the summary says so
             r.summary.read_failed = True
+        except _ReadsFailed:
+            r.summary.read_failed = True    # a run until stopped: each failure already has its error line
         r.finish()
     finally:
         r.close_handles()

@@ -181,8 +181,9 @@ def _span(seconds):
 
 def worker(argv):
     """The child the kill switch watches: one run from its config file. Exit 0 done, 1 the run
-    failed (the inbox could not be read, or the chain failed its own check), 3 another Doris holds
-    the ledger, 4 halted (the parent writes that line)."""
+    failed (the inbox could not be read: once in a finite run, caps.MAIL_READ_FAILURES_IN_A_ROW
+    cycles running in a run until stopped; or the chain failed its own check), 3 another Doris
+    holds the ledger, 4 halted (the parent writes that line)."""
     with open(argv[0], encoding="utf-8") as fh:
         fields = json.load(fh)
     cfg = loop.RunConfig(supervised=True, say=_say, **fields)
@@ -194,9 +195,10 @@ def worker(argv):
     except loop.Halted:
         return supervisor.WORKER_EXIT_HALTED
     if s.read_failed:
-        _say("Stopped: the inbox could not be read, so the run ended there (%d handled, %d held before it). "
+        times = "" if cfg.cycles is not None else " %d times in a row" % caps.MAIL_READ_FAILURES_IN_A_ROW
+        _say("Stopped: the inbox could not be read%s, so the run ended there (%d handled, %d held before it). "
              "Nothing was read as an empty inbox. Receipts %s: %s."
-             % (s.handled, s.held, _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
+             % (times, s.handled, s.held, _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
         return 1
     cost = "none (stub)" if cfg.model_source == "stub" else "$%.4f%s" % (
         s.cost_usd, " (recorded)" if cfg.model_source == "replayed" else "")

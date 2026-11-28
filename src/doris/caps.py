@@ -60,6 +60,12 @@ MODEL_RETRY_WAIT_S = 2.0
 RULING17_REREAD_WAIT_S = 2.0             # "missing on two reads a short wait apart"
 SENT_LOOK_WAIT_S = 5.0                   # live: between her two looks in Sent after a send (ruling 8)
 
+# --- A run until stopped (`python -m doris run`) ---------------------------------------------
+# Her inbox unreadable at this many cycles running (an hour of ten-minute cycles) ends the run with
+# its closing line; until then each failed read is an error line and her next cycle reads again.
+# One good read starts the count again. A finite run (demo, traps) ends on its one failed read.
+MAIL_READ_FAILURES_IN_A_ROW = 6
+
 # --- A live run's start (decision 76) -------------------------------------------------------
 SMOKE_RECORD_MAX_AGE = _dt.timedelta(hours=24)   # how long after a smoke wrote its sent record a live run takes it
 
