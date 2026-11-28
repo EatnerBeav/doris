@@ -13,6 +13,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -41,13 +42,17 @@ def digest_mid(day):
 
 class NoWait(object):
     """loop._time and loop._sleep: each wait for her next cycle is one sleep that takes no time,
-    after which waited() runs."""
+    after which waited() runs. wall is the files' clock (the sandbox adapter's): her waits pass on it
+    as they would for real, so a mail written during one is older than two seconds at her next pass."""
 
     def __init__(self, waited):
         self.now, self.waited = 1000.0, waited
 
     def time(self):
         return self.now
+
+    def wall(self):
+        return time.time() + (self.now - 1000.0)
 
     def sleep(self, seconds):
         self.now += seconds
@@ -101,7 +106,8 @@ class LongRun(unittest.TestCase):
                 supervisor.request_stop("throwaway", "cli", state_dir=self.state)
 
         fake = NoWait(waited)
-        with mock.patch.object(loop, "_time", fake.time), mock.patch.object(loop, "_sleep", fake.sleep):
+        with mock.patch.object(loop, "_time", fake.time), mock.patch.object(loop, "_sleep", fake.sleep), \
+                mock.patch.object(sandbox_mod, "_wall", fake.wall):
             try:
                 return loop.run(self.config(digest=True, cycles=None, cycle_s=1.0))
             finally:
@@ -170,6 +176,19 @@ class NeverTwice(LongRun):
         self.assertEqual(self.digest_checks(again), [])
         self.assertEqual([l for l in receipts.read_lines(again.receipts_path)
                           if l["kind"] == "called" and l["payload"]["call"] in ("send", "sent_lookup")], [])
+
+    def test_a_finite_run_whose_days_digest_went_in_an_earlier_run_says_so_and_claims_no_send(self):
+        self.clock(TUE_450PM)
+        loop.run(self.config(digest=True))                # the demo's shape: one pass, then the day's digest
+        self.assertEqual(len([l for l in self.said if "Digest sent to the owner: " in l]), 1, self.said)
+        del self.said[:]
+        again = loop.run(self.config(digest=True))        # the same day again on the same ledger
+        self.assertEqual(len(self.digests()), 1)
+        self.assertEqual([l for l in receipts.read_lines(again.receipts_path)
+                          if l["kind"] == "called" and l["payload"]["call"] == "send"], [])
+        self.assertEqual([l for l in self.said if "Digest" in l],
+                         ["Tue Dec 1, 5:00 PM Pacific  Digest already sent to the owner earlier today; "
+                          "not sent twice."])
 
     def test_a_kill_after_the_hand_over_before_the_record_sends_nothing_more(self):
         self.clock(TUE_450PM)

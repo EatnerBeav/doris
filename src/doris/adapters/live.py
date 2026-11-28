@@ -379,6 +379,7 @@ class LiveMail(MailAdapter):
         self.imap_port = _port(env, ENV_IMAP_PORT, DEFAULT_IMAP_PORT)
         self.timeout_s = _timeout(timeout_s)
         self.since_utc = since_utc
+        self.smoke_left_out = 0              # the smoke's test requests the last fetch left out
         self.smoke_message_id = None
         if smoke_message_id is not None:
             target = _norm_mid(smoke_message_id) if isinstance(smoke_message_id, str) else ""
@@ -497,8 +498,10 @@ class LiveMail(MailAdapter):
         """Every INBOX message received at or after since_utc, oldest first (INTERNALDATE, then
         UID), leaving out the smoke's own test requests, answered on the smoke's ledger: any
         carrying SMOKE_TEST_KEYWORD, and any whose Message-ID holds SMOKE_MID_MARK (one the smoke
-        cut short before its mark), in the search and again once read; with smoke_message_id,
-        only that request: the keyword and exactly that Message-ID. Read-only (EXAMINE) and with BODY.PEEK[], so nothing about her mail changes. Each
+        cut short before its mark), in the search and again once read, counted in smoke_left_out
+        (a second search, without those two criteria, finds the ones the first left out); with
+        smoke_message_id, only that request: the keyword and exactly that Message-ID, and nothing
+        counted. Read-only (EXAMINE) and with BODY.PEEK[], so nothing about her mail changes. Each
         message's RFC822.SIZE is read with its date: one over caps.MAX_RAW_BYTES is handed over
         as only its first MAX_RAW_BYTES + 1 octets, never downloaded whole, and the reader holds
         it as oversize. Raises MailError on any failure, including a message the server named
@@ -506,14 +509,23 @@ class LiveMail(MailAdapter):
         step = "imap fetch"
         since = self.since_utc
         cap = caps.MAX_RAW_BYTES
+        self.smoke_left_out = 0
+        left_out = 0
         with self._imap(step) as conn:
             uidvalidity, _ = self._open(conn, "INBOX", True, step)
-            criteria = ("ALL",) if since is None else ("SINCE", _imap_day(since - _DAY))
+            window = ("ALL",) if since is None else ("SINCE", _imap_day(since - _DAY))
             if self.smoke_message_id is None:
-                criteria += ("NOT", "KEYWORD", SMOKE_TEST_KEYWORD, "NOT", "HEADER", "Message-ID", '"%s"' % SMOKE_MID_MARK)
+                criteria = window + ("NOT", "KEYWORD", SMOKE_TEST_KEYWORD,
+                                     "NOT", "HEADER", "Message-ID", '"%s"' % SMOKE_MID_MARK)
             else:                          # a substring search: each match is read back below
-                criteria += ("KEYWORD", SMOKE_TEST_KEYWORD, "HEADER", "Message-ID", '"%s"' % self.smoke_message_id)
+                criteria = window + ("KEYWORD", SMOKE_TEST_KEYWORD, "HEADER", "Message-ID", '"%s"' % self.smoke_message_id)
             uids = self._search(conn, criteria, step)
+            if self.smoke_message_id is None:
+                left = sorted(set(self._search(conn, window, step)) - set(uids))
+                for batch in _batches(left):
+                    facts = self._dates(conn, batch, step)
+                    left_out += sum(1 for uid in batch
+                                    if uid in facts and (since is None or facts[uid][0] >= since))
             dated = []
             for batch in _batches(uids):
                 facts = self._dates(conn, batch, step)
@@ -538,9 +550,11 @@ class LiveMail(MailAdapter):
                     if self.smoke_message_id is not None and self.smoke_message_id not in mids:
                         continue           # it only contains the smoke's Message-ID: never the smoke's to read
                     if self.smoke_message_id is None and any(SMOKE_MID_MARK in mid.lower() for mid in mids):
-                        continue           # the smoke's request, unmarked: a server that searched loosely
+                        left_out += 1      # the smoke's request, unmarked: a server that searched loosely
+                        continue
                     items.append(InboundItem(server_id=server_id(uidvalidity, uid), raw=bodies[uid],
                                              received_utc=received))
+            self.smoke_left_out = left_out
             return items
 
     def file(self, server_id, keyword):

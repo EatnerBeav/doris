@@ -135,6 +135,38 @@ class HaltCauseTest(StateDirTest):
         self.assertFalse(os.path.exists(self.halt))
         self.assertEqual(os.listdir(self.sdir), [])
 
+    def refused_replaces(self, times):
+        """os.replace onto HALT refused (PermissionError) the first `times` calls, as Windows refuses
+        it while a reader holds HALT open; returns the list the waits between tries go into."""
+        real, calls, waits = os.replace, [], []
+
+        def windows_replace(src, dst):
+            calls.append(dst)
+            if len(calls) <= times:
+                raise PermissionError(13, "Access is denied", str(dst))
+            return real(src, dst)
+        for patch in (mock.patch.object(supervisor.os, "replace", windows_replace),
+                      mock.patch.object(supervisor, "_pause", waits.append)):
+            patch.start()
+            self.addCleanup(patch.stop)
+        return calls, waits
+
+    def test_a_replace_refused_while_a_reader_holds_halt_is_tried_again(self):
+        calls, waits = self.refused_replaces(2)
+        self.assertEqual(supervisor.request_stop(self.mode, "cli"), "cli")
+        self.assertEqual((len(calls), waits), (3, [supervisor.HALT_READ_WAIT_S] * 2))
+        self.assertEqual(supervisor.read_halt(self.mode)["cause"], "cli")
+        self.assertEqual(os.listdir(self.sdir), ["HALT"])            # no temp file left
+
+    def test_a_replace_refused_every_time_fails_loudly_and_leaves_nothing(self):
+        calls, waits = self.refused_replaces(supervisor.HALT_READ_TRIES)
+        with self.assertRaises(supervisor.HaltWriteError) as ctx:
+            supervisor.request_stop(self.mode, "cli")
+        self.assertIsInstance(ctx.exception, OSError)                # callers that catch OSError still do
+        self.assertIn("NOT in force", str(ctx.exception))
+        self.assertEqual(len(calls), supervisor.HALT_READ_TRIES)
+        self.assertEqual(os.listdir(self.sdir), [])
+
     def test_halt_records_when_the_stop_was_asked(self):
         supervisor.request_stop(self.mode, "watch_button")
         with open(self.halt, "rb") as fh:

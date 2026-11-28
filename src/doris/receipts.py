@@ -118,7 +118,11 @@ def _check(whole):
             return bad("the line is not a JSON object")
         if set(obj) - {"why"} != set(_FIELDS) or any(type(obj[k]) is not t for k, t in _FIELDS.items()):
             return bad("the line's fields are not the receipt fields")
-        if canonical(obj) != raw:
+        try:
+            form = canonical(obj)
+        except ValueError:                 # NaN, Infinity, 1e999: json.loads takes them, JSON does not
+            return bad("the line holds a number JSON cannot carry (NaN or an infinity)")
+        if form != raw:
             return bad("the bytes are not the canonical form of the line")
         if obj["seq"] != expected:
             return bad("seq %d found where seq %d belongs" % (obj["seq"], expected))

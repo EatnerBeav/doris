@@ -3,8 +3,8 @@
     python -m doris watch [--port N]
 
 One page, served on 127.0.0.1 only (never 0.0.0.0), so only this computer can open it. On a server, reach
-it through an SSH tunnel. It is a live tail of the newest run's receipts, the sandbox's or live, whichever
-started last: the brief's four panes at the top (current step, tool calls, decisions, cost so far), then
+it through an SSH tunnel. It is a live tail of the newest run's receipts, the sandbox's or live (the smoke's
+own run of her loop included), whichever started last: the brief's four panes at the top (current step, tool calls, decisions, cost so far), then
 every receipt line as it lands, newest first, each decision with its why in the receipt's own words. It
 reads the receipt file and nothing else, so it cannot show anything the trace lacks, and it never writes
 there. Every string reaches the page as text, never as HTML: a display name or a Message-ID is email text.
@@ -13,7 +13,8 @@ Model words never reach it (a classified line shows its class, from the closed l
 
 One Stop button. It does what `python -m doris stop` does, through the same function: supervisor.request_stop
 for each of that command's modes, the sandbox and live, with the cause watch_button. The supervisor then kills
-a running worker mid-call and writes the halted line, as for any stop. Only a POST from the page itself stops
+a running worker mid-call and writes the halted line, as for any stop. The smoke runs her loop without the
+supervisor: her own halt check stops it between calls, and the page says so for that run. Only a POST from the page itself stops
 her: it carries a token made fresh each time `watch` starts, and its Host and Origin must be this page's. A
 request from any other site, or through a name rebound to this computer, is refused and stops nothing. The
 page can stop her; it has no way to start, resume or release anything. No external assets: one inline script
@@ -53,42 +54,67 @@ MAX_BODY = 1024                     # the Stop form is one token
 CLIP = 120                          # email text is cut to this many characters on the page
 MAX_ROWS = 1000                     # the page holds the newest lines; the receipt file holds every one
 
-Run = namedtuple("Run", "name folder mode started has_receipts")
+Run = namedtuple("Run", "name folder mode started has_receipts smoke known")
 
 
 # ------------------------------------------------------------------------------------------
 # Which run: the newest one started, in the sandbox or live
 # ------------------------------------------------------------------------------------------
-def _started(folder):
-    """When a run started: its config.json, written once before the worker starts (else its receipts)."""
-    for name in ("config.json", "receipts.jsonl"):
+_SMOKE_STAMP = re.compile(r"-smoke-(\d{8}T\d{6}Z)$")
+
+
+def _started(folder, name="", smoke=False):
+    """(when a run started, in ns, or None; whether that is known). A run's config.json is written once,
+    before its worker starts and before the halt check. The smoke writes none: its run is named for the
+    instant the smoke began (smoke.py, livetrace.STAMP). Failing both, the receipt file's last change,
+    which moves with every line, so it is not known."""
+    m = _SMOKE_STAMP.search(name) if smoke else None
+    if m:
         try:
-            return os.stat(os.path.join(folder, name)).st_mtime_ns
+            began = _dt.datetime.strptime(m.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=_dt.timezone.utc)
+            return int(began.timestamp()) * 10 ** 9, True
+        except ValueError:
+            pass
+    for name_, known in (("config.json", True), ("receipts.jsonl", False)):
+        try:
+            return os.stat(os.path.join(folder, name_)).st_mtime_ns, known
         except OSError:
             continue
-    return None
+    return None, False
+
+
+def _listed(runs):
+    try:
+        return [(name, os.path.join(runs, name)) for name in os.listdir(runs)]
+    except OSError:
+        return []
+
+
+def _run_folders():
+    """(name, folder, mode, smoke) for every run folder the page follows: state/<mode>/runs/* for the sandbox
+    and live, and the smoke's own runs of her loop, state/live/smoke/<stamp>/runs/* (smoke.py)."""
+    for mode in WATCHED_MODES:
+        for name, folder in _listed(paths.runs_dir(mode)):
+            yield name, folder, mode, False
+    smoke = os.path.join(paths.state_dir("live"), "smoke")
+    for _stamp, stamp_folder in _listed(smoke):
+        for name, folder in _listed(os.path.join(stamp_folder, "runs")):
+            yield name, folder, "live", True
 
 
 def newest_run():
-    """The run started last under state/<mode>/runs, for the sandbox and live, or None. A run with receipts
-    comes first: a run refused at the start (a halt in force, or another run holding the ledger) leaves a
-    folder with its config.json and no receipts, and must not hide the run that is going. A folder with no
-    receipts is watched only when no run has any (one starting, before its first line)."""
+    """The run started last, in the sandbox or live (the smoke's own runs of her loop included), or None. A
+    run with receipts comes first: a run refused at the start (a halt in force, or another run holding the
+    ledger) leaves a folder with its config.json and no receipts, and must not hide the run that is going.
+    A folder with no receipts is watched only when no run has any (one starting, before its first line)."""
     best = {True: None, False: None}
-    for mode in WATCHED_MODES:
-        runs = paths.runs_dir(mode)
-        try:
-            names = os.listdir(runs)
-        except OSError:
+    for name, folder, mode, smoke in _run_folders():
+        started, known = _started(folder, name, smoke)
+        if started is None:
             continue
-        for name in names:
-            folder = os.path.join(runs, name)
-            started = _started(folder)
-            if started is None:
-                continue
-            has = os.path.exists(os.path.join(folder, "receipts.jsonl"))
-            if best[has] is None or (started, name) > best[has][0]:
-                best[has] = ((started, name), Run(name, folder, mode, started, has))
+        has = os.path.exists(os.path.join(folder, "receipts.jsonl"))
+        if best[has] is None or (started, name) > best[has][0]:
+            best[has] = ((started, name), Run(name, folder, mode, started, has, smoke, known))
     pick = best[True] or best[False]
     return pick[1] if pick is not None else None
 
@@ -98,7 +124,7 @@ def newest_run():
 # ------------------------------------------------------------------------------------------
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
 _TS = re.compile(r"^(\d{4}-\d\d-\d\d)T(\d\d:\d\d:\d\dZ)$")
-_RUN_NAME = re.compile(r"^model-(live|replayed|stub)-")
+_RUN_NAME = re.compile(r"^model-(live|replayed|stub|yes-man)-")
 _HIDDEN = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})   # controls, direction overrides, lone surrogates, breaks
 
 
@@ -308,7 +334,12 @@ SOURCE_WORDS = {
             "every receipt says stub.",
     "replayed": "Model answers replayed from a recorded real run; no model is called now.",
     "live": "Model called live; the cost is measured.",
+    "yes-man": "No model: the yes-man stand-in (redteam) gives the most permissive valid answer and obeys any "
+               "instruction in the mail, so the gate alone bounds what she does.",
 }
+# smoke.py runs her loop itself, not under the supervisor: her own halt check stops it, between calls
+SMOKE_WORDS = ("The smoke's own run of her loop, on its one test request, without the kill switch's supervisor: "
+               "a Stop halts such a run at her next check, after any call in flight returns, not mid-call.")
 
 
 def _chain(path):
@@ -501,7 +532,8 @@ def snapshot(run):
             if len(rows) > MAX_ROWS else "")
     name = _text(run.name, 200)          # a folder name is bytes on disk, not always text
     return {"run": name, "title": "Doris watch: " + name, "run_line": "Run %s" % name,
-            "source": " ".join(w for w in (MODE_WORDS.get(mode, ""), SOURCE_WORDS.get(source, "")) if w),
+            "source": " ".join(w for w in (MODE_WORDS.get(mode, ""), SOURCE_WORDS.get(source, ""),
+                                           SMOKE_WORDS if run.smoke else "") if w),
             "status": status, "chain": chain, "chain_ok": chain_ok, "state": state, "panes": panes,
             "rows": rows, "after": max([r["seq"] for r in rows] or [0]), "more": more, "empty": ""}
 
@@ -562,7 +594,7 @@ def pressed_words(done, failed, now):
         words.append("NOT halted: %s. Run python -m doris stop now."
                      % ", ".join("%s (%s)" % (m, e) for m, e in failed))
     else:
-        words.append("A run in progress is killed mid-call and its receipt names what was dropped. Nothing more "
+        words.append("A run under the kill switch is killed mid-call and its receipt names what was dropped. Nothing more "
                      "is sent or booked until python -m doris resume.")
     return " ".join(words)
 
@@ -730,7 +762,7 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
   <form class="stop" method="post" action="/stop">
     <input type="hidden" name="token" value="$token">
     <div class="sign"><button type="submit">Stop</button></div>
-    <p>Halts Doris now, mid-call, in the sandbox and live, as <code>python -m doris stop</code> does.
+    <p>Halts Doris now in the sandbox and live, as <code>python -m doris stop</code> does. A run under the kill switch is killed mid-call.
       Only <code>python -m doris resume</code>, on the command line, lets her run again.</p>
     <p id="pressed" role="status">$pressed</p>
   </form>
@@ -910,9 +942,9 @@ class WatchServer(ThreadingHTTPServer):
 
     def view(self):
         """(the newest run's snapshot, the line about a press of Stop). The snapshot is read again only when
-        the receipt file has changed. The press line stays until a run with receipts whose config.json was
-        written after the press: that run got past the halt, so `resume` had cleared it. A press that failed
-        anywhere is said until watch closes."""
+        the receipt file has changed. The press line stays until a run with receipts is known to have started
+        after the press (its config.json, or the smoke's stamp): that run got past the halt, so `resume` had
+        cleared it. A press that failed anywhere is said until watch closes."""
         run = newest_run()
         key = None
         if run is not None:
@@ -937,13 +969,10 @@ class WatchServer(ThreadingHTTPServer):
                 key = None
             with self._lock:
                 self._cache = (key, snap) if key is not None else None
-        if pressed and not failed and run is not None and run.has_receipts:
-            try:                            # its config.json: written before the halt check, never by a halt
-                configured = os.stat(os.path.join(run.folder, "config.json")).st_mtime_ns
-            except OSError:
-                configured = None
-            if configured is not None and configured > pressed_ns:
-                pressed = ""                # a press that failed anywhere is said until watch closes
+        # a run's known start (config.json, or the smoke's stamp) comes before its halt check; a press that
+        # failed anywhere is said until watch closes
+        if pressed and not failed and run is not None and run.has_receipts and run.known and run.started > pressed_ns:
+            pressed = ""
         return snap, pressed
 
     def press(self):
@@ -1052,7 +1081,7 @@ class _Handler(BaseHTTPRequestHandler):
 # ------------------------------------------------------------------------------------------
 def main(argv) -> int:
     ap = argparse.ArgumentParser(
-        prog="python -m doris watch",
+        prog="python3 -m doris watch",
         description="The live page: every step of the newest run, why, and its cost so far, with one Stop "
                     "button. Served on 127.0.0.1 only.")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT, help="the port on 127.0.0.1 (default %d)" % DEFAULT_PORT)

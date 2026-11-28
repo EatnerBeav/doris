@@ -14,7 +14,7 @@ from unittest import mock
 
 from doris import __main__ as cli
 from doris import ledger as ledger_mod
-from doris import caps, loop, receipts
+from doris import caps, loop, receipts, supervisor
 from tests.unit.test_restart import DORIS, OWNER, Restart, add, edit
 
 PRIYA = "priya@northwind.example"
@@ -182,8 +182,22 @@ class InboxReadFails(Restart):
         self.assertIn("inbox could not be read", out.getvalue())
         self.assertNotIn("Done:", out.getvalue())
 
-    def test_a_run_until_stopped_reads_again_each_cycle_and_ends_after_failures_in_a_row(self):
-        """Review finding 4: one failed read no longer ends `run`; caps.MAIL_READ_FAILURES_IN_A_ROW do."""
+    def test_under_the_stub_the_last_line_counts_stand_in_calls_not_model_calls(self):
+        config = os.path.join(self.tmp, "config.json")
+        with open(config, "w", encoding="utf-8") as fh:
+            json.dump({"mode": "throwaway", "run_name": "run-worker", "state_dir": self.state,
+                       "sandbox_root": self.root, "owner_addr": OWNER, "doris_addr": DORIS,
+                       "model_source": "stub", "clock_mode": "advance", "retry_wait_s": 0}, fh)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cli.worker([config])
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn(" 1 bookings. Stand-in calls 1, cost none (stub). Receipts ", out.getvalue())
+        self.assertNotIn("Model calls", out.getvalue())
+
+    def test_a_run_until_stopped_reads_again_each_cycle_and_never_ends_on_failed_reads(self):
+        """Review finding 4: one failed read no longer ends `run`; decision 89: nor do any number in a row.
+        From caps.MAIL_READ_FAILURES_IN_A_ROW she tries every caps.MAIL_READ_RETRY_S until a stop."""
         shutil.rmtree(os.path.join(self.root, "inbox"))
         config = os.path.join(self.tmp, "config.json")
         with open(config, "w", encoding="utf-8") as fh:
@@ -195,6 +209,8 @@ class InboxReadFails(Restart):
 
         def sleep(seconds):
             clock[0] += seconds
+            if clock[0] >= 2000.0:                  # tries at 1000 to 1005 (a second apart), 1200 and 1800
+                supervisor.request_stop("throwaway", "cli", state_dir=self.state)
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out), mock.patch.object(loop, "_time", lambda: clock[0]), \
@@ -202,11 +218,11 @@ class InboxReadFails(Restart):
             code = cli.worker([config])
         n = caps.MAIL_READ_FAILURES_IN_A_ROW
         said = out.getvalue()
-        self.assertEqual(code, 1, said)
-        self.assertEqual(said.count("Inbox not read: MailError (error line written). She tries again at her next "
-                                    "cycle"), n - 1)
-        self.assertIn("Stopped: the inbox could not be read %d times in a row, so the run ended there" % n, said)
-        self.assertIn("chain verified", said)
+        self.assertEqual(code, supervisor.WORKER_EXIT_HALTED, said)
+        self.assertEqual(said.count("Inbox not read: MailError (error line written). She sends nothing until it "
+                                    "reads again, and tries again at her next cycle"), n - 1)
+        self.assertEqual(said.count("tries again every 10 minutes until it does or she is stopped"), 3)
+        self.assertNotIn("Stopped: the inbox could not be read", said)
         self.assertNotIn("Done:", said)
 
 

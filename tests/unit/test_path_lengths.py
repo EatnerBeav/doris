@@ -14,11 +14,12 @@ import os
 import shutil
 import subprocess
 import tempfile
+import types
 import unittest
 from unittest import mock
 
 from doris import __main__ as cli
-from doris import caps, paths, traps
+from doris import caps, loop, paths, redteam, traps
 from tests.unit import demo_sandbox
 
 BUDGET = 140        # characters from the repository root: 259 - 140 - 1 leaves a clone folder up to 118
@@ -53,12 +54,31 @@ class RunPathsTest(unittest.TestCase):
                             state_root=os.path.join(self.root, "state", "throwaway"),
                             traces_root=os.path.join(self.root, "traces"),
                             results_path=os.path.join(self.root, "tests", "trap-pack", "RESULTS.md"), stamp=STAMP)
+        # and a judge's run, its report and traces under state/throwaway/traces/ (the default)
+        with mock.patch.object(paths, "STATE", os.path.join(self.root, "state")), \
+                mock.patch.object(paths, "TRACES", os.path.join(self.root, "traces")), \
+                mock.patch.object(paths, "TESTS", os.path.join(self.root, "tests")):
+            traps.run_traps(paths.TRAP_PACK, model_source="stub", stamp=STAMP)
         found = written(self.root)
+        self.assertTrue([p for p in found if p.startswith("state/throwaway/traces/") and p.endswith("/RESULTS.md")])
         self.assertGreater(len([p for p in found if "/messages/" in p]), 30)    # her copies are among them
+        found.append(self.fallback_copy(max((p for p in found if "/messages/" in p), key=len)))
         self.assert_within_budget(found)
         # the same runs under the longest model source name a traps run takes (replayed, four more letters)
         self.assertEqual(max(traps.TRAPS_MODEL_SOURCES, key=len), "replayed")
         self.assert_within_budget([p.replace("stub", "replayed") for p in found])
+
+    def fallback_copy(self, copy):
+        """The name her copy of another mail takes in the same messages/ folder when that mail's hash
+        shares the copy's first COPY_NAME_HEX digits (loop.keep_copy), as a "/"-separated path."""
+        messages = os.path.dirname(os.path.join(self.root, *copy.split("/")))
+        short = os.path.basename(copy)[:-len(".eml")]
+        e = types.SimpleNamespace(item=types.SimpleNamespace(raw=b"Subject: another mail\r\n\r\nx\r\n"),
+                                  raw_sha256=short + "f" * (64 - len(short)))
+        kept = loop._Run.keep_copy(types.SimpleNamespace(run_dir=os.path.dirname(messages)), e)
+        self.assertNotEqual(kept["message_copy"], "messages/%s.eml" % short)
+        return os.path.relpath(os.path.join(os.path.dirname(messages), *kept["message_copy"].split("/")),
+                               self.root).replace(os.sep, "/")
 
     def test_the_demo_day_writes_no_path_longer_than_the_budget(self):
         sandbox = demo_sandbox.copy_committed(os.path.join(self.root, "sandbox"))
@@ -73,6 +93,31 @@ class RunPathsTest(unittest.TestCase):
         found = written(self.root)
         self.assertTrue([p for p in found if p.startswith("state/sandbox/runs/") and "/messages/" in p], found)
         self.assert_within_budget(found)
+
+
+    def test_a_redteam_run_writes_no_path_longer_than_the_budget(self):
+        # Recorded (tests/redteam/, traces/) and plain (all under state/throwaway/), twice each in one
+        # minute so the second carries "-2". The trap with the longest name, with the longest answer
+        # (meeting_request), and the halt case, one run of the demo day (its files and calendar names).
+        sandbox = demo_sandbox.copy_committed(os.path.join(self.root, "sandbox"))
+        for target, name, value in ((paths, "SANDBOX", sandbox), (paths, "STATE", os.path.join(self.root, "state"))):
+            patcher = mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        longest = max((c.name for c in redteam.cases(paths.TRAP_PACK) if c.kind == "trap"), key=len)
+        self.assertIn("meeting_request", redteam.CASE_ANSWERS)
+        for record in (True, False):
+            for _ in range(2):
+                kw = dict(traces_root=os.path.join(self.root, "traces"),
+                          results_path=os.path.join(self.root, "tests", "redteam", "RESULTS.md")) if record else {}
+                rep = redteam.run_redteam(only=[longest, "halt"], stamp=STAMP, record=record, **kw)
+                self.assertEqual(rep.bad_total, 0)
+        found = written(self.root)
+        self.assertTrue([p for p in found if p.startswith("traces/" + redteam.RUN_PREFIX + STAMP + "-2/")], found)
+        # the plain runs come third and fourth in the minute: "-3" and "-4"
+        self.assertTrue([p for p in found if p.startswith("state/throwaway/rt-%s-4/trace/" % STAMP)], found)
+        self.assertTrue([p for p in found if p.startswith("state/throwaway/rt-") and "/messages/" in p], found)
+        self.assert_within_budget([p for p in found if not p.startswith("sandbox/")])
 
 
 class CommittedPathsTest(unittest.TestCase):

@@ -36,6 +36,11 @@ MAIL_FAULTS = ("sent-unconfirmed", "login-refused")
 OTHER_FAULTS = ("model-down", "model-garbage", "budget-cap", "kill-mid-call", "kill-after-write")
 
 DEFAULT_SLOW_S = 5.0
+# A .eml whose size or modified time changed in the last SETTLE_S seconds (a judge's copy still being
+# written) waits for a later pass: a mail is known by its file name, so a half file read once is never
+# read again whole.
+SETTLE_S = 2.0
+_wall = time.time                    # the clock files are dated by (tests move it)
 DEFAULT_LANDS_MIN = 60
 _MAX_PERIODS = 100000
 
@@ -557,6 +562,7 @@ class SandboxMail(_Faults, MailAdapter):
         self.outbox = os.path.join(root, "outbox")
         self._hidden = set()
         self._fixture_clock = None
+        self._looks = None           # name -> ((size, mtime_ns), when it last changed), from her last look
         self._init_faults()
 
     def _enter(self, call):
@@ -610,17 +616,36 @@ class SandboxMail(_Faults, MailAdapter):
         return moment.astimezone(UTC)
 
     def _inbox(self):
-        """(file name, raw bytes, received_utc) for every .eml, oldest first by file name."""
+        """(file name, raw bytes, received_utc) for every .eml, oldest first by file name, less any
+        whose size or modified time changed in the last SETTLE_S seconds (it is read next pass). What
+        is there at her first look is read as it is; after that a file's own modified time says when
+        it was written, and a size that changed under the same modified time says now."""
         if not os.path.isdir(self.inbox):
             raise MailError("the sandbox inbox is missing: %s" % self.inbox)
         try:
             names = sorted(n for n in os.listdir(self.inbox)
                            if n.lower().endswith(".eml") and os.path.isfile(os.path.join(self.inbox, n)))
-            out = []
+            now, before, looks, out = _wall(), self._looks, {}, []
             for name in names:
-                with open(os.path.join(self.inbox, name), "rb") as fh:
+                path = os.path.join(self.inbox, name)
+                st = os.stat(path)
+                sig = (st.st_size, st.st_mtime_ns)
+                last = before.get(name) if before is not None else None
+                if before is None:
+                    changed = None
+                elif last is not None and last[0] == sig:
+                    changed = last[1]
+                elif last is not None and last[0][1] == sig[1]:
+                    changed = now
+                else:
+                    changed = min(st.st_mtime, now)
+                looks[name] = (sig, changed)
+                if changed is not None and now - changed < SETTLE_S:
+                    continue
+                with open(path, "rb") as fh:
                     raw = fh.read()
                 out.append((name, raw, self._received(raw)))
+            self._looks = looks
             return out
         except OSError as exc:
             raise MailError("inbox read failed: %s" % exc)

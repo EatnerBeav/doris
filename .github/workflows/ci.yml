@@ -2,12 +2,47 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}  # every main commit keeps its full run
+
 jobs:
+  # Docs-only PRs (*.md, docs/) skip the matrix; main always runs it in full.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: diff
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then echo code=true >> "$GITHUB_OUTPUT"; exit 0; fi
+          files=$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
+          if echo "$files" | grep -vqE '(\.md$|^docs/)'; then echo code=true >> "$GITHUB_OUTPUT"; else echo code=false >> "$GITHUB_OUTPUT"; fi
+
+  judge-path:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Demo and Trap Pack from the fresh checkout
+        working-directory: src
+        shell: bash
+        run: |
+          python -m doris demo
+          python -m doris traps
+
   secret-scan:
     runs-on: ubuntu-latest
     steps:
@@ -15,6 +50,8 @@ jobs:
       - run: python3 src/secret_scan.py --all
 
   unit:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -36,12 +73,16 @@ jobs:
       - name: Git tracks only the committed sandbox
         run: python -m tests.unit.demo_sandbox
       # A judge's order on every leg: the demo and the Trap Pack from the fresh checkout, run from src/
-      # as the README says, their output left in the checkout, then the suite. bash on every system
-      # (Git Bash on Windows): the default pwsh would pass the step on traps' exit code alone.
+      # as the README says, their output left in the checkout, then the suite. All of it lands where
+      # git ignores it (state/, the sandbox's outbox and her bookings), so the tree stays clean and the
+      # committed Trap Pack report and traces stay ours (only `traps --record` writes them). bash on
+      # every system (Git Bash on Windows): the default pwsh would pass the step on traps' exit code alone.
       - name: Demo and Trap Pack before the suite
         working-directory: src
         shell: bash
         run: |
           python -m doris demo
           python -m doris traps
+          changed="$(git status --porcelain --untracked-files=all)"
+          if [ -n "$changed" ]; then echo "The demo or the Trap Pack changed the checkout:"; echo "$changed"; exit 1; fi
       - run: python -m unittest discover -s tests -t . -v

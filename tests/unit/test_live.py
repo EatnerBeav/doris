@@ -596,7 +596,8 @@ class FetchTest(ImapFixture):
         self.assertEqual([i.server_id for i in items], ["INBOX:1700000001:%d" % uid3, "INBOX:1700000001:%d" % uid4])
         searches = [a for v, a in self.imap.commands if v == "UID SEARCH"]
         self.assertEqual(searches, ['SINCE 26-Nov-2026 NOT KEYWORD %s NOT HEADER Message-ID "%s"'
-                                    % (live.SMOKE_TEST_KEYWORD, live.SMOKE_MID_MARK)])
+                                    % (live.SMOKE_TEST_KEYWORD, live.SMOKE_MID_MARK),
+                                    "SINCE 26-Nov-2026"])          # the second counts what the first left out
 
     def test_the_start_time_can_be_set_after_construction(self):
         self.inbox.add(eml(1), u(2026, 11, 20, 9, 0))
@@ -632,7 +633,8 @@ class FetchTest(ImapFixture):
         self.inbox.messages[2]["flags"].add(live.SMOKE_TEST_KEYWORD)
         got = self.mail.fetch_new()
         self.assertEqual([item.server_id for item in got], ["INBOX:1700000001:1", "INBOX:1700000001:3"])
-        (search,) = [args for verb, args in self.imap.commands if verb == "UID SEARCH"]
+        self.assertEqual(self.mail.smoke_left_out, 1)
+        search = [args for verb, args in self.imap.commands if verb == "UID SEARCH"][0]
         self.assertIn("NOT KEYWORD %s " % live.SMOKE_TEST_KEYWORD, search)
         self.mail.since_utc = u(2026, 11, 27)
         self.assertEqual(len(self.mail.fetch_new()), 2)
@@ -646,13 +648,15 @@ class FetchTest(ImapFixture):
             self.inbox.add(eml(n, mid=mid), u(2026, 11, 27, 9, n))
         got = self.mail.fetch_new()
         self.assertEqual([item.raw for item in got], [eml(1), eml(4)])
-        (search,) = [args for verb, args in self.imap.commands if verb == "UID SEARCH"]
+        self.assertEqual(self.mail.smoke_left_out, 2)
+        search = [args for verb, args in self.imap.commands if verb == "UID SEARCH"][0]
         self.assertTrue(search.endswith('NOT KEYWORD %s NOT HEADER Message-ID "%s."'
                                         % (live.SMOKE_TEST_KEYWORD, live.SMOKE_TEST_KEYWORD)), search)
         real_search = live.LiveMail._search                   # a server that leaves that criterion out
         with mock.patch.object(live.LiveMail, "_search", lambda mail, conn, criteria, step: real_search(
-                mail, conn, criteria[:criteria.index("HEADER") - 1], step)):
+                mail, conn, criteria[:criteria.index("HEADER") - 1] if "HEADER" in criteria else criteria, step)):
             self.assertEqual([item.raw for item in self.mail.fetch_new()], [eml(1), eml(4)])
+            self.assertEqual(self.mail.smoke_left_out, 2)     # left out once read, and counted
         smoke_run = self.make_mail(smoke_message_id="<%s>" % smoke_mid)    # the smoke's own run still reads it
         self.inbox.messages[2]["flags"].add(live.SMOKE_TEST_KEYWORD)
         self.assertEqual([item.raw for item in smoke_run.fetch_new()], [eml(2, mid=smoke_mid)])

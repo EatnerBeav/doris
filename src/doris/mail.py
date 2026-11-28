@@ -822,18 +822,26 @@ def _header_view(value: str) -> str:
 
 def decoded_views(raw: bytes) -> List[str]:
     """Every way a kept copy reads once decoded, for the meeting-link check on it (templates.has_link),
-    never for reading her mail: the bytes as they are, each header with its encoded words undone, and
-    each part's body with its transfer encoding (base64, quoted-printable) undone, attachments and
-    attached mail included. Nothing is parsed past that; an error here means the check could not run."""
+    never for reading her mail: the bytes as they are and read as UTF-8, each header read as UTF-8
+    (a raw 8-bit header, as a client shows it) and with its encoded words undone, and each part's
+    body with its transfer encoding (base64, quoted-printable) undone, read as latin-1, as UTF-8 and
+    in its own charset, attachments and attached mail included. Nothing is parsed past that; an
+    error here means the check could not run."""
     data = bytes(raw)
-    views = [data.decode("latin-1")]
+    views = [data.decode("latin-1"), data.decode("utf-8", "replace")]
     for part in BytesParser(policy=_policy.compat32).parsebytes(data).walk():
         for _, value in part.items():
             views.append(_header_view(str(value)))
+        for _, value in part.raw_items():  # its own bytes: items() shows raw 8-bit as U+FFFD
+            if isinstance(value, str):
+                utf8 = value.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+                views += [utf8, _header_view(utf8)]
         if not part.is_multipart():
             body = part.get_payload(decode=True)
             if isinstance(body, bytes):
-                views.append(body.decode("latin-1"))
+                # as UTF-8 too, whatever its charset says or does not say: a client may show raw 8-bit
+                # UTF-8 so, and a link split by a zero-width space reads whole only then (PR #17 review)
+                views += [body.decode("latin-1"), body.decode("utf-8", "replace")]
                 charset = part.get_content_charset()
                 if charset:
                     try:
