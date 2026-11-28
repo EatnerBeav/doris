@@ -2,7 +2,7 @@
 
 ## Try it on your own email
 
-**With no key, she holds your email unread.** The demo's model answers are recorded, and your email has none, so with no key it is held: nothing is sent to you, and her notice to the owner says the model wasn't available. To have the model read it, set `ANTHROPIC_API_KEY` in your shell before the demo (about $0.004 an email; how to get a key is in the README, [With a key](../README.md#with-a-key-keys-tier-and-cost)). To have the built-in keyword stand-in read the whole day instead, yours included, move `answers.jsonl` out of this folder; the stand-in is crude and labelled stub everywhere.
+**With no key, she holds your email unread.** The demo's model answers are recorded, and your email has none, so with no key it is held: nothing is sent to you, and her notice to the owner says the model wasn't available. To have the model read it, copy `.env.example` to `.env` at the repo root and fill in `ANTHROPIC_API_KEY`, or set it in your shell, which wins if both are set (about $0.004 an email; the README's [With a key](../README.md#with-a-key-keys-tier-and-cost) says which key and tier). The demo's first line then says "Model called live" and where the key came from. To have the built-in keyword stand-in read the whole day instead, yours included, move `answers.jsonl` out of this folder; the stand-in is crude and labelled stub everywhere.
 
 1. Copy [`your-email.eml`](your-email.eml) into `inbox/` with a name that sorts after the demo's, such as `14-yourname.eml`.
 2. Edit it in any text editor: your name and address in From, your Subject and your words. Give each email you add its own Message-ID (change `your-email-1` to `your-email-2`, and so on): a Message-ID she has seen is a repeat, and she skips it.

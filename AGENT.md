@@ -111,7 +111,7 @@ From `src/`, with Python 3.9 or newer (`py` in place of `python3` on Windows). N
 
 ## Permissions
 
-Judges need no credential at all: every command above except `run --live` and `smoke` runs on the sandbox with no network. We never ask anyone for their credentials.
+Judges need no credential at all: every command above except `run --live` and `smoke` runs on the sandbox with no network. We never ask anyone for their credentials. A judge who wants the model to read the mail puts their own key in `.env` at the repo root (copied from `.env.example`; git ignores it), or in the environment, which wins; `demo`, the sandbox `run` and `traps` take only `ANTHROPIC_API_KEY` and `DORIS_MODEL` from it (`__main__.load_dotenv`), and `run --live` never reads it.
 
 Live, Doris uses Fastmail test accounts we control: `whizz@fastmail.com` (the owner and his calendar), `doris.htm@fastmail.com` (her own mailbox) and `wolf.whizz@fastmail.com` (our test sender). Every secret lives in one file on our server, `/root/doris-secrets/.env`, never in the repo; `.env.example` lists every name with no values, the smoke's own two (`WOLF_EMAIL`, `WOLF_JMAP_TOKEN`) included. The secret scan (`src/secret_scan.py`, run by the commit hook and by CI on every push) blocks known key shapes, and on any machine that holds that file, every value in it.
 
