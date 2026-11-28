@@ -511,9 +511,11 @@ class MeetingLinkTest(LiveFixture):
             withheld = seen["live-link-%d@northwind.example" % n]
             self.assertNotIn("message_copy", withheld)
             self.assertEqual(withheld["copy_withheld"], "meeting_link")
-            self.assertFalse(os.path.exists(os.path.join(copies, hashlib.sha256(mails[n]).hexdigest() + ".eml")))
-        self.assertEqual(sorted(os.listdir(copies)), sorted(hashlib.sha256(mails[n]).hexdigest() + ".eml"
-                                                            for n in (1, 2)))
+            for digits in (64, loop.COPY_NAME_HEX):
+                self.assertFalse(os.path.exists(os.path.join(copies, hashlib.sha256(mails[n]).hexdigest()[:digits]
+                                                             + ".eml")))
+        self.assertEqual(sorted(os.listdir(copies)), sorted(hashlib.sha256(mails[n]).hexdigest()[:loop.COPY_NAME_HEX]
+                                                            + ".eml" for n in (1, 2)))
         self.assertEqual([name for name, data in self.files() if room_in(data)], [])
 
 

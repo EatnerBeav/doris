@@ -66,6 +66,8 @@ NOTICE_WITHOUT_TIMES = frozenset({"hold.owner_mail", "hold.calendar_down", "hold
                                   "hold.remove_failed", "hold.internal_error"})
 
 HALT_POLL_S = 1.0                      # how often a long run's wait looks for a halt itself
+COPY_NAME_HEX = 16                     # her copy of a mail is named by this many hex digits of its sha256,
+                                       # short enough for Windows' default path limit; the receipt keeps all 64
 _sleep = time.sleep                    # her waits go through here, so a test can stand in for the wall clock
 _time = time.time
 
@@ -346,6 +348,11 @@ def read_clock(root):
     if t.tzinfo is None:
         raise ValueError("clock.txt must name a UTC instant")
     return t.astimezone(UTC)
+
+
+def _file_bytes(path):
+    with open(path, "rb") as fh:
+        return fh.read()
 
 
 def _status_for(outcome):
@@ -966,12 +973,13 @@ class _Run:
         return out
 
     def keep_copy(self, e):
-        """Her copy of the mail as it came, named by its hash, for whoever reads the receipts; returns
-        the observed line's copy fields. The law keeps the meeting link out of it: every form of the
+        """Her copy of the mail as it came, named by the first COPY_NAME_HEX hex digits of its sha256
+        (raw_sha256 on the observed line holds all 64), for whoever reads the receipts; returns the
+        observed line's copy fields. The law keeps the meeting link out of it: every form of the
         link in its bytes becomes "[meeting link]" (copy_redacted), and a copy that would still show
         the link once a part or header is decoded (base64, an encoded word) is not kept at all
         (copy_withheld), nor one the check could not run on. A mail without the link is kept byte
-        for byte."""
+        for byte. Should another mail's copy already hold the short name, this one takes the whole hash."""
         data, replaced = templates.redact_link_bytes(e.item.raw)
         try:
             left = any(templates.has_link(view) for view in mail.decoded_views(data))
@@ -979,8 +987,11 @@ class _Run:
             return {"copy_withheld": "link_check_failed"}
         if left:
             return {"copy_withheld": "meeting_link"}
-        name = os.path.join("messages", e.raw_sha256 + ".eml")
+        name = os.path.join("messages", e.raw_sha256[:COPY_NAME_HEX] + ".eml")
         path = os.path.join(self.run_dir, name)
+        if os.path.exists(path) and _file_bytes(path) != data:
+            name = os.path.join("messages", e.raw_sha256 + ".eml")
+            path = os.path.join(self.run_dir, name)
         if not os.path.exists(path):
             with open(path, "wb") as fh:
                 fh.write(data)

@@ -637,7 +637,7 @@ class RunnerTest(unittest.TestCase):
         text = read_text(self.results)
         first = text.split("\n", 1)[0]
         for part in ("Setup:", "model stub", OWNER, DORIS, "2026-12-01T17:00:00Z", "fixed", "calendar empty",
-                     "state/throwaway/model-stub-throwaway-traps-20261127T1900Z/<item>/"):
+                     "state/throwaway/stub-20261127T1900Z/<NN>/"):
             self.assertIn(part, first)
         self.assertIn("Agentware 2026 Trap Pack, Hackathon Raptors (CC BY 4.0)", text)
         self.assertEqual([(r.item, r.outcome, r.verdict) for r in rep.rows],
@@ -654,6 +654,10 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual((cfg.mode, cfg.clock_mode, cfg.owner_addr, cfg.doris_addr, cfg.model_source),
                          ("throwaway", "fixed", OWNER, DORIS, "stub"))
         self.assertEqual(cfg.state_dir, cfg.sandbox_root)
+        # each item's state in a short folder (its place in the pack); the run name stays the receipts' run_id
+        self.assertEqual([os.path.relpath(c.state_dir, self.state) for c in deps.loop.configs],
+                         [os.path.join("stub-20261127T1900Z", n) for n in ("01", "02", "03")])
+        self.assertEqual({c.run_name for c in deps.loop.configs}, {"model-stub-throwaway-traps-20261127T1900Z"})
         self.assertEqual(read_text(os.path.join(cfg.sandbox_root, "clock.txt")), "2026-12-01T17:00:00Z")
         facts = json.loads(read_text(os.path.join(deps.loop.configs[1].sandbox_root, "inbox", "facts.json")))
         self.assertEqual(facts, {"02-bill.eml": {"forwarded": "yes", "wrapped": "wrapped document",

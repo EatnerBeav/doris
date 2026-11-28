@@ -201,6 +201,38 @@ class ALongSandboxRun(unittest.TestCase):
         self.assertEqual([l["payload"]["clock"] for l in observed], ["2026-12-01T16:10:00Z", "2026-12-01T16:20:00Z"])
 
 
+class HerCopies(unittest.TestCase):
+    """Her copy of each mail is named by the first 16 hex digits of its sha256, so its path fits
+    Windows' default limit (test_path_lengths); the observed line keeps all 64."""
+
+    def copies(self):
+        tmp = tempfile.mkdtemp(prefix="doris-loop-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        lines = sandbox_run(tmp)
+        run_dir = os.path.join(tmp, "state", "runs", "model-stub-sandbox-test")
+        out = []
+        for l in lines:
+            if l["kind"] == "observed" and "message_copy" in l["payload"]:
+                with open(os.path.join(run_dir, l["payload"]["message_copy"]), "rb") as fh:
+                    out.append((l["payload"]["message_copy"], l["payload"]["raw_sha256"], fh.read()))
+        self.assertGreater(len(out), 10)
+        return out
+
+    def test_a_copy_is_named_by_16_hex_digits_and_the_receipt_keeps_all_64(self):
+        for name, sha, data in self.copies():
+            self.assertEqual(name, "messages/%s.eml" % sha[:16])
+            self.assertRegex(sha, r"^[0-9a-f]{64}\Z")
+
+    def test_mails_whose_hashes_share_the_digits_each_keep_their_own_copy(self):
+        with mock.patch.object(loop, "COPY_NAME_HEX", 1):       # 16 names for every mail of the demo day
+            got = self.copies()
+        whole = [(name, sha) for name, sha, _ in got if name == "messages/%s.eml" % sha]
+        self.assertTrue(whole, "no two copies shared a digit")
+        for name, sha, data in got:
+            self.assertIn(name, ("messages/%s.eml" % sha[:1], "messages/%s.eml" % sha))
+        self.assertEqual(len({data for _, _, data in got}), len({sha for _, sha, _ in got}))   # one copy each
+
+
 class TheTerminalLines(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.mkdtemp(prefix="doris-loop-")
