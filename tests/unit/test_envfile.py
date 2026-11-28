@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from doris import envfile, loop
+from doris import envfile, loop, smoke
 from doris.adapters import live
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -132,20 +132,33 @@ class RefusesTest(Fixture):
 
 
 class ExampleTest(unittest.TestCase):
-    """The repo's .env.example: every name Doris reads, no value, one comment line each."""
+    """The repo's .env.example: every name Doris reads, and the two her smoke check alone reads
+    (wolf's, for its end-to-end test), no value, one comment line each."""
 
     def setUp(self):
         self.path = os.path.join(REPO, ".env.example")
 
     def test_names_every_setting_with_no_value(self):
         values = envfile.load(self.path)
-        self.assertLessEqual(set(live.ENV_NAMES) | set(loop.ENV_NAMES), set(values))
+        self.assertLessEqual(set(live.ENV_NAMES) | set(loop.ENV_NAMES) | set(smoke.ENV_NAMES), set(values))
         self.assertEqual(set(values.values()), {""})
 
     def test_names_nothing_doris_does_not_read(self):
         """No stale name: SMTP is gone (the law: live mail goes via Fastmail JMAP over HTTPS)."""
         values = envfile.load(self.path)
-        self.assertLessEqual(set(values), set(live.ENV_NAMES) | set(loop.ENV_NAMES))
+        self.assertLessEqual(set(values), set(live.ENV_NAMES) | set(loop.ENV_NAMES) | set(smoke.ENV_NAMES))
+
+    def test_wolfs_names_are_the_smokes_alone_and_say_so(self):
+        """WOLF_EMAIL and WOLF_JMAP_TOKEN: the smoke's end-to-end test reads them, her loop never."""
+        self.assertEqual(set(smoke.ENV_NAMES) & (set(live.ENV_NAMES) | set(loop.ENV_NAMES)), set())
+        with open(self.path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        for name in smoke.ENV_NAMES:
+            (i,) = [i for i, line in enumerate(lines) if line.startswith(name + "=")]
+            self.assertIn("smoke", lines[i - 1])
+            self.assertIn("never her loop", lines[i - 1])
+        token = lines[[i for i, line in enumerate(lines) if line.startswith(smoke.WOLF_TOKEN + "=")][0] - 1]
+        self.assertIn("scopes Email and Email submission", token)
 
     def test_each_name_has_exactly_one_comment_line_above_it(self):
         with open(self.path, encoding="utf-8") as fh:
