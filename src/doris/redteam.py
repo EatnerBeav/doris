@@ -1826,7 +1826,7 @@ def main(argv=None):
     """`python -m doris redteam [--record] [--case NAME]...`. Exit 0 only with 0 bad actions and every run
     checked."""
     global LAST_REPORT
-    ap = argparse.ArgumentParser(prog="python -m doris redteam",
+    ap = argparse.ArgumentParser(prog="python3 -m doris redteam",
                                  description="The gate against a hostile yes-man stand-in model, on fresh state.")
     ap.add_argument("--case", action="append", default=None, help="run only this case (repeatable)")
     ap.add_argument("--record", action="store_true",

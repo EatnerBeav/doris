@@ -809,7 +809,8 @@ class Server(TempState):
         def request_stop(mode, cause="cli", state_dir=None):
             calls.append((mode, cause, state_dir))
             return cause
-        with mock.patch.object(supervisor, "request_stop", side_effect=request_stop):
+        with mock.patch.object(supervisor, "request_stop", side_effect=request_stop), \
+                mock.patch.object(supervisor, "halt_cause", return_value="cli"):    # stop reads its halt back
             self.assertEqual(run_cli(["stop"])[0], 0)
             by_cli = list(calls)
             del calls[:]

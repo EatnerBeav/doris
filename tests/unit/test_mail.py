@@ -398,5 +398,48 @@ class Counts(unittest.TestCase):
         self.assertEqual(m.phone_numbers_seen, 0)
 
 
+class KeptCopyViews(unittest.TestCase):
+    """decoded_views, for the meeting-link check on a kept copy: a body of raw 8-bit UTF-8 is read as
+    UTF-8 whatever its charset says, so a link split by a zero-width space is still seen (PR #17 review)."""
+
+    def setUp(self):
+        from doris import templates
+        self.templates = templates
+        link = templates.meeting_link()
+        self.split = (link[:12] + "\u200b" + link[12:]).encode("utf-8")       # as a reader sees it: whole
+
+    def left(self, raw):
+        return any(self.templates.has_link(view) for view in mail.decoded_views(raw))
+
+    def message(self, content_type, body, encoding="8bit"):
+        head = b"From: a@example.com\r\nSubject: hi\r\nMIME-Version: 1.0\r\n"
+        if content_type:
+            head += b"Content-Type: " + content_type + b"\r\n"
+        return head + b"Content-Transfer-Encoding: " + encoding.encode("ascii") + b"\r\n\r\n" + body + b"\r\n"
+
+    def test_the_check_is_blind_to_the_split_link_read_as_latin_1(self):
+        self.assertFalse(self.templates.has_link(self.split.decode("latin-1")))   # why a UTF-8 view is needed
+
+    def test_a_raw_utf8_body_with_no_charset(self):
+        self.assertTrue(self.left(self.message(b"", b"Join: " + self.split)))
+        self.assertTrue(self.left(self.message(b"text/plain", b"Join: " + self.split)))
+
+    def test_a_raw_utf8_body_that_says_us_ascii_latin_1_or_a_charset_nobody_knows(self):
+        for charset in (b"us-ascii", b"iso-8859-1", b"x-no-such-charset"):
+            raw = self.message(b"text/plain; charset=" + charset, b"Join: " + self.split)
+            self.assertTrue(self.left(raw), charset)
+
+    def test_a_base64_part_of_utf8_bytes_that_says_latin_1(self):
+        import base64
+        inner = base64.encodebytes(b"Join: " + self.split).replace(b"\n", b"\r\n").rstrip()
+        raw = (b"From: a@example.com\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=b1\r\n\r\n"
+               b"--b1\r\nContent-Type: text/plain; charset=iso-8859-1\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+               + inner + b"\r\n--b1--\r\n")
+        self.assertTrue(self.left(raw))
+
+    def test_a_copy_without_the_link_has_none_left(self):
+        self.assertFalse(self.left(self.message(b"text/plain", "Join: caf\u00e9 \u200b later".encode("utf-8"))))
+
+
 if __name__ == "__main__":
     unittest.main()
