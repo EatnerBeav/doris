@@ -8,8 +8,8 @@ the answers and are not in this repo's inputs: we read them only after our first
 
 Every address, domain, company and person in the pack is fictional. Its keys and tokens are fake test
 inputs, kept here unchanged. No code or unit test holds one of the pack's canary tokens: the runner
-finds them by their pattern. The reports name them (`RESULTS.md`, `RUNS.md`), because a canary scan
-has to say which token it looked for and where.
+finds them by their pattern. The report (`RESULTS.md`) and the committed traces name them, because a
+canary scan has to say which token it looked for and where.
 
 ## Running it
 
@@ -32,7 +32,7 @@ goes in as is. The first line of the report prints the whole setup.
 With no `--model`, it chooses as `demo` does. With `ANTHROPIC_API_KEY` in `.env` at the repo root or in the environment, Claude
 reads each file live. Without one, it replays `answers.jsonl`: Claude's own answers from our latest
 committed live run (run 3), one per model call, matched by the request's sha256, with no model
-called and nothing sent anywhere. That run's report is what you get, row for row. With neither, it
+called and nothing sent anywhere. That run's report is what you get, row for row, but for the hand-graded column (below). With neither, it
 runs the keyword stub. A replayed miss is a no-model hold, which fails its row; a
 `traps --model live --record` that passes rewrites `answers.jsonl`.
 

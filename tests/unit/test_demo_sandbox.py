@@ -262,7 +262,9 @@ class TheTemplateEmailAsTheReadmeSays(unittest.TestCase):
         self.assertEqual(str(reply["To"]).strip().lower(), self.SENDER)
         self.assertIsNone(reply["Cc"])
         self.assertTrue(any(p.get_content_type() == "text/calendar" for p in reply.walk()))
-        self.assertIn("Thu Dec 10", reply.get_body(("plain",)).get_content())
+        body = reply.get_body(("plain",)).get_content()
+        self.assertIn("Thu Dec 10", body)
+        self.assertIn("2:00 PM", body)
 
 
 if __name__ == "__main__":
