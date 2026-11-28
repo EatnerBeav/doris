@@ -29,6 +29,10 @@ REPO = os.path.dirname(TESTS)
 SANDBOX = os.path.join(REPO, "sandbox")      # the repository's own, as doris.paths has it
 GENERATOR = os.path.join(TESTS, "tools", "build_demo_fixtures.py")
 HAND_WRITTEN = ("README.md",)              # committed beside the generated fixtures, not generated
+# Recorded model answers from a real keyed run of the demo day, replayed when no key is set. Committed,
+# but never copied into a test's sandbox (so every other demo test runs the stub); test_cli.RecordedAnswers
+# reads it, and fails if a change to the request or the mail leaves any of the day's calls unanswered.
+RECORDED = ("answers.jsonl",)
 FACTS = "inbox/facts.json"
 
 # What a run writes into calendar/ beside the owner's committed events: her bookings, staged events.
@@ -132,7 +136,7 @@ def sandbox_drift(tracked):
     """How the files git tracks under sandbox/ differ from committed_files(), in words; "" if not."""
     committed = set(committed_files())
     problems = []
-    extra = sorted(set(tracked) - committed)
+    extra = sorted(set(tracked) - committed - set(RECORDED))
     missing = sorted(committed - set(tracked))
     if extra:
         problems.append("committed under sandbox/ but not in demo_sandbox.committed_files(), so no test "
@@ -154,8 +158,9 @@ def main():
         print("Remove the file from git, or have tests/tools/build_demo_fixtures.py write it (or list it in "
               "HAND_WRITTEN in tests/unit/demo_sandbox.py) and test it.", file=sys.stderr)
         return 1
-    print("sandbox check: git tracks the %d files of the committed sandbox under sandbox/, and no others"
-          % len(tracked))
+    recorded = sorted(set(tracked) & set(RECORDED))
+    print("sandbox check: git tracks the %d files of the committed sandbox under sandbox/%s, and no others"
+          % (len(tracked) - len(recorded), "".join(" plus the recorded " + r for r in recorded)))
     return 0
 
 

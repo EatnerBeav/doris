@@ -1,0 +1,30 @@
+{
+ "answers_written": "sandbox/answers.jsonl",
+ "command": "python3 -m doris demo",
+ "commit": "18d160a57c50a26edd924ae9b0db4f0357dbc80d",
+ "cost_usd": 0.033706,
+ "counts": {
+  "errors": 0,
+  "handled": 13,
+  "held": 2,
+  "human_approvals": 0,
+  "messages": 15,
+  "model_calls": 9,
+  "sends": 9
+ },
+ "ended_utc": "2026-11-28T12:33:42Z",
+ "exit_code": 0,
+ "kind": "demo",
+ "mode": "sandbox",
+ "model": "claude-sonnet-5-5",
+ "model_source": "live",
+ "outcome": "pass",
+ "receipt_chain": {
+  "lines": 224,
+  "ok": true,
+  "reason": "ok"
+ },
+ "recorded_answers": 9,
+ "started_utc": "2026-11-28T12:33:15Z",
+ "where": "wide (our server), its own clone of main"
+}

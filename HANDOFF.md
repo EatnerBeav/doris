@@ -62,7 +62,7 @@ From the kickoff thread (Wolf), Fri Nov 27, 11:55 PM Pacific. That thread is clo
 ## Next three from the tracker
 
 1. Stop the soak and commit its trace (Sat morning).
-2. Record answers from a real keyed demo run, so `demo` replays a real model (Sat 12:00 PM). No sandbox/answers.jsonl exists yet.
-3. A fresh live-model Trap Pack run on merged main, with RESULTS.md graded against the key beside each verdict (Sat 12:00 PM).
+2. Done Sat 4:33 AM (PR #29, decision 107): `sandbox/answers.jsonl` from a keyed demo on our server, $0.0337. Re-record with a keyed `demo` after any change to the model request (prompt, model, fields) and once at the freeze; `test_cli.RecordedAnswers` fails until you do.
+3. Done Sat 4:33 AM (PR #29): Trap Pack run 3 on main, $0.0649, graded against the key in RESULTS.md and RUNS.md. A new `traps --record` regenerates RESULTS.md and drops the hand-added "Against the key" column: grade it again, and update the costs and trace paths in README, AGENT.md, SAFETY.md and tracker.md.
 
 After those, the Saturday 8 PM overnight run.

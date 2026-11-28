@@ -1,0 +1,9 @@
+{"envelope_to": ["priya@northwind.example", "whizz@fastmail.com"], "file": "001-T1.eml", "message_id": "<a71f631edfc8dc3761e78a8acd61c945@fastmail.com>"}
+{"envelope_to": ["marcus@brightlane.example", "whizz@fastmail.com"], "file": "002-T2.eml", "message_id": "<603b929bb52de1bf420bfe2ada43e6ac@fastmail.com>"}
+{"envelope_to": ["dana@fernhill.example", "whizz@fastmail.com"], "file": "003-T4.eml", "message_id": "<c451f48da2d02ce8f5caf2385c7526aa@fastmail.com>"}
+{"envelope_to": ["marcus@brightlane.example", "whizz@fastmail.com"], "file": "004-T1.eml", "message_id": "<a29400eeeb01a9f5e6f8c11fb5cc8696@fastmail.com>"}
+{"envelope_to": ["priya@northwind.example", "whizz@fastmail.com"], "file": "005-T18.eml", "message_id": "<31f1ffb343f7fb9eb9395794f7b38469@fastmail.com>"}
+{"envelope_to": ["sam@ridgeway.example", "whizz@fastmail.com"], "file": "006-T4.eml", "message_id": "<b4ffe905631d93535476801617b22af6@fastmail.com>"}
+{"envelope_to": ["whizz@fastmail.com"], "file": "007-S1.eml", "message_id": "<b02296afa1e0fc36b749b81a1f104321@fastmail.com>"}
+{"envelope_to": ["whizz@fastmail.com"], "file": "008-S1.eml", "message_id": "<e915f952f921de9a04aadc9cdd6be09e@fastmail.com>"}
+{"envelope_to": ["whizz@fastmail.com"], "file": "009-S2.eml", "message_id": "<991e557f7ae6bb569861a2e5b558d2a4@fastmail.com>"}

@@ -87,6 +87,52 @@ class TheEnvironmentStaysOut(Isolated):
         self.assertEqual(model.default_model_id(), model.DEFAULT_MODEL)
 
 
+class RecordedAnswers(Isolated):
+    """The committed sandbox/answers.jsonl answers every model call of the demo day. A change to the
+    request (the system prompt, the model, the fields sent) or to the day's mail would turn the
+    zero-key demo's calls into no-model holds; this fails first. Re-record with a keyed `demo`."""
+
+    def recorded(self):
+        path = os.path.join(demo_sandbox.SANDBOX, "answers.jsonl")
+        self.assertTrue(os.path.isfile(path), "sandbox/answers.jsonl is missing: the zero-key demo would run the stub")
+        with open(path, encoding="utf-8") as fh:
+            lines = [json.loads(l) for l in fh if l.strip()]
+        shutil.copyfile(path, os.path.join(self.sandbox, "answers.jsonl"))
+        return lines
+
+    def test_the_file_is_one_run_with_one_answer_per_call_of_the_day(self):
+        lines = self.recorded()
+        self.assertEqual(len(lines), 9)
+        self.assertEqual(len({l["request_sha256"] for l in lines}), 9)
+        self.assertEqual(len({l["run_id"] for l in lines}), 1)
+        self.assertEqual(len({l["model_id"] for l in lines}), 1)
+
+    def test_a_doris_model_setting_does_not_change_what_is_replayed(self):
+        self.recorded()
+        with mock.patch.dict(os.environ, {"DORIS_MODEL": "claude-some-other-model"}):
+            code, out = run_cli(["demo"])
+        self.assertEqual(code, 0, out)
+        (run,) = self.runs()
+        s = summary_of(os.path.join(run, "receipts.jsonl"))
+        self.assertEqual((s["handled"], s["held"], s["model_calls"]), (13, 2, 9))
+
+    def test_the_zero_key_demo_replays_the_recorded_run_and_every_call_is_answered(self):
+        self.recorded()
+        code, out = run_cli(["demo"])
+        self.assertEqual(code, 0, out)
+        self.assertRegex(out.splitlines()[0], r"^Sandbox\. Model answers replayed from recorded run model-live-sandbox-\S+\. No key found\.$")
+        (run,) = self.runs()
+        self.assertTrue(os.path.basename(run).startswith("model-replayed-sandbox-"), run)
+        receipts_path = os.path.join(run, "receipts.jsonl")
+        self.assertTrue(receipts.verify(receipts_path).ok)
+        lines = receipts.read_lines(receipts_path)
+        classified = [l["payload"] for l in lines if l["kind"] == "classified"]
+        self.assertEqual(len(classified), 9)
+        self.assertEqual([(c["source"], c["ok"]) for c in classified], [("replayed", True)] * 9)
+        s = summary_of(receipts_path)
+        self.assertEqual((s["handled"], s["held"], s["human_approvals"], s["model_calls"], s["errors"]), (13, 2, 0, 9, 0))
+
+
 class Demo(Isolated):
     def test_the_demo_day_runs_under_the_kill_switch_and_says_where_answers_come_from(self):
         code, out = run_cli(["demo"])
