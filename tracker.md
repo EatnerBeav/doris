@@ -1,37 +1,61 @@
-# Tracker: every scored item
+# Tracker
 
-Updated Fri Nov 27, 7:10 PM Pacific. One line per item the judges score, from the project law (Never cut, commands, Dates) and the Nov 26 brief check. Times are Pacific.
+Every item the judges score, one line each: **status** · item · owner · due (Pacific).
+Updated Fri Nov 27, 8:35 PM. Kept current on main as items move.
 
-Status words: **done** = in the code on main and tested; **built** = in the code, the proof still to show; **in progress**; **not started**; **blocked** (says on what).
+Status words: **done** (on main, tested) · **in review** (built, in a pull request) · **building** · **blocked** (says on what) · **not started**.
 
-| # | Item | Scores | Status | Owner thread | Due |
-|---|---|---|---|---|---|
-| 1 | Live sending over JMAP and tonight's end-to-end live smoke (wolf.whizz to whizz@, the forward to Doris, her reply through JMAP, the read-back) | Autonomy, Reliability | in progress: both tokens answer the JMAP session; sending being wired test-first on PR #2 | Kickoff (Wolf) | Fri night |
-| 2 | `replay` (audit): step-through of one finished run, chain checked first | Audit trail +1 | built: PR #8 review-clean (two Fable reviews, 55 tests, CI green); merges and gets its CLI line after PR #2 | Build the replay audit command | Sat 8:00 AM |
-| 3 | Watch page: the four labels (current step, tool calls, decisions, cost so far) and a code-written why on every decision | Live monitoring +1 | built: PR #9 review-clean (two Fable reviews, CI green): local page, the four labels, every decision's why, Stop calls the same stop; merges and gets its CLI line after PR #2 | Build the live watch page | Sat 10:00 AM |
-| 4 | Halt receipt naming the call in flight and the dropped queue | Kill switch +1 | built: the halted line carries `in_flight` and `dropped`. To show on camera, Stop landing mid-call | Kickoff (Wolf) | Sat 4:00 PM rehearsal |
-| 5 | Yes-man redteam proof: a model that obeys every injection, 0 bad actions | Guardrails +1, Reliability | in progress: PR #10 (draft): 0 bad actions in 152 runs over 24 cases (20 Trap Pack files, demo day, two cap cases, Stop mid model call), in review | Prove the gate with a yes-man model | Sat 12:00 PM |
-| 6 | One calendar timeout with retry in the demo | Reliability, Demo | done: the demo's `timeout-once` fault; she retries and books | Kickoff (Wolf) | done |
-| 7 | `stop` / `resume` | Kill switch +1 | done on main; PR #2 adds SIGTERM/SIGHUP, the lifeline and the `sending` state | Kickoff (Wolf) | PR #2 merge, Fri night |
-| 8 | Booking re-check: right before the write, read back after | Reliability, never cut | done: gate G11 plus the re-read after the write (ruling 4) | Kickoff (Wolf) | done |
-| 9 | Signature check | Guardrails, never cut | done: gate G8 compares the signature byte for byte | Kickoff (Wolf) | done |
-| 10 | Fresh-clone run of the one command on three systems | Engineering | in progress. CI runs `demo` and `traps` from the fresh checkout on all six legs, on main since PR #5 merged (Fri 6:55 PM). Hand runs from a fresh clone of main, Fri 6:05 PM: Linux server, `demo` 14.1 s and `traps` 20/20; Shane's Windows 11 PC, `demo` 13.6 s, but `traps` 1/20 because its run paths pass Windows' 260-character limit (fix and a path-budget test queued on PR #2) | Kickoff (Wolf) | Sat 10:00 AM |
-| 11 | No-key line | Engineering, honesty | built: the demo's first line says the answers are replayed and no key was found. Wording of what a key costs to check | Kickoff (Wolf) | Sun 12:00 PM |
-| 12 | Live or replayed mark on every trace | Audit trail, honesty | in progress: receipts carry their mode; live runs get a manifest (live, date, commit, measured cost) with tonight's smoke; demo and Trap Pack traces next | Kickoff (Wolf) | Sat 12:00 PM |
-| 13 | Keys, tiers and cost table | Engineering | not started: cost is measured in tonight's smoke and Saturday's runs | README pass (Sunday) | Sun 6:00 PM |
-| 14 | SAFETY.md: the five verbs (send, delete, overwrite, pay, deploy) | Guardrails +1 | in progress: PR #7 review-clean (base `live`); JMAP rows go from pending to done when JMAP lands | Draft SAFETY.md and AGENT.md | Sat 6:00 PM draft, Sun final |
-| 15 | AGENT.md permissions: each credential, its scope, what it cannot do | Engineering | in progress: PR #7 review-clean; same | Draft SAFETY.md and AGENT.md | Sat 6:00 PM draft, Sun final |
-| 16 | README rubric-to-evidence map | Every criterion | not started: written from the traces and this tracker | README pass (Sunday) | Sun 6:00 PM |
-| 17 | Live booking | Autonomy, Usefulness | blocked on item 1 | Kickoff (Wolf) | Sat 2:00 PM |
-| 18 | Overnight run | Autonomy, Reliability, never cut | blocked on item 17 | Kickoff (Wolf) | Sat 8:00 PM start |
-| 19 | Feature freeze and the video | Demo, Kill switch +1 | not started | Kickoff (Wolf) with Shane | Sun evening |
-| 20 | Recorded answers from a real keyed demo run, so `demo` replays a real model (today it falls back to the keyword stub) | Autonomy, honesty | not started: a keyed demo run on the server after PR #2 merges, its answers and live trace committed from there; recorded again at the freeze, since answers replay only on the code they ran on | Kickoff (Wolf) | Sat 12:00 PM, again Sun at freeze |
-| 21 | Follow-up nudge on an unanswered offer (T9) | Usefulness | not started: marked pending in AGENT.md | New thread after PR #2 merges | Sat 2:00 PM |
-| 22 | Ruling 17's once-a-cycle check for a booking gone from the calendar | Reliability | not started: today it runs only on a resumed booking; marked pending in AGENT.md | New thread after PR #2 merges | Sat 2:00 PM |
-| 23 | Only the supervisor starts a process (a source-tree test for SAFETY's deploy row) | Guardrails +1 | done in PR #7: a source-tree test that only the supervisor starts a process | Draft SAFETY.md and AGENT.md | Sat 10:00 AM |
-| 24 | `traps` with no key replays a recorded live run's answers (today it falls back to the keyword stub and rewrites the committed RESULTS.md) | Reliability, honesty | not started: the RESULTS.md rewrite fix is queued on PR #2; replay waits on the fresh live Trap Pack run on merged main | Kickoff (Wolf) | Sat 12:00 PM |
-| 25 | `terminal.log` in every trace folder (0 bytes in all 40 committed today) | Audit trail | queued on PR #2 | Kickoff (Wolf) | Sat 10:00 AM |
+## Tonight and the live runs
 
-Open pull requests: #2 `live` (live adapters, live loop, digest, kill-switch hardening; JMAP sending lands here), #6 this tracker, #7 SAFETY.md and AGENT.md, #8 replay, #9 watch page, #10 yes-man proof (#7 to #10 on base `live`, merged after PR #2).
+- **building** · PR #2 merged to main: live mail and calendar, the live loop, the digest, kill-switch hardening, JMAP sending · Wolf · Fri 11:30 PM
+  - JMAP sending is on the `live` branch; two Windows CI fixes, a final review and CI remain.
+- **building** · Tonight's end-to-end live smoke: a test mail to the owner, the forward to Doris, her reply over JMAP, the read-back · Wolf · Fri 9:15 PM
+  - Running on the server now; its trace goes to `traces/live-smoke-<time>/`, pass or fail.
+- **blocked** · Live booking · Wolf · Sat 2:00 PM
+  - On PR #2 and the smoke.
+- **blocked** · Overnight run · Wolf · Sat 8:00 PM start
+  - On the live booking.
+- **blocked** · Recorded answers from a real keyed demo run, so `demo` replays a real model · Wolf · Sat 12:00 PM, again at the freeze
+  - On PR #2. Today the demo falls back to the keyword stand-in and says so.
+- **not started** · Feature freeze and the video · Wolf with Shane · Sun evening
 
-Known limit, written down: `stop` and a HALT file don't reach `traps`, which runs the loop in its own process; only a STOP file at the repo root halts it, at its next step. Trap Pack run 2 sits on branch `trap-pack-run-2`, unchanged, as it ran.
+## Safety bonus: audit trail, live monitoring, kill switch, guardrails
+
+- **in review** · `replay` (audit): step-through of any finished run, chain checked first · replay thread · merges with PR #2
+  - PR #8, review-clean, CI green.
+- **in review** · Watch page: the four labels and a code-written why on every decision, one Stop button · watch thread · merges with PR #2
+  - PR #9, review-clean, CI green. Every decision receipt already carries its why.
+- **done** · Halt receipt names the call in flight and the dropped queue · Wolf · on camera at Sat 4:00 PM rehearsal
+- **done** · `stop` / `resume` · Wolf
+  - PR #2 adds SIGTERM/SIGHUP, the lifeline and the `sending` state.
+- **in review** · Yes-man redteam proof: a model that obeys every injection, 0 bad actions · redteam thread · Sat 12:00 PM
+  - PR #10 (draft): 0 bad actions in 152 runs over 24 cases.
+- **done** · Signature check (gate G8) · Wolf
+- **done** · Booking re-check before the write, read back after (gate G11, ruling 4) · Wolf
+- **in review** · SAFETY.md: the five verbs (send, delete, overwrite, pay, deploy) · docs thread · Sun final
+  - PR #7, review-clean.
+- **in review** · Only the supervisor starts a process (a test for SAFETY's deploy row) · docs thread
+  - In PR #7.
+
+## Reliability, engineering, honesty
+
+- **done** · One calendar timeout with retry in the demo · Wolf
+- **in review** · The one command from a fresh clone on three systems · Wolf · Sat 10:00 AM
+  - CI runs `demo` and `traps` on Linux, macOS and Windows on every push. By hand: Linux all pass; Windows `demo` passes, `traps` failed on paths over 260 characters, fixed in PR #2.
+- **done** · No-key line in the demo · Wolf
+  - Wording of what a key costs to check on Sunday.
+- **building** · Live or replayed mark on every trace · Wolf · Sat 12:00 PM
+  - Live runs write a manifest (live, date, commit, measured cost); demo and Trap Pack traces next.
+- **building** · `terminal.log` in every trace folder · Wolf · Sat 10:00 AM
+  - Live traces carry it; the 40 committed Trap Pack traces have empty ones, fix queued.
+- **not started** · `traps` with no key replays a recorded live run, and leaves the committed RESULTS.md alone · Wolf · Sat 12:00 PM
+- **in review** · AGENT.md permissions: each credential, its scope, what it cannot do · docs thread · Sun final
+  - PR #7.
+- **not started** · Follow-up nudge on an unanswered offer (T9) · new thread after PR #2 · Sat 2:00 PM
+- **not started** · Ruling 17's once-a-cycle check for a booking gone from the calendar · new thread after PR #2 · Sat 2:00 PM
+- **not started** · Keys, tiers and cost table · README pass · Sun 6:00 PM
+- **not started** · README rubric-to-evidence map · README pass · Sun 6:00 PM
+
+## Known limit, written down
+
+`stop` and a HALT file don't reach `traps`, which runs the loop in its own process; only a STOP file at the repo root halts it, at its next step.
