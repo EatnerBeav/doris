@@ -1010,10 +1010,27 @@ class Report:
         return [r for r in self.rows if r.problems]
 
 
+RUN_PREFIX = "model-yes-man-throwaway-redteam-"
+# Paths stay short (Windows' 260-character limit, and the repo's budget of 140 from the repo root): the
+# state folder is rt-<stamp>/<case number>-<answer code>, since the loop puts runs/<run name>/ under it.
+ANSWER_CODES = {"obey": "ob", "meeting_request": "mr", "pick": "pk", "yes": "ys", "decline": "dc", "cancel": "cn",
+                "move": "mv", "then-cancel": "tc", "then-move": "tm", "stub": "st"}
+
+
+def state_folder(run_name):
+    """The run's folder under the state root: rt-<stamp>, short because the loop repeats the run name inside it."""
+    return "rt-" + run_name[len(RUN_PREFIX):]
+
+
+def run_folder(number, answer):
+    return "%02d-%s" % (number, ANSWER_CODES[answer])
+
+
 def _run_name(stamp, state_root, traces_root):
-    base = "model-yes-man-throwaway-redteam-%s" % stamp
+    base = RUN_PREFIX + stamp
     name, n = base, 1
-    while os.path.exists(os.path.join(state_root, name)) or os.path.exists(os.path.join(traces_root, name)):
+    while (os.path.exists(os.path.join(state_root, state_folder(name)))
+           or os.path.exists(os.path.join(traces_root, name))):
         n += 1
         name = "%s-%d" % (base, n)
     return name
@@ -1109,6 +1126,7 @@ def run_redteam(pack_dir=None, only=None, state_root=None, traces_root=None, res
             raise ValueError("refusing to write inside the pack folder")
     say = echo or (lambda s: None)
     every = cases(pack_dir)
+    number = dict((c.name, i + 1) for i, c in enumerate(every))      # fixed by the full list, so --case keeps it
     if only:
         unknown = sorted(set(only) - set(c.name for c in every))
         if unknown:
@@ -1123,17 +1141,22 @@ def run_redteam(pack_dir=None, only=None, state_root=None, traces_root=None, res
                   "file, %d for the demo day; %d cases, %d runs, each on fresh throwaway state under %s/%s/; network "
                   "guard allows no host; the gate and the loop are the real ones."
                   % (run_name, len(ANSWERS), len(DAY_ANSWERS), len(every), runs, traps._display(state_root),
-                     run_name))
+                     state_folder(run_name)))
     say(setup_line)
+    here = os.path.join(state_root, state_folder(run_name))
+    os.makedirs(here, exist_ok=True)
+    with open(os.path.join(here, "runs.txt"), "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("".join("%s  %s %s\n" % (run_folder(number[c.name], a), c.name, a) for c in every
+                         for a in (("stub",) if c.kind in ("trap", "demo") else ()) + tuple(c.answers)))
     rows = []
     for case in every:
         base = None
         if case.kind in ("trap", "demo"):        # the same case with the stub, to show what the yes-man changed
-            broot = os.path.join(state_root, run_name, case.name, "stub")
+            broot = os.path.join(here, run_folder(number[case.name], "stub"))
             summary, crash, _, bsetup, _ = run_one(case, "obey", broot, stub_name, source="stub")
             base = outcomes_by_file(collect(broot, bsetup)) if crash is None else None
         for answer in case.answers:
-            root = os.path.join(state_root, run_name, case.name, answer)
+            root = os.path.join(here, run_folder(number[case.name], answer))
             summary, crash, stand_in, setup, said = run_one(case, answer, root, run_name)
             out = collect(root, setup)
             bad, problems = check(out)

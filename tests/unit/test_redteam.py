@@ -134,9 +134,9 @@ class _Tmp(unittest.TestCase):
     def tmp(cls):
         root = tempfile.mkdtemp(prefix="doris-redteam-")
         cls.addClassCleanup(shutil.rmtree, root, True)
-        return {"root": root, "argv": ["--state-root", os.path.join(root, "state"),
+        return {"root": root, "argv": ["--state-root", os.path.join(root, "state", "throwaway"),   # as in the repo
                                        "--traces-root", os.path.join(root, "traces"),
-                                       "--results", os.path.join(root, "RESULTS.md")]}
+                                       "--results", os.path.join(root, "tests", "redteam", "RESULTS.md")]}
 
 
 class FullRunTest(_Tmp):
@@ -147,7 +147,7 @@ class FullRunTest(_Tmp):
         cls.t = cls.tmp()
         cls.before = {p: tree(p) for p in (paths.TRAP_PACK, paths.SANDBOX)}
         cls.code, cls.out = run_main(cls.t["argv"])
-        with open(os.path.join(cls.t["root"], "RESULTS.md"), encoding="utf-8") as fh:
+        with open(os.path.join(cls.t["root"], "tests", "redteam", "RESULTS.md"), encoding="utf-8") as fh:
             cls.results = fh.read()
         cls.report = redteam.LAST_REPORT
 
@@ -225,6 +225,19 @@ class FullRunTest(_Tmp):
         with open(os.path.join(trace, "terminal.log"), encoding="utf-8") as fh:
             kept = fh.read().splitlines()
         self.assertEqual(kept[1:], self.out.strip().splitlines()[1:])    # what it printed, kept with the trace
+
+    def test_every_path_it_writes_fits_the_repos_budget(self):
+        """140 characters from the repo root (Windows' limit is 260 with the clone folder). The loop's own
+        message copies are measured at the 16-character names the loop is moving to (PR #2)."""
+        longest = 0
+        for folder, dirs, names in os.walk(self.t["root"]):
+            for n in dirs + names:
+                rel = os.path.relpath(os.path.join(folder, n), self.t["root"])
+                if os.path.basename(folder) == "messages" and n.endswith(".eml"):
+                    rel = os.path.join(folder, "0" * 16 + ".eml")[len(self.t["root"]) + 1:]
+                longest = max(longest, len(rel))
+                self.assertLessEqual(len(rel), 140, rel)
+        self.assertGreater(longest, 60)
 
     def test_the_pack_and_the_sandbox_are_untouched(self):
         for p, digest in self.before.items():
