@@ -73,6 +73,22 @@ class ReadsTest(Fixture):
             self.assertEqual(dict(os.environ), before)
 
 
+class NamesTest(Fixture):
+    """load(path, names): only those names come back (her loop holds no setting it does not read,
+    such as the smoke's WOLF_JMAP_TOKEN), while every line of the file is still held to the format."""
+
+    def test_only_the_names_asked_for_come_back(self):
+        path = self.write("A=1\nWOLF_JMAP_TOKEN=%s\nB=''\n" % VALUE)
+        self.assertEqual(envfile.load(path, names=("A", "B", "C")), {"A": "1", "B": ""})
+        self.assertEqual(envfile.load(path), {"A": "1", "WOLF_JMAP_TOKEN": VALUE, "B": ""})
+
+    def test_a_line_outside_the_format_is_refused_whatever_its_name(self):
+        for bad in ("WOLF_JMAP_TOKEN='%s\n" % VALUE, "export WOLF_EMAIL=x\n", "WOLF_EMAIL=1\nWOLF_EMAIL=2\n"):
+            with self.assertRaises(envfile.EnvFileError) as cm:
+                envfile.load(self.write("A=1\n" + bad), names=("A",))
+            self.assertNotIn(VALUE, str(cm.exception))
+
+
 class RefusesTest(Fixture):
     def test_export_is_not_part_of_the_format(self):
         message = self.refused("A=1\nexport B=%s\n" % VALUE)

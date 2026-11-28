@@ -21,8 +21,10 @@ class EnvFileError(ValueError):
     """The env file cannot be read or is not plain KEY=VALUE. Names lines, never values."""
 
 
-def load(path) -> dict:
-    """Every KEY=VALUE in the file at path, as a dict of strings."""
+def load(path, names=None) -> dict:
+    """Every KEY=VALUE in the file at path, as a dict of strings. With names, only those names come
+    back (a live run holds no setting it does not read, such as the smoke's WOLF_JMAP_TOKEN); every
+    line is still held to the format, so a broken line anywhere is refused all the same."""
     try:
         with open(path, "rb") as fh:
             data = fh.read()
@@ -34,7 +36,8 @@ def load(path) -> dict:
         raise EnvFileError("the env file is not UTF-8 text") from None
     if text.startswith("\ufeff"):
         text = text[1:]
-    out = {}
+    keep = None if names is None else frozenset(names)
+    out, seen = {}, set()
     for number, line in enumerate(_LINES.split(text), 1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -47,9 +50,12 @@ def load(path) -> dict:
             raise EnvFileError("line %d: not KEY=VALUE" % number)
         if not _NAME.match(name):
             raise EnvFileError("line %d: the name is not letters, digits and _" % number)
-        if name in out:
+        if name in seen:
             raise EnvFileError("line %d: %s is set twice" % (number, name))
-        out[name] = _unquote(value.strip(), number)
+        seen.add(name)
+        value = _unquote(value.strip(), number)
+        if keep is None or name in keep:
+            out[name] = value
     return out
 
 

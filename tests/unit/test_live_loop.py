@@ -25,7 +25,7 @@ import unittest
 from unittest import mock
 
 from doris import __main__ as cli
-from doris import caps, compose, ledger as ledger_mod
+from doris import caps, compose, envfile, ledger as ledger_mod
 from doris import loop, model as model_mod, netguard, paths, receipts, sentrecord, smoke, supervisor, templates
 from doris.adapters import jmap, live
 from doris.shapes import MailError, SendUnknown
@@ -123,6 +123,19 @@ class LiveSettingsTest(EnvFolder):
     def test_the_settings_never_show_a_value(self):
         s = loop.live_settings(self.env_path, "live")
         self.assert_no_value(repr(s) + str(s))
+
+
+class SmokeOnlySettingsTest(EnvFolder):
+    """WOLF_EMAIL and WOLF_JMAP_TOKEN, in the same env file, are the smoke's alone (its forward test
+    from the wolf.whizz account): her loop never holds or reads them."""
+    WOLF_TOKEN = "dummy-wolf-jmap-token-for-live-loop-tests-5151"
+
+    def test_her_live_settings_hold_only_the_names_she_reads(self):
+        path = self.write_env(WOLF_EMAIL="wolf.whizz@fastmail.com", WOLF_JMAP_TOKEN=self.WOLF_TOKEN,
+                              SOMETHING_ELSE="dummy-other-value")
+        s = loop.live_settings(path, "live")
+        self.assertEqual(set(s.env), {name for name, value in SETTINGS if value is not None})
+        self.assertNotIn(self.WOLF_TOKEN, repr(sorted(s.env.values())))
 
 
 # ===========================================================================================
@@ -826,6 +839,57 @@ def send_results(summary):
     lines = receipts.read_lines(summary.receipts_path)
     sends = set(l["seq"] for l in lines if l["kind"] == "called" and l["payload"]["call"] == "send")
     return [l["payload"]["state"] for l in lines if l["kind"] == "result" and l["payload"]["call_seq"] in sends]
+
+
+class WolfNeverReadTest(LiveFixture):
+    """A whole live run with the smoke's wolf.whizz settings in her env file: every name her loop
+    asks the env for is one she reads (live.ENV_NAMES, loop.ENV_NAMES); the wolf token is in none of
+    her objects' reach and in nothing she writes."""
+
+    def test_a_live_run_asks_the_env_for_her_names_alone(self):
+        wolf_token = SmokeOnlySettingsTest.WOLF_TOKEN
+        self.env_path = self.write_env(WOLF_EMAIL="wolf.whizz@fastmail.com", WOLF_JMAP_TOKEN=wolf_token)
+        asked = []
+
+        class Spy(dict):
+            def __getitem__(self, name):
+                asked.append(name)
+                return dict.__getitem__(self, name)
+
+            def get(self, name, default=None):
+                asked.append(name)
+                return dict.get(self, name, default)
+
+            def __contains__(self, name):
+                asked.append(name)
+                return dict.__contains__(self, name)
+
+            def __iter__(self):
+                asked.append("(every name)")
+                return dict.__iter__(self)
+
+            def keys(self):
+                asked.append("(every name)")
+                return dict.keys(self)
+
+            def items(self):
+                asked.append("(every name)")
+                return dict.items(self)
+
+            def values(self):
+                asked.append("(every name)")
+                return dict.values(self)
+
+        real_load = envfile.load
+        with mock.patch.object(envfile, "load", lambda *a, **kw: Spy(real_load(*a, **kw))):
+            s = self.started_fresh_then_asked(model_source="live")
+        self.assertEqual((s.handled, s.sends), (1, 1))
+        self.assertLessEqual(set(asked), set(live.ENV_NAMES) | set(loop.ENV_NAMES))
+        for folder, _, names in os.walk(self.dir):
+            for name in names:
+                if name != "test.env":
+                    with open(os.path.join(folder, name), "rb") as fh:
+                        self.assertNotIn(wolf_token.encode("ascii"), fh.read(), name)
 
 
 class JmapAnswerTest(LiveFixture):

@@ -199,13 +199,14 @@ def smoke_refusal(state_dir, now):
 def live_settings(env_path, model_source):
     """Everything a live run takes from its env file, and nothing from os.environ: her address and
     the owner's, the meeting link, the hosts the network guard allows and, with the model live, the
-    model ID (the key stays in the env). The adapters are built once to check every setting they
-    read; building one connects nowhere. Refused (exit 2) with one plain line naming the env file or
-    the setting, never a value."""
+    model ID (the key stays in the env). The env it keeps holds only the names she reads (ENV_NAMES
+    and live.ENV_NAMES): the smoke's wolf.whizz settings in the same file never reach her loop. The
+    adapters are built once to check every setting they read; building one connects nowhere.
+    Refused (exit 2) with one plain line naming the env file or the setting, never a value."""
     from . import envfile
     from .adapters import live
     try:
-        env = envfile.load(env_path)
+        env = envfile.load(env_path, names=set(ENV_NAMES) | set(live.ENV_NAMES))
     except envfile.EnvFileError as exc:
         raise Refused("Not started: the env file at %s cannot be used: %s." % (env_path, exc), 2) from None
     try:
