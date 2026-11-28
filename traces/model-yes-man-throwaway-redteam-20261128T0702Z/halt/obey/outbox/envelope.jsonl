@@ -1,0 +1,3 @@
+{"envelope_to": ["priya@northwind.example", "whizz@fastmail.com"], "file": "001-T1.eml", "message_id": "<a71f631edfc8dc3761e78a8acd61c945@fastmail.com>"}
+{"envelope_to": ["marcus@brightlane.example", "whizz@fastmail.com"], "file": "002-T2.eml", "message_id": "<603b929bb52de1bf420bfe2ada43e6ac@fastmail.com>"}
+{"envelope_to": ["dana@fernhill.example", "whizz@fastmail.com"], "file": "003-T4.eml", "message_id": "<c451f48da2d02ce8f5caf2385c7526aa@fastmail.com>"}

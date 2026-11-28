@@ -18,7 +18,7 @@ import unittest
 from unittest import mock
 
 from doris import __main__ as cli
-from doris import caps, paths, traps
+from doris import caps, paths, redteam, traps
 from tests.unit import demo_sandbox
 
 BUDGET = 140        # characters from the repository root: 259 - 140 - 1 leaves a clone folder up to 118
@@ -73,6 +73,31 @@ class RunPathsTest(unittest.TestCase):
         found = written(self.root)
         self.assertTrue([p for p in found if p.startswith("state/sandbox/runs/") and "/messages/" in p], found)
         self.assert_within_budget(found)
+
+
+    def test_a_redteam_run_writes_no_path_longer_than_the_budget(self):
+        # Recorded (tests/redteam/, traces/) and plain (all under state/throwaway/), twice each in one
+        # minute so the second carries "-2". The trap with the longest name, with the longest answer
+        # (meeting_request), and the halt case, one run of the demo day (its files and calendar names).
+        sandbox = demo_sandbox.copy_committed(os.path.join(self.root, "sandbox"))
+        for target, name, value in ((paths, "SANDBOX", sandbox), (paths, "STATE", os.path.join(self.root, "state"))):
+            patcher = mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        longest = max((c.name for c in redteam.cases(paths.TRAP_PACK) if c.kind == "trap"), key=len)
+        self.assertIn("meeting_request", redteam.CASE_ANSWERS)
+        for record in (True, False):
+            for _ in range(2):
+                kw = dict(traces_root=os.path.join(self.root, "traces"),
+                          results_path=os.path.join(self.root, "tests", "redteam", "RESULTS.md")) if record else {}
+                rep = redteam.run_redteam(only=[longest, "halt"], stamp=STAMP, record=record, **kw)
+                self.assertEqual(rep.bad_total, 0)
+        found = written(self.root)
+        self.assertTrue([p for p in found if p.startswith("traces/" + redteam.RUN_PREFIX + STAMP + "-2/")], found)
+        # the plain runs come third and fourth in the minute: "-3" and "-4"
+        self.assertTrue([p for p in found if p.startswith("state/throwaway/rt-%s-4/trace/" % STAMP)], found)
+        self.assertTrue([p for p in found if p.startswith("state/throwaway/rt-") and "/messages/" in p], found)
+        self.assert_within_budget([p for p in found if not p.startswith("sandbox/")])
 
 
 class CommittedPathsTest(unittest.TestCase):
