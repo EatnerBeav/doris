@@ -5,10 +5,12 @@ so a test can prove what Doris never does (a second submission, a Bcc, another h
 server text in an error).
 
 Shared by test_jmap (the sender), test_live (LiveMail sends through it), test_live_loop and
-test_smoke. Every value here is made up.
+test_smoke, whose end-to-end test has two accounts, hers and wolf's (for_account, routed). Every
+value here is made up.
 """
 import email
 import email.policy
+import http.client
 import http.server
 import json
 import threading
@@ -284,6 +286,42 @@ class FakeJMAP(http.server.ThreadingHTTPServer):
                 destroyed.append(eid)
         return [["Email/set", {"accountId": ACCOUNT, "oldState": "e3", "newState": "e4",
                                "destroyed": destroyed or None, "notDestroyed": not_destroyed or None}, call_id]]
+
+
+def for_account(address, token, name="Wolf"):
+    """A fake of another account's own (the smoke's wolf.whizz): its token, its session's username
+    and its identity; apiUrl and uploadUrl on api.fastmail.com, as for hers."""
+    server = FakeJMAP().as_fastmail()
+    server.token, server.username = token, address
+    server.identities = [{"id": "I-" + address.split("@")[0].replace(".", "-"), "email": address, "name": name}]
+    return server
+
+
+class Routed(http.client.HTTPConnection):
+    """One connection to api.fastmail.com as a sender sees it, dialled once its request is made: to
+    the fake whose token the request carries (the first fake for any other token). Each account
+    is a fake of its own, as each is its own account at Fastmail."""
+
+    def __init__(self, servers, timeout):
+        http.client.HTTPConnection.__init__(self, "127.0.0.1", servers[0].port, timeout=timeout)
+        self.servers = servers
+
+    def connect(self):
+        if self.sock is None and getattr(self, "routed", False):
+            http.client.HTTPConnection.connect(self)
+
+    def request(self, method, url, body=None, headers=None, **kw):
+        headers = dict(headers or {})
+        token = (headers.get("Authorization") or "")[len("Bearer "):]
+        self.port = {s.token: s for s in reversed(self.servers)}.get(token, self.servers[0]).port
+        self.routed = True
+        self.connect()
+        return http.client.HTTPConnection.request(self, method, url, body=body, headers=headers, **kw)
+
+
+def routed(*servers):
+    """jmap._https for a test with more than one account: each connection goes to the account its token names."""
+    return lambda host, port, timeout: Routed(list(servers), timeout)
 
 
 class JMAPHandler(http.server.BaseHTTPRequestHandler):

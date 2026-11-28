@@ -219,6 +219,16 @@ def _live_link(env, error):
     return value
 
 
+def model_hosts():
+    """The hosts a live model call reaches: the API's, and the HTTPS proxy's when the environment
+    names one (the network guard lets the call through the proxy)."""
+    hosts = [urllib.parse.urlsplit(model_mod.API_URL).hostname]
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    if proxy:
+        hosts.append(urllib.parse.urlsplit(proxy).hostname)
+    return tuple(h for h in hosts if h)
+
+
 def smoke_refusal(state_dir, now):
     """None when the live state folder holds the smoke's sent record (sentrecord) exactly as
     `smoke --send-to` writes it once it finds its copy in Sent, and fresh at now (no more than
@@ -238,27 +248,46 @@ def live_settings(env_path, model_source):
     from . import envfile
     from .adapters import live
     try:
-        env = envfile.load(env_path, names=set(ENV_NAMES) | set(live.ENV_NAMES))
+        env = envfile.load(env_path, names=_her_names())
     except envfile.EnvFileError as exc:
         raise Refused("Not started: the env file at %s cannot be used: %s." % (env_path, exc), 2) from None
     try:
-        doris_addr = live.bare_address(env, live.ENV_ADDRESS)
-        owner_addr = live.bare_address(env, ENV_OWNER)
-        if owner_addr.lower() == doris_addr.lower():
-            raise live.ConfigError("%s must be the owner's own address, not hers" % ENV_OWNER)
-        link = _live_link(env, live.ConfigError)
-        hosts = tuple(live.hosts(env))
-        live.LiveMail(env, doris_addr)
-        live.LiveCalendar(env)
-        model_id = None
-        if model_source == "live":
-            if not (env.get(ENV_KEY) or "").strip():
-                raise live.ConfigError("%s is not set" % ENV_KEY)
-            model_id = model_mod.default_model_id(env)
-            if not caps.MODEL_PRICES_USD_PER_MTOK.get(model_id):
-                raise live.ConfigError("DORIS_MODEL names a model with no price in caps.MODEL_PRICES_USD_PER_MTOK")
+        return settings_from(env, model_source)
     except live.ConfigError as exc:
         raise Refused("Not started: %s (env file %s)." % (exc, env_path), 2) from None
+
+
+def _her_names():
+    from .adapters import live
+    return set(ENV_NAMES) | set(live.ENV_NAMES)
+
+
+def her_env(env):
+    """Of an env already loaded (the smoke's, which holds wolf's names too), the names she reads alone."""
+    names = _her_names()
+    return {name: value for name, value in env.items() if name in names}
+
+
+def settings_from(env, model_source):
+    """live_settings' checks on an env that holds only her names (envfile.load with them, or her_env:
+    the smoke checks her loop's settings so before its end-to-end test). live.ConfigError naming the
+    setting, never its value."""
+    from .adapters import live
+    doris_addr = live.bare_address(env, live.ENV_ADDRESS)
+    owner_addr = live.bare_address(env, ENV_OWNER)
+    if owner_addr.lower() == doris_addr.lower():
+        raise live.ConfigError("%s must be the owner's own address, not hers" % ENV_OWNER)
+    link = _live_link(env, live.ConfigError)
+    hosts = tuple(live.hosts(env))
+    live.LiveMail(env, doris_addr)
+    live.LiveCalendar(env)
+    model_id = None
+    if model_source == "live":
+        if not (env.get(ENV_KEY) or "").strip():
+            raise live.ConfigError("%s is not set" % ENV_KEY)
+        model_id = model_mod.default_model_id(env)
+        if not caps.MODEL_PRICES_USD_PER_MTOK.get(model_id):
+            raise live.ConfigError("DORIS_MODEL names a model with no price in caps.MODEL_PRICES_USD_PER_MTOK")
     return LiveSettings(env, owner_addr, doris_addr, link, hosts, model_id)
 
 
@@ -538,10 +567,7 @@ class _Run:
     def allowed_hosts(self):
         hosts = list(self.live.hosts) if self.live else []      # live: the hosts the env file names
         if self.cfg.model_source == "live":
-            hosts.append("api.anthropic.com")
-            proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
-            if proxy:
-                hosts.append(urllib.parse.urlsplit(proxy).hostname)
+            hosts += model_hosts()
         return tuple(h for h in hosts if h)
 
     def adapters(self):
