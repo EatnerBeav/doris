@@ -549,6 +549,118 @@ class RecordHaltTest(StateDirTest):
         self.assertIn(("set_booking_state", "doris-b1", "unconfirmed"), led.calls)
         self.assertNotIn("signal", self.record("cli", FakeReceipts(), FakeLedger())["payload"])
 
+    def test_a_key_that_could_spell_the_meeting_link_is_shown_by_its_hash(self):
+        """Review of 7e1a9fa, item 2: a Message-ID or thread key can hold the link (Message-ID:
+        <meet.example/live-loop-room@x>), and the supervisor never loads the env, so it cannot redact
+        it as the worker's receipts do. A key that holds "/", ":", "%" or "&" (a character every form of
+        an https link needs) or anything outside plain ASCII is shown by its hash (ledger.key_sha256)."""
+        from doris.ledger import key_sha256
+
+        def hashed(key):
+            return "key-sha256:" + key_sha256(key)
+        linked, escaped = "meet.example/live-loop-room@x.example", "<meet.example%2Flive-loop-room@x.example>"
+        entity, wide = "meet.example&#47;live-loop-room@x.example", "meet.example／live-loop-room@x.example"
+        schemed, thread = "https:meet.example@x.example", "<meet.example/live-loop-room/t1@x.example>"
+        raw_key, gmail = "sha256:" + "ab" * 32, "CAHk-=wh+x_y.z!#$'*?^`{|}~@mail.gmail.com"
+        led = FakeLedger(
+            queued=[{"message_key": linked, "kind": "send_reply", "detail": {"template": "T2"}},
+                    {"message_key": "m2@b.example", "kind": "send_reply", "detail": {"thread_key": escaped}}],
+            unprocessed=[{"key": entity, "thread_key": wide, "status": "fetched"},
+                         {"key": schemed, "thread_key": "t4@d.example", "status": "fetched"},
+                         {"key": raw_key, "thread_key": None, "status": "fetched"},
+                         {"key": gmail, "thread_key": "[t5]@e.example", "status": "processing"}],
+            threads={linked: thread})
+        out = self.record("cli", FakeReceipts(), led)
+        self.assertEqual([(d["message"], d["thread"]) for d in out["payload"]["dropped"]], [
+            (hashed(linked), hashed(thread)),
+            ("m2@b.example", hashed(escaped)),
+            (hashed(entity), hashed(wide)),
+            (hashed(schemed), "t4@d.example"),
+            (raw_key, None),                    # a mail with no Message-ID: already a hash
+            (gmail, "[t5]@e.example"),          # plain Message-IDs as written
+        ])
+        self.assertEqual(hashed(thread), hashed(thread.strip("<>")))     # the ledger's own key form
+        self.assertEqual(out["payload"]["dropped"][1]["template"], None)
+        self.assertNotIn("live-loop-room", json.dumps(out, ensure_ascii=False))
+        self.assertEqual(out["payload"]["ledger"], "ok")
+
+
+class RecordHaltLinkTest(StateDirTest):
+    """Review of 7e1a9fa, item 2, against the real ledger and receipt writer: the halted line the
+    supervisor writes never shows the meeting link, whatever a dropped key holds."""
+
+    ROOM = "https://meet.example/live-loop-room"
+    LINKS = (ROOM, "https://meet.example/doris-sandbox-room", "https://zoom.us", "https://zoom.us?pwd=a1",
+             "https://zoom.us/j/123?pwd=a&b=c", "https://u@meet.example:8443/room.x")
+
+    def setUp(self):
+        super().setUp()
+        from doris import templates
+        self.templates = templates
+        before = templates.use_meeting_link(self.ROOM)
+        self.addCleanup(templates.use_meeting_link, before)
+
+    def test_the_halted_line_from_a_real_ledger_never_shows_the_link(self):
+        import datetime
+        from doris import receipts
+        from doris.ledger import Ledger
+        receipts_path = os.path.join(self.sdir, "runs", RUN, "receipts.jsonl")
+        ledger_path = os.path.join(self.sdir, "ledger.sqlite")
+        os.makedirs(os.path.dirname(receipts_path))
+        at = datetime.datetime(2026, 11, 27, 19, 0, tzinfo=datetime.timezone.utc)
+        with Ledger(ledger_path) as led:
+            led.record_message("meet.example/live-loop-room@x.example", "<meet.example/live-loop-room@x.example>",
+                               "priya@b.example", at, "processing", run_id=RUN)
+            led.enqueue_action(RUN, "meet.example/live-loop-room@x.example", "send_reply", {"template": "T2"})
+            led.record_message("m2@b.example", "HTTPS://MEET.EXAMPLE/live-loop-room", "sam@b.example", at, "fetched",
+                               run_id=RUN)
+            led.record_message("meet.example%2Flive-loop-room@x.example", "t3@c.example", "kim@c.example", at,
+                               "fetched", run_id=RUN)
+        out = supervisor.record_halt(self.mode, RUN, "cli", receipts_path, ledger_path)
+        with open(receipts_path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual([d["kind"] for d in out["payload"]["dropped"]], ["send_reply", "message", "message"])
+        self.assertEqual(out["payload"]["dropped"][2]["thread"], "t3@c.example")
+        self.assertNotIn("live-loop-room", text)
+        self.assertFalse(self.templates.has_link(text))
+        self.assertTrue(receipts.verify(receipts_path).ok)
+
+    def forms(self, link):
+        """Ways a key can spell the link: the ones RedactLinkTest covers, escaped, wrapped and embedded."""
+        rest = link.split("://", 1)[1]
+        ways = [link, link.upper(), "http://" + rest, "hxxps://" + rest, "hxxp://" + rest + "/",
+                "https:\\/\\/" + rest.replace("/", "\\/"), "hxxps[://]" + rest.replace(".", "[.]"),
+                rest.replace("@", "[@]"), link.replace("&", "&amp;"), link.replace("-", "%2D"),
+                "".join("&#%d;" % ord(c) for c in link), "".join("%%%02X" % ord(c) for c in link),
+                "\n ".join(link)]
+        if "/" in rest.rstrip("/"):
+            ways.append(rest)
+        return [w for way in ways for w in (way, "<%s@x.example>" % way, "a" + way + "b")]
+
+    def test_every_key_that_shows_the_link_is_hashed_and_every_key_shown_as_written_is_plain(self):
+        """The claim the plain-key rule rests on, for links of every https shape: a key the redactors
+        would touch is never shown as written, and the same keys with "/", ":", "%" and "&" turned into
+        plain characters (shown as written) never spell the link."""
+        t = self.templates
+        for link in self.LINKS:
+            t.use_meeting_link(link)
+            found = plain = 0
+            for key in self.forms(link):
+                if not (t.has_link(key) or t.redact_link(key) != key):
+                    continue
+                found += 1
+                shown = supervisor.shown_key(key)
+                self.assertNotEqual(shown, key, (link, key))
+                self.assertFalse(t.has_link(shown), (link, key))
+                for c in "._-=+~":
+                    flat = "".join(c if ch in "/:%&" else ch for ch in key).replace("\n ", "")
+                    if supervisor.shown_key(flat) == flat:
+                        plain += 1
+                        self.assertFalse(t.has_link(flat), (link, flat))
+                        self.assertEqual(t.redact_link(flat), flat, (link, flat))
+            self.assertGreaterEqual(found, 30, link)
+            self.assertGreaterEqual(plain, 100, link)
+
 
 # ------------------------------------------------------------------------------------------
 # The poll loop, driven with a fake child (the process tests use a real one)
