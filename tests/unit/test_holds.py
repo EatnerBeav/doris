@@ -347,6 +347,12 @@ class SpeedTest(unittest.TestCase):
         self.assertQuick(holds.blank_codes, "the key is :" + " " * 30000 + "!")
         self.assertQuick(holds.blank_codes, ("the key is" + " " * 40) * 1000)
 
+    def test_defanging_is_quick(self):
+        # Second review of PR #4, round 2: defang("a." * 16000) took 21 seconds.
+        for text in ("a." * 16000, "a-" * 16000, "a-." * 16000, "ab." * 16000 + "!", "1." * 16000,
+                     "a" * 32000 + ":/", "-a" * 16000, "a+" * 16000, "x." * 8000 + "．x" * 8000):
+            self.assertQuick(holds.defang, text)
+
     def test_every_value_a_notice_shows_is_quick(self):
         msg = make_msg(from_name=SLOW, from_addr=SLOW + "@x.example", own_text=SLOW)
         self.assertQuick(holds.notice_slots, msg, "hold.no_model", utc(2026, 12, 1, 21, 10), [])

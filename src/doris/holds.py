@@ -29,30 +29,37 @@ _CONTROL = re.compile("[" + _CONTROLS + "]")
 # A character a reader would see: not white space, not invisible, not a control character.
 _SEEN = re.compile("[^\\s" + _INVISIBLES + _CONTROLS + "]")
 
-_SCHEME = re.compile(r"(?i)\b(https?|[a-z][a-z0-9+.\-]*)://")
+# Defanging is linear (second review of PR #4, round 2: defang("a." * 16000) took 21 s): the scheme
+# and host patterns start a match only where a run of their characters starts, so each run is read
+# once, and the IPv4 pattern reads at most 15 characters from any place.
+# A scheme is the run of scheme characters before "://", from its first letter.
+_SCHEME = re.compile(r"(?<![A-Za-z0-9+.\-])([A-Za-z0-9+.\-]+)://")
 _IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
-# A host's labels are letters and digits in any script (münchen.de, пример.рф: second Fable review of
-# PR #4, L3), bounded at 63 characters, the most DNS allows, so no label is read more than once over.
-_LD = r"[^\W_]"
-_HOST = re.compile(r"\b(?:{L}(?:(?:{L}|-){{0,61}}{L})?\.)+[^\W\d_](?:{L}|-){{0,61}}{L}\b".format(L=_LD))
+# A host is a run of letters, digits, "_" and "-" in any script (münchen.de, пример.рф: second Fable
+# review of PR #4, L3) with dots between; all its dots are defanged when a label after the first
+# starts with a letter and has two characters or more (example.com, but not 3.5 or e.g).
+_HOST = re.compile(r"(?<![\w-])[\w-]+(?:\.[\w-]+)+")
 
 
 def _scheme(m):
-    name = m.group(1)
+    run = m.group(1)
+    at = next((i for i, c in enumerate(run) if c.isalpha()), None)
+    if at is None:
+        return m.group(0)
+    name = run[at:]
     low = name.lower()
     if low in ("http", "https"):
-        return ("hxxps" if low == "https" else "hxxp") + "://"
+        return run[:at] + ("hxxps" if low == "https" else "hxxp") + "://"
     if low in ("hxxp", "hxxps"):
         return m.group(0)
-    return name + "[://]"
+    return run[:at] + name + "[://]"
 
 
 def _host(m):
     token = m.group(0)
-    labels = token.split(".")
-    if not any(c.isalpha() for c in labels[-1]) or len(labels[-1]) < 2:
-        return token
-    return token.replace(".", "[.]")
+    if any(len(label) >= 2 and label[0].isalpha() for label in token.split(".")[1:]):
+        return token.replace(".", "[.]")
+    return token
 
 
 # A fullwidth or ideographic dot between letters or digits (in any script: 例。com) reads as a dot in
