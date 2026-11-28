@@ -58,6 +58,7 @@ CALENDAR_FAULTS = frozenset({"timeout-once", "timeout-twice", "read-fails", "slo
                              "write-unknown-present", "write-unknown-absent", "lookup-fails",
                              "remove-fails-once", "remove-fails-always"})
 MAIL_FAULTS = frozenset({"sent-unconfirmed"})
+TIMEOUT_FAULTS = frozenset({"timeout-once", "timeout-twice"})   # the calendar does not answer: a wait
 NEW_OFFER_TEMPLATES = frozenset({"T2", "T3", "T4", "T13", "T18"})   # each one is an offer record
 REPLY_TEMPLATES = ("T1", "T2", "T3", "T4", "T10", "T12", "T13", "T18")   # her one reply to a message
 # Her own booking for a message that a kill or a stop left part way: picked up again, never made again.
@@ -1970,6 +1971,14 @@ class _Run:
             self.error(e, "arm", ValueError("unknown fault %r" % (fault,)))
             return
         target.arm(fault, **params)
+        if fault in TIMEOUT_FAULTS:         # said before the wait starts, so the silence never reads as a hang
+            try:
+                waits = float(params.get("seconds", getattr(target, "timeout_s", 0.0)))
+            except (TypeError, ValueError):
+                return
+            self.say("%s  Staged fault %s (simulated): the calendar will not answer her next call for %g s. "
+                     "She waits, then retries once after %g s." % (templates.fmt_pacific(self.now()), fault, waits,
+                                                                   self.wait_s))
 
     def disarm(self):
         for adapter in (self.calendar, self.mail):

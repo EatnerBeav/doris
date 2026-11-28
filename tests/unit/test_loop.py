@@ -323,6 +323,14 @@ class TheTerminalLines(unittest.TestCase):
         (sam,) = [l for l in self.said if "Sam Rivera" in l]
         self.assertIn("Staged fault lands-between: recovered.", sam)
 
+    def test_a_staged_calendar_timeout_is_announced_before_the_wait_starts(self):
+        # the demo's wait is 10 s (caps) plus the retry wait: a line before it, so it never reads as a hang
+        at = next(i for i, l in enumerate(self.said) if "Marcus Lee: book" in l)
+        self.assertEqual(self.said[at - 1],
+                         "Tue Dec 1, 9:40 AM Pacific  Staged fault timeout-once (simulated): the calendar will not "
+                         "answer her next call for 1.5 s. She waits, then retries once after 2 s.")
+        self.assertEqual(len([l for l in self.said if "(simulated): the calendar will not answer" in l]), 1)
+
     def test_the_stub_shows_no_model_cost(self):
         self.assertFalse([l for l in self.said if "Model cost" in l])
 
