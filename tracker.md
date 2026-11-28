@@ -35,8 +35,8 @@ No new features; the law and the scope stand. Bar: first place, and would Steve 
   - PR #26 (output polish, judge pass items 2 to 5): every hint names the interpreter running (`py` on Windows, `paths.command`); replay, traps and redteam print paths from where you run, like demo (`paths.shown`), with no doubled Windows backslashes; a stop closes first in its batch, so Dana's "opted out earlier" is true; redteam's table fits 120 columns; watch shows Pacific time; "1 booking"; no repeated date after the digest line. Still open: `verify`'s help says python3 (PR #25 owns verify); story.py's `python -m doris` and repo-root paths are the demo-story thread's 8 AM item 4.
 - **done** · Demo value: when `demo` ends, the owner's view in plain words, all from the receipts · demo-value thread · Sat 12:00 PM
   - story.py in PR #18, printed at the end of `demo` by PR #23 (decision 102).
-- **not started** · The same story as a section on the watch page · demo-value thread · Sat 2:00 PM
-  - Built and tested but not on GitHub: /mnt/project-files/doris-v2/patches/watch-story-section.patch, to rebase on main and open as its own PR with one Fable review.
+- **done** · The same story as a section on the watch page · demo-value thread · Sat 2:00 PM
+  - PR #37: the watch page shows the story; after a stop and resume, both the demo's end and the page tell the whole day (decision 111).
 - **in review** · The video: a 3:00-max script and shot list Shane narrates; credit Shane Bornstein and Wolf (Claude), his CTO; Hire the Machines only · video thread · rehearsal Sat afternoon, filming Sun
   - PR #20 (docs/video/), decision 99; Shane to confirm.
 
