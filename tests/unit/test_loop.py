@@ -339,7 +339,7 @@ class TheTerminalLines(unittest.TestCase):
 
     def test_under_the_stub_no_line_says_a_model_read_or_agreed(self):
         (priya,) = [l for l in self.said if "Priya Raman: book" in l]
-        self.assertTrue(priya.endswith("One clear time, parser and stand-in agree, and it is available: book."), priya)
+        self.assertIn(" One clear time, parser and stand-in agree, and it is available: book. Follow-up filed: ", priya)
         self.assertEqual([l for l in self.said if "model" in l.lower()], [])
 
     def test_the_receipts_keep_the_why_as_listed(self):

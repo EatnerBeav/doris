@@ -1,0 +1,108 @@
+2026-11-28T15:38:48Z  Live. Every setting from the env file /root/doris-secrets/.env; model called live (claude-sonnet-5-5). She reads her own inbox every 10 minutes until `python3 -m doris stop`.
+2026-11-28T17:25:38Z  Halted: stop on the command line. The worker was dead 71 ms after the stop. Nothing in flight. Dropped 0 queued item(s). Run `python3 -m doris resume` to go on.
+her loop's receipts (run model-live-live-20261128T153848Z):
+2026-11-28T15:38:49Z  seq 1  run started: mode live, model claude-sonnet-5-5
+2026-11-28T15:40:01Z  seq 6  message read
+2026-11-28T15:40:03Z  seq 9  classified meeting_request
+2026-11-28T15:40:03Z  seq 10  decided plan
+2026-11-28T15:40:04Z  seq 15  gate passed
+2026-11-28T15:40:04Z  seq 17  calendar create: written
+2026-11-28T15:40:04Z  seq 22  gate passed
+2026-11-28T15:40:06Z  seq 24  send T1 to the sender: handed_over
+2026-11-28T15:40:07Z  seq 26  her copy in Sent: found
+2026-11-28T15:40:08Z  seq 29  decided book
+2026-11-28T15:50:01Z  seq 34  message read
+2026-11-28T15:50:03Z  seq 37  decided file
+2026-11-28T15:50:03Z  seq 38  message read
+2026-11-28T15:50:04Z  seq 41  classified meeting_request
+2026-11-28T15:50:04Z  seq 42  decided plan
+2026-11-28T15:50:04Z  seq 45  gate passed
+2026-11-28T15:50:06Z  seq 47  send T2 to the sender: handed_over
+2026-11-28T15:50:07Z  seq 49  her copy in Sent: found
+2026-11-28T15:50:08Z  seq 52  decided offer
+2026-11-28T15:50:08Z  seq 53  message read
+2026-11-28T15:50:09Z  seq 56  classified injection_only
+2026-11-28T15:50:09Z  seq 57  decided plan
+2026-11-28T15:50:10Z  seq 60  decided file
+2026-11-28T15:50:10Z  seq 61  message read
+2026-11-28T15:50:11Z  seq 64  classified fyi
+2026-11-28T15:50:11Z  seq 65  decided plan
+2026-11-28T15:50:12Z  seq 68  decided file
+2026-11-28T16:00:01Z  seq 73  message read
+2026-11-28T16:00:04Z  seq 76  classified meeting_request
+2026-11-28T16:00:04Z  seq 77  decided plan
+2026-11-28T16:00:04Z  seq 82  gate passed
+2026-11-28T16:00:05Z  seq 84  calendar create: written
+2026-11-28T16:00:05Z  seq 89  gate passed
+2026-11-28T16:00:06Z  seq 91  send T1 to the sender: handed_over
+2026-11-28T16:00:07Z  seq 93  her copy in Sent: found
+2026-11-28T16:00:08Z  seq 96  decided book
+2026-11-28T16:00:08Z  seq 97  message read
+2026-11-28T16:00:10Z  seq 100  classified meeting_request
+2026-11-28T16:00:10Z  seq 101  decided plan
+2026-11-28T16:00:10Z  seq 106  gate passed
+2026-11-28T16:00:10Z  seq 108  calendar create: written
+2026-11-28T16:00:11Z  seq 113  gate passed
+2026-11-28T16:00:12Z  seq 115  send T1 to the sender: handed_over
+2026-11-28T16:00:13Z  seq 117  her copy in Sent: found
+2026-11-28T16:00:14Z  seq 120  decided book
+2026-11-28T16:00:14Z  seq 121  message read
+2026-11-28T16:00:15Z  seq 124  classified pick
+2026-11-28T16:00:15Z  seq 125  decided plan
+2026-11-28T16:00:16Z  seq 130  gate passed
+2026-11-28T16:00:16Z  seq 132  calendar create: written
+2026-11-28T16:00:17Z  seq 137  gate passed
+2026-11-28T16:00:18Z  seq 139  send T1 to the sender: handed_over
+2026-11-28T16:00:19Z  seq 141  her copy in Sent: found
+2026-11-28T16:00:20Z  seq 144  decided book
+2026-11-28T16:00:20Z  seq 145  message read
+2026-11-28T16:00:21Z  seq 148  classified meeting_request
+2026-11-28T16:00:21Z  seq 149  decided plan
+2026-11-28T16:00:21Z  seq 152  gate passed
+2026-11-28T16:00:23Z  seq 154  send T2 to the sender: handed_over
+2026-11-28T16:00:24Z  seq 156  her copy in Sent: found
+2026-11-28T16:00:25Z  seq 159  decided offer
+2026-11-28T16:10:01Z  seq 164  message read
+2026-11-28T16:10:03Z  seq 167  decided file
+2026-11-28T16:20:01Z  seq 172  message read
+2026-11-28T16:20:03Z  seq 175  classified add_person
+2026-11-28T16:20:03Z  seq 176  decided plan
+2026-11-28T16:20:03Z  seq 177  gate passed
+2026-11-28T16:20:05Z  seq 179  send S1 to the owner: handed_over
+2026-11-28T16:20:06Z  seq 181  her copy in Sent: found
+2026-11-28T16:20:07Z  seq 184  held hold:add_person
+2026-11-28T16:20:07Z  seq 185  message read
+2026-11-28T16:20:09Z  seq 188  classified pick
+2026-11-28T16:20:09Z  seq 189  decided plan
+2026-11-28T16:20:09Z  seq 194  gate passed
+2026-11-28T16:20:10Z  seq 196  calendar create: written
+2026-11-28T16:20:10Z  seq 201  gate passed
+2026-11-28T16:20:11Z  seq 203  send T1 to the sender: handed_over
+2026-11-28T16:20:12Z  seq 205  her copy in Sent: found
+2026-11-28T16:20:13Z  seq 208  decided book
+2026-11-28T16:20:13Z  seq 209  message read
+2026-11-28T16:20:15Z  seq 212  classified move
+2026-11-28T16:20:15Z  seq 213  decided plan
+2026-11-28T16:20:15Z  seq 216  gate passed
+2026-11-28T16:20:16Z  seq 221  gate passed
+2026-11-28T16:20:18Z  seq 223  send T18 to the sender: handed_over
+2026-11-28T16:20:18Z  seq 225  her copy in Sent: found
+2026-11-28T16:20:19Z  seq 228  decided move
+2026-11-28T16:30:01Z  seq 233  message read
+2026-11-28T16:30:03Z  seq 236  classified cancel
+2026-11-28T16:30:03Z  seq 237  decided plan
+2026-11-28T16:30:03Z  seq 238  gate passed
+2026-11-28T16:30:04Z  seq 243  gate passed
+2026-11-28T16:30:05Z  seq 245  send T10 to the sender: handed_over
+2026-11-28T16:30:06Z  seq 247  her copy in Sent: found
+2026-11-28T16:30:07Z  seq 250  decided cancel
+2026-11-28T16:30:07Z  seq 251  message read
+2026-11-28T16:30:09Z  seq 254  classified pick
+2026-11-28T16:30:09Z  seq 255  decided plan
+2026-11-28T16:30:10Z  seq 260  gate passed
+2026-11-28T16:30:10Z  seq 262  calendar create: written
+2026-11-28T16:30:10Z  seq 267  gate passed
+2026-11-28T16:30:12Z  seq 269  send T1 to the sender: handed_over
+2026-11-28T16:30:13Z  seq 271  her copy in Sent: found
+2026-11-28T16:30:13Z  seq 274  decided book
+2026-11-28T17:25:38Z  seq 287  halted: cli

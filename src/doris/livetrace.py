@@ -27,6 +27,7 @@ import re
 import shutil
 
 from . import paths, receipts
+from .why import FOLLOW_UP_WORDS, gone_notice
 
 UTC = _dt.timezone.utc
 KINDS = ("smoke", "run")
@@ -163,22 +164,55 @@ def _event(line):
     if kind == "observed":
         if p.get("step") == "start":
             return "run started: mode %s, model %s" % (p.get("mode"), p.get("model"))
+        if p.get("step") == "booking_check":        # ruling 17: her own calendar check, no mail read
+            return "her calendar check (no mail): booking %s is gone from the calendar" % (p.get("booking_id"),)
         return "message read"
     if kind == "classified":
         return "classified %s" % (p.get("cls"),)
     if kind == "decided":
-        return "decided %s" % (p.get("outcome") or p.get("step"),)
+        return _follow_up(p) or "decided %s" % (p.get("outcome") or p.get("step"),)
     if kind == "held":
+        if p.get("step") == "booking_check":
+            return "held %s: hold notice to the owner %s, nothing to the prospect" % (
+                p.get("outcome"), {"sent": "sent", "handed_over": "handed to the mail server (not seen in Sent)",
+                                   "unknown": "may have gone (not confirmed in Sent)",
+                                   "none": "not sent"}.get(gone_notice(p), "not recorded"))
         return "held %s" % (p.get("outcome"),)
     if kind == "checked":
         return "gate %s%s" % ("passed" if p.get("passed") else "blocked",
                               "" if p.get("passed") else " at %s" % (p.get("first_fail"),))
+    if kind == "error" and p.get("step") == "booking_check" and p.get("read") == "failed":
+        return "her calendar check (no mail): booking %s could not be read, never called missing, read again " \
+               "next cycle" % (p.get("booking_id"),)
     if kind == "error":
         return "error in %s" % (p.get("step"),)
     if kind == "halted":
         return "halted: %s" % (p.get("cause"),)
     if kind == "summary":
         return "summary: %s handled, %s held, %s sent" % (p.get("handled"), p.get("held"), p.get("sends"))
+    return None
+
+
+def _follow_up(p):
+    """A follow-up line that closes no message, from its fixed fields: filed, closed, the nudge going,
+    or a nudge that waits. None for any other decided line."""
+    action = p.get("action")
+    fu = p.get("follow_up") if isinstance(p.get("follow_up"), dict) else {}
+    kind = fu.get("kind") if isinstance(fu.get("kind"), str) else None
+    what = {"nudge": "one nudge", "booking_check": "booking check"}.get(kind, "entry")
+    rule = p.get("rule")
+    said = FOLLOW_UP_WORDS.get(rule, rule) if isinstance(rule, str) else rule
+    if action == "file_follow_up":
+        return "follow-up %s: %s, due %s" % ("filed" if p.get("new") is not False else "already filed", what,
+                                             fu.get("due"))
+    if action == "close_follow_up":
+        return "follow-up closed: %s%s" % (what, " (%s)" % (said,) if "rule" in p else "")
+    if action == "nudge":
+        kept = p.get("kept")
+        return "follow-up due: the one nudge (%s) goes with %s of the offer's times" % (
+            p.get("template"), len(kept) if isinstance(kept, list) else "?")
+    if action == "nudge_waits":
+        return "follow-up due, and the nudge waits (%s)" % (said,)
     return None
 
 

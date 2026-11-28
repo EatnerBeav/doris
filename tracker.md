@@ -17,6 +17,8 @@ Status words: **done** (on main, tested) · **in review** (built, in a pull requ
   - Wolf asked for Wed Dec 2, 10 AM; the owner was busy 9-11, so she offered 3 times (T4). Wolf picked 11:00; she re-checked, booked it, read it back CONFIRMED (11:00-11:30 AM Pacific), sent T1 with the .ics, found in Sent. 0 held, 0 errors, 0 approvals, $0.0076. Main a13cadd. Trace: [traces/live-run-20261128T065251Z/](traces/live-run-20261128T065251Z/) (the soak's).
 - **done** · Short overnight soak: the same live run left going since 10:52 PM, a pass every 10 minutes · Wolf · stopped Sat 7:05 AM
   - 8 h 12 min live on a13cadd: 2 handled (the offer and the booking above), 0 held, 0 errors, 0 human approvals, 3 sends (digest, T4, T1), 2 model calls, $0.0076. Ended by `stop`: worker dead 59 ms later, nothing in flight, 0 dropped. Outcome pass; 153 lines, chain verified on our server and again on main's code. Committed from our server: [traces/live-run-20261128T065251Z/](traces/live-run-20261128T065251Z/).
+- **done** · The full live loop: wolf's demo-day mix, live, handled end to end with nobody in the loop · Wolf · Sat 9:25 AM
+  - Sat 7:39 to 8:37 AM on main 5be0658, `run --live` plus [tests/tools/live_mix.py](tests/tools/live_mix.py): 15 emails from wolf in 8 threads, each answer as planned (15 of 15 met, 0 wrong). She booked 6 (one in Eastern for 45 min, one ISO date, one pick plus a question), offered 3 times, moved 1, cancelled 1, filed 4 (list mail, an auto-reply, an injection, an FYI), held 1 (add a person; the notice reached the owner). 15 messages, 14 handled, 1 held, 0 errors, 0 human approvals, 11 sends each found in Sent, every booking read back, 13 model calls, $0.0485. Ended by `stop`: worker dead 71 ms later, nothing in flight. Outcome pass; 287 lines, chain verified. Trace: [traces/live-run-20261128T153848Z/](traces/live-run-20261128T153848Z/), the mix's log [traces/live-loop-20261128T153848Z/](traces/live-loop-20261128T153848Z/). Rae's Gmail emails moved to the 2:30 PM rehearsal (Steve, decision 115).
 - **not started** · Overnight run, under 60 emails (never cut; a sandbox run is the fallback) · Wolf · Sat 8:00 PM start
   - Unblocked: the live booking passed tonight. Stays the main overnight run.
 - **done** · Recorded answers from a real keyed demo run, so `demo` replays a real model · Wolf · Sat 12:00 PM, again at the freeze
@@ -44,7 +46,8 @@ No new features; the law and the scope stand. Bar: first place, and would Steve 
 
 - **not started** · `demo`, `traps` and the sandbox `run` read the model key from a `.env` at the repo root as well as the environment; the README gives the step (row 1.2, wrong today) · Wolf · Sat 12:00 PM
 - **done** · tests/trap-pack/RESULTS.md carries the grade against the key beside each generated verdict and links RUNS.md; run 2's trace lands on main beside run 1's (rows 9.3 wrong, 9.4, 9.5) · Wolf · Sat 12:00 PM
-- **not started** · The follow-up named in the receipt and the digest when an offer is filed (row 6.2; with the nudge) · nudge thread · Sat 2:00 PM
+- **done** · The follow-up named in the receipt and the digest when an offer is filed (row 6.2; with the nudge) · nudge thread
+  - Every offer and every booking files a dated entry in her ledger, named in its own receipt line, in the terminal and in the digest. AGENT.md, "The follow-up"; `tests/unit/test_followups.py`.
 - **not started** · A loop test pinning the calendar failing twice into a clean hold (behaviour right, no test) · Wolf · Sat 2:00 PM
 - **done** · The form's team field: the one registered person in the field, "Wolf (Claude), his CTO" in the free-text fields (row 10.2; Shane's call, decision 103) · Steve submits · Sun night
 - **not started** · Daily check of the registration inbox for judges' questions, Nov 30 to Dec 10 (row 5.8) · Wolf (project chat) · Mon 9:30 AM
@@ -96,8 +99,10 @@ No new features; the law and the scope stand. Bar: first place, and would Steve 
   - PR #17. Replaying a recorded live run waits on recorded answers. `redteam --record` is on main too (PR #13).
 - **done** · AGENT.md permissions: each credential, its scope, what it cannot do · docs thread · final pass Sun
   - PR #7, merged in PR #11.
-- **not started** · Follow-up nudge on an unanswered offer (T9) · new thread after PR #2 · Sat 2:00 PM
-- **not started** · Ruling 17's once-a-cycle check for a booking gone from the calendar · new thread after PR #2 · Sat 2:00 PM
+- **done** · Follow-up nudge on an unanswered offer (T9) · nudge thread
+  - One nudge per offer and per thread, two business days after the offer, through the gate, listing only the offer's own times still available. `tests/unit/test_followups.py` (class `Nudge`).
+- **done** · Ruling 17's once-a-cycle check for a booking gone from the calendar · nudge thread
+  - Missing on two reads a short wait apart: the owner gets a hold notice, the prospect gets nothing. Edits are not checked. `tests/unit/test_followups.py` (`test_owner_deleted_holds`).
 - **not started** · Keys, tiers and cost table · README pass · Sun 6:00 PM
 - **not started** · README rubric-to-evidence map · README pass · Sun 6:00 PM
 - **not started** · README: the 60-second run, known limits (no Google or Microsoft calendar, overnight under 60 emails), optional live setup never asked of a judge · README pass · Sun 6:00 PM

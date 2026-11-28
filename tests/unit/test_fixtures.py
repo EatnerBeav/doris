@@ -8,7 +8,7 @@ fixtures drifting from tests/tools/build_demo_fixtures.py.
 Every expected value below is copied from demo-day.md by hand, not computed by the generator.
 The tests tolerate what a demo run adds (her doris-*.ics bookings, the staged-*.ics event a staged fault
 puts on the calendar, her sends in outbox/; see demo_sandbox.py) and a judge's own .eml dropped in after the
-demo's fifteen, with its line in facts.json, as sandbox/README.md says.
+demo's fifteen, with or without a line in facts.json, as sandbox/README.md says.
 """
 
 import datetime as dt
@@ -504,8 +504,8 @@ class RebuildCheck:
         if not judges_emails(inbox):
             self.assertEqual(built, on_disk, "inbox/facts.json")
             return
-        # A judge who follows sandbox/README.md has added a line for each email of theirs, so the file
-        # is no longer the committed bytes: every other line must still be exactly the generator's.
+        # A judge may have added a line for an email of theirs (sandbox/README.md asks for none), so the
+        # file may not be the committed bytes: every other line must still be exactly the generator's.
         theirs = set(facts) - set(NAMES)
         self.assertLessEqual(theirs, set(judges_emails(inbox)), "facts.json lines for no judge's .eml")
         self.assertEqual({name: value for name, value in facts.items() if name not in theirs},

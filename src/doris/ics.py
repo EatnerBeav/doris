@@ -263,7 +263,7 @@ def _logical_lines(data) -> List[str]:
     if not isinstance(data, (bytes, bytearray)):
         raise ValueError("an .ics is bytes")
     text = bytes(data).decode("utf-8", errors="replace").lstrip("\ufeff")
-    out = []   # type: List[str]
+    out: List[str] = []
     for line in re.split(r"\r\n|\n|\r", text):
         if line[:1] in (" ", "\t") and out:
             out[-1] += line[1:]
@@ -380,9 +380,9 @@ def _vevent(props) -> VEvent:
 def read_events(ics_bytes) -> List[VEvent]:
     """Every VEVENT in the bytes (repeats not expanded). Lenient on line endings, folding and
     case. Raises ValueError when the calendar or any event in it cannot be read."""
-    stack = []      # type: List[str]
-    events = []     # type: List[VEvent]
-    props = {}      # type: Dict[str, list]
+    stack: List[str] = []
+    events: List[VEvent] = []
+    props: Dict[str, list] = {}
     for line in _logical_lines(ics_bytes):
         name, params, value = _content_line(line)
         if name == "BEGIN":

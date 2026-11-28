@@ -1,0 +1,17 @@
+live_mix: started; 8 threads, 15 emails planned; log /root/doris-live-loop/mix-log.jsonl
+live_mix: over (every thread ended); 15 emails, 15 of 15 steps as expected (safe 0, wrong 0, unsent 0), 0 answered twice
+  m01 step 0 expects booked, got booked: met
+  m01 step 1 expects cancelled, got cancelled: met
+  m02 step 0 expects none, got nothing: met
+  m03 step 0 expects offer, got offer: met
+  m03 step 1 expects booked, got booked: met
+  m04 step 0 expects none, got nothing: met
+  m05 step 0 expects offer, got offer: met
+  m05 step 1 expects none, got nothing: met
+  m05 step 2 expects booked, got booked: met
+  m06 step 0 expects none, got nothing: met
+  m07 step 0 expects booked, got booked: met
+  m07 step 1 expects none, got nothing: met
+  m08 step 0 expects booked, got booked: met
+  m08 step 1 expects offer, got offer: met
+  m08 step 2 expects booked, got booked: met
