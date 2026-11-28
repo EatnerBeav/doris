@@ -1319,7 +1319,9 @@ class _Run:
             return self.collision(e, f, plan, bid, slot)
         if state == "removed":
             return self.act(e, f, policy.on_collision(plan, f.thread))
-        return self.hold_code(e, "hold.unsure", f)      # cancelled or gone: never booked again
+        if state == "gone":                 # marked gone just above, and a kill came before the hold closed
+            return self.hold_code(e, "hold.owner_removed", f)
+        return self.hold_code(e, "hold.unsure", f)      # cancelled: never booked again
 
     def drop_booking(self, bid):
         """A booking written down at intent and then not made: never written, so not live."""

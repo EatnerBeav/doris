@@ -485,6 +485,25 @@ class GoneBookingPartWay(Base):
                           if "booking_check" in l["payload"]], [])
         self.assertEqual(self.templates_sent(PRIYA), ["T1"])
 
+    def test_gone_at_the_restart_and_killed_again_it_is_still_held_as_removed_by_the_owner(self):
+        """Her own message finds its booking gone on the restart and marks it; a second kill lands
+        before the hold is written down. The next run holds it for the same true reason, never as
+        "the model was unsure": one notice to the owner, nothing to the prospect."""
+        self.crash_once(loop._Run, "reply", lambda self_, e, f, template, *a, **k: template == "T1")
+        (event,) = self.events()
+        os.remove(os.path.join(self.root, "calendar", event))
+        self.crash_once(loop._Run, "hold_code", lambda self_, e, code, *a, **k: code == "hold.owner_removed")
+        with self.ledger() as led:
+            self.assertEqual(led.booking(event[:-len(".ics")])["state"], "gone")
+        s3 = self.run_once()
+        self.assertEqual(self.closing(s3, PRIYA_KEY), ["hold:owner_removed"])
+        (notice,) = [m for t, m in self.sent(OWNER) if t == "S1"]
+        self.assertIn(REMOVED, notice.get_body(preferencelist=("plain",)).get_content())
+        self.assertEqual(self.templates_sent(PRIYA), [])
+        self.assertEqual(self.lines(s3, "observed", step="booking_check"), [])
+        self.assertEqual((s3.held, s3.errors), (1, 0))
+        self.assertTrue(s3.verify_ok)
+
 
 # ---------------------------------------------------------------------------------------------
 # The nudge (T9)
