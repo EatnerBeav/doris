@@ -440,6 +440,13 @@ class Panes(TempState):
         self.assertIn("halts it at her next check, after any call in flight returns, not mid-call", snap["source"])
         self.assertNotIn("smoke", self.look_at(older)["source"])
 
+    def test_a_yes_man_run_is_named_for_what_answers(self):
+        folder = os.path.join(self.state, "sandbox", "runs", "model-yes-man-sandbox-20261128T030000Z")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "config.json"), "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        self.assertIn("yes-man", self.look()["source"])
+
     def test_a_run_whose_receipts_are_not_written_yet_is_starting(self):
         folder = os.path.join(self.state, "sandbox", "runs", "model-stub-sandbox-20261128T030000Z")
         os.makedirs(folder)

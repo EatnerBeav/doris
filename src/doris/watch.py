@@ -110,7 +110,7 @@ def newest_run():
 # ------------------------------------------------------------------------------------------
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
 _TS = re.compile(r"^(\d{4}-\d\d-\d\d)T(\d\d:\d\d:\d\dZ)$")
-_RUN_NAME = re.compile(r"^model-(live|replayed|stub)-")
+_RUN_NAME = re.compile(r"^model-(live|replayed|stub|yes-man)-")
 _HIDDEN = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})   # controls, direction overrides, lone surrogates, breaks
 
 
@@ -320,6 +320,8 @@ SOURCE_WORDS = {
             "every receipt says stub.",
     "replayed": "Model answers replayed from a recorded real run; no model is called now.",
     "live": "Model called live; the cost is measured.",
+    "yes-man": "No model: the yes-man stand-in (redteam) gives the most permissive valid answer and obeys any "
+               "instruction in the mail, so the gate alone bounds what she does.",
 }
 # smoke.py runs her loop itself, not under the supervisor: her own halt check stops it, between calls
 SMOKE_WORDS = ("The smoke's own run of her loop, on its one test request. It runs without the kill switch's "
