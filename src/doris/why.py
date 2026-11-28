@@ -153,6 +153,24 @@ FOLLOW_UP_WORDS = {
     "not_sent": "the mail server did not take it",
 }
 
+# How the hold notice for a booking found gone went: the `notice` word on its held line, and how the
+# terminal says it. "handed_over" is never "not sent": the mail server took it, so the owner has it.
+GONE_NOTICE_WORDS = {
+    "sent": "sent",
+    "handed_over": "handed to the mail server (her copy is not in Sent yet)",
+    "unknown": "may have gone (not confirmed in Sent)",
+    "none": "not sent (the digest lists the hold)",
+}
+
+
+def gone_notice(payload):
+    """That word as the readers take it from a held line: one of GONE_NOTICE_WORDS' keys, or None
+    when the line does not say (a line that only says her copy was found in Sent is "sent")."""
+    word = payload.get("notice")
+    if isinstance(word, str) and word in GONE_NOTICE_WORDS:
+        return word
+    return "sent" if payload.get("notice_sent") is True else None
+
 
 class WhyError(ValueError):
     pass

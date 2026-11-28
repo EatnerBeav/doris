@@ -234,6 +234,29 @@ class APickBeforeHerNewestOffer(WhyIsListed):
         p = policy.decide(facts("pick", branch="2", thread=self.on_thread(two), pick=named, arrived=between))
         self.assertEqual((p.action, p.slot), ("book", slot(48)))
 
+    def test_while_her_nudge_may_or_may_not_have_gone_no_number_and_no_yes_books(self):
+        """Fable review of PR #42, finding 2: the nudge's send was cut off or its result is unknown, so
+        the sender holds the offer's list or the nudge's, and a number or a bare yes could mean
+        either. They get the open times again (T12); a time they write out still books."""
+        nudged_at = NOW + dt.timedelta(days=2)
+        after = nudged_at + dt.timedelta(hours=1)               # even one that reached her after the nudge's time
+        two = dict(offer([slot(24), slot(48)]), nudged=nudged_at, nudge="in_doubt")
+        one = dict(offer([slot(24)]), nudged=nudged_at, nudge="in_doubt")
+        number = PickResult(kind="matched_slot", slot_index=1, by="number")
+        for p in (policy.decide(facts("pick", branch="2", thread=self.on_thread(two), pick=number, arrived=after)),
+                  policy.decide(facts("yes", branch="2", thread=self.on_thread(one), arrived=after))):
+            self.assertEqual((p.action, p.template, p.slot, p.offer_id, p.pick_kind),
+                             ("resend", "T12", None, None, "ambiguous"))
+            self.assertWhy(p, "policy.pick_resend")
+        named = PickResult(kind="matched_slot", slot_index=1, by="time")
+        p = policy.decide(facts("pick", branch="2", thread=self.on_thread(two), pick=named, arrived=after))
+        self.assertEqual((p.action, p.slot), ("book", slot(48)))
+        # a nudge the mail server took is not in doubt: the same number and the same yes book
+        for o, kind, kw, want in ((two, "pick", {"pick": number}, slot(48)), (one, "yes", {}, slot(24))):
+            sent = dict(o, nudge="sent")
+            p = policy.decide(facts(kind, branch="2", thread=self.on_thread(sent), arrived=after, **kw))
+            self.assertEqual((p.action, p.slot), ("book", want))
+
     def test_an_offer_never_nudged_is_timed_by_its_send_alone(self):
         t = self.on_thread(dict(offer(self.three()), nudged=None))
         pick = PickResult(kind="matched_slot", slot_index=0, by="number")

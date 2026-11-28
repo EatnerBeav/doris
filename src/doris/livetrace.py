@@ -27,7 +27,7 @@ import re
 import shutil
 
 from . import paths, receipts
-from .why import FOLLOW_UP_WORDS
+from .why import FOLLOW_UP_WORDS, gone_notice
 
 UTC = _dt.timezone.utc
 KINDS = ("smoke", "run")
@@ -174,11 +174,16 @@ def _event(line):
     if kind == "held":
         if p.get("step") == "booking_check":
             return "held %s: hold notice to the owner %s, nothing to the prospect" % (
-                p.get("outcome"), "sent" if p.get("notice_sent") is True else "not sent")
+                p.get("outcome"), {"sent": "sent", "handed_over": "handed to the mail server (not seen in Sent)",
+                                   "unknown": "may have gone (not confirmed in Sent)",
+                                   "none": "not sent"}.get(gone_notice(p), "not recorded"))
         return "held %s" % (p.get("outcome"),)
     if kind == "checked":
         return "gate %s%s" % ("passed" if p.get("passed") else "blocked",
                               "" if p.get("passed") else " at %s" % (p.get("first_fail"),))
+    if kind == "error" and p.get("step") == "booking_check" and p.get("read") == "failed":
+        return "her calendar check (no mail): booking %s could not be read, never called missing, read again " \
+               "next cycle" % (p.get("booking_id"),)
     if kind == "error":
         return "error in %s" % (p.get("step"),)
     if kind == "halted":

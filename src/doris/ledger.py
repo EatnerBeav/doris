@@ -48,9 +48,15 @@ SEND_KINDS = ("send_reply", "send_hold_notice", "send_digest")
 SEND_STATES = ("pending", "sending", "unknown", "handed_over", "confirmed")
 SENT_STATES = ("handed_over", "confirmed")                          # the server took it
 NEVER_AGAIN_STATES = ("sending", "unknown", "handed_over", "confirmed")   # it went, or may have
-BOOKING_STATES = ("intent", "written", "confirmed", "cancelled", "gone", "collision_unresolved", "removed",
-                  "unconfirmed", "blocked")   # blocked: the gate stopped it, never written
-LIVE_BOOKING_STATES = ("intent", "written", "confirmed", "unconfirmed", "collision_unresolved")
+BOOKING_STATES = ("intent", "written", "confirmed", "cancelling", "cancelled", "gone", "collision_unresolved",
+                  "removed", "unconfirmed", "blocked")   # blocked: the gate stopped it, never written
+# cancelling: her own cancel or move is taking the event off the calendar because the sender asked. It
+# is written down before her delete goes (A3), and it becomes cancelled once a re-read shows the event
+# gone. Until then her event may or may not be there, by her own hand, so ruling 17 never reads it: only
+# a booking still written or confirmed can be called "removed by the owner" (Fable review of PR #42, 1).
+# It only ever follows written or confirmed (set_booking_state), so it always names a booking that was
+# written.
+LIVE_BOOKING_STATES = ("intent", "written", "confirmed", "unconfirmed", "collision_unresolved", "cancelling")
 UNFINISHED_BOOKING_STATES = ("intent", "written", "unconfirmed")
 ON_CALENDAR_STATES = ("written", "confirmed")
 # A follow-up is one dated entry: `nudge` for an offer (due two business days after it went out, the
@@ -587,15 +593,60 @@ class Ledger:
             con.executemany("INSERT INTO offer_slots (offer_id, idx, start_utc, end_utc) VALUES (?, ?, ?, ?)",
                             [(offer_id,) + r for r in rows])
 
+    def _nudge_state(self, row):
+        """Where an offer's one nudge stands, and from when a reply is read on what it listed: a pair.
+          (None, None)       none was written down, or it surely did not go: its send is still pending
+                             (refused, or stopped before the transport).
+          ("sent", t)        the server took it (handed_over or confirmed) at t.
+          ("in_doubt", t)    it may have gone at t (cut off mid-send, or unknown), it left a time out,
+                             and the times have not gone again since: a number could mean the offer's
+                             list or the nudge's.
+          ("settled", t)     it may have gone, and a number means one list either way: it left no time
+                             out (t is when it may have gone), or the server took a T12 sent after it,
+                             which lists the nudge's times again (t is when that T12 went).
+        A thread gets one nudge, ever, and one is written down only once its send is recorded, so the
+        thread's T9 send is this offer's."""
+        if row["nudged_utc"] is None:
+            return None, None
+        send = self._one("SELECT rowid, state FROM sends WHERE kind = 'send_reply' AND template = 'T9' "
+                         "AND thread_norm = ? ORDER BY rowid LIMIT 1", (row["thread_norm"],))
+        if send is None or send["state"] == "pending":
+            return None, None
+        if send["state"] in SENT_STATES:
+            return "sent", row["nudged_utc"]
+        if self._one("SELECT 1 FROM offer_slots WHERE offer_id = ? AND dropped = 1", (row["id"],)) is None:
+            return "settled", row["nudged_utc"]
+        again = self._one("SELECT created_utc FROM sends WHERE kind = 'send_reply' AND template = 'T12' "
+                          "AND thread_norm = ? AND rowid > ? AND created_utc >= ? AND state IN (%s) "
+                          "ORDER BY created_utc DESC, rowid DESC LIMIT 1" % ", ".join("'%s'" % s for s in SENT_STATES),
+                          (row["thread_norm"], send["rowid"], row["nudged_utc"]))
+        if again is not None:
+            return "settled", again["created_utc"]
+        return "in_doubt", row["nudged_utc"]
+
     def _offer(self, row):
-        """An offer as the loop reads it. Its slots are the ones still on it, in offered order: a slot
-        its nudge dropped is closed and not among them. `nudged` is when its one nudge went, or None."""
+        """An offer as the loop reads it: its slots in offered order, and its one nudge.
+
+        A nudge is written down before it is sent (mark_nudged: the times it lists, and when), and
+        that counts only from the moment it may have reached them (Fable review of PR #42, finding 2):
+          nudge None       no nudge, or one that surely did not go. Every slot is on the offer and
+                           `nudged` is None, as the sender's only mail lists them.
+          nudge "sent"     the server took it. The slots are the ones it listed (one it dropped is
+                           closed), `nudged` is when it went.
+          nudge "in_doubt" it may have gone, and it left a time out. The same slots and time as
+                           "sent"; which list the sender holds is not known, so policy books no
+                           number and no bare yes: they get the times again (T12).
+          nudge "settled"  it may have gone, and a number means one list either way: it left no
+                           time out, or that T12 went since. The same slots; `nudged` is when the
+                           nudge may have gone, or when the T12 went (see _nudge_state)."""
+        nudge, since = self._nudge_state(row)
         slots = [Slot(_when(s["start_utc"]), _when(s["end_utc"]))
-                 for s in self._all("SELECT start_utc, end_utc FROM offer_slots WHERE offer_id = ? AND dropped = 0 "
-                                    "ORDER BY idx", (row["id"],))]
+                 for s in self._all("SELECT start_utc, end_utc, dropped FROM offer_slots WHERE offer_id = ? "
+                                    "ORDER BY idx", (row["id"],))
+                 if nudge is None or not s["dropped"]]
         return {"id": row["id"], "thread_key": row["thread_key"], "sender": row["sender"], "slots": slots,
                 "length_min": row["length_min"], "created": _when(row["created_utc"]),
-                "expires": _when(row["expires_utc"]), "nudged": _when(row["nudged_utc"])}
+                "expires": _when(row["expires_utc"]), "nudged": _when(since), "nudge": nudge}
 
     def offer(self, offer_id) -> Optional[dict]:
         """One offer in any state, or None: as open_offers gives it, plus `used` and `closed_reason`."""
@@ -605,35 +656,44 @@ class Ledger:
         return dict(self._offer(row), used=bool(row["used"]), closed_reason=row["closed_reason"])
 
     def mark_nudged(self, offer_id, keep, now):
-        """The offer's one nudge is about to go (written down before the send, A3): the slots it no
-        longer lists are closed (dropped: they went busy), the ones it lists again stay, and the time is
-        kept. Not a new offer: its sent time and its expiry do not move, and the thread's count is the
-        same. `keep` is one or more of the offer's own slots still on it; anything else is refused, so a
-        nudge can never add a time. Marked again (a restart sends the same nudge) it keeps what is asked."""
+        """The offer's one nudge is about to go (written down before the send, A3): the slots it lists
+        again, the slots it leaves out (dropped: they went busy) and the time. Not a new offer: its
+        sent time and its expiry do not move, and the thread's count is the same. `keep` is one or
+        more of the offer's own slots; anything else is refused, so a nudge can never add a time.
+
+        What is written here counts only once the nudge may have reached them (_offer reads its send):
+        a try the mail server refused, or one a stop caught before the transport, leaves the offer
+        reading as it went out, and the next try writes afresh what it lists then. Once the nudge
+        went or may have gone, what it listed never changes: marking it again is refused."""
         keep = list(keep)
         when = _ts(now, "now")
         with self._tx() as con:
-            if con.execute("SELECT 1 FROM offers WHERE id = ?", (offer_id,)).fetchone() is None:
+            row = con.execute("SELECT * FROM offers WHERE id = ?", (offer_id,)).fetchone()
+            if row is None:
                 raise KeyError(offer_id)
-            rows = con.execute("SELECT idx, start_utc, end_utc FROM offer_slots WHERE offer_id = ? AND dropped = 0",
+            if self._nudge_state(row)[0] is not None:
+                raise ValueError("offer %s was nudged, or may have been: what its nudge listed never changes"
+                                 % (offer_id,))
+            rows = con.execute("SELECT idx, start_utc, end_utc FROM offer_slots WHERE offer_id = ?",
                                (offer_id,)).fetchall()
             have = {(r["start_utc"], r["end_utc"]): r["idx"] for r in rows}
             want = set()
             for s in keep:
                 pair = (_ts(s.start_utc, "slot start"), _ts(s.end_utc, "slot end"))
                 if pair not in have:
-                    raise ValueError("a nudge lists only the offer's own slots: %s is not one still on it" % (pair[0],))
+                    raise ValueError("a nudge lists only the offer's own slots: %s is not one of them" % (pair[0],))
                 want.add(pair)
             if not want:
                 raise ValueError("a nudge lists at least one of the offer's slots")
             for pair, idx in have.items():
-                if pair not in want:
-                    con.execute("UPDATE offer_slots SET dropped = 1 WHERE offer_id = ? AND idx = ?", (offer_id, idx))
+                con.execute("UPDATE offer_slots SET dropped = ? WHERE offer_id = ? AND idx = ?",
+                            (0 if pair in want else 1, offer_id, idx))
             con.execute("UPDATE offers SET nudged_utc = ? WHERE id = ?", (when, offer_id))
 
     def open_offers(self, thread_key, now) -> List[dict]:
         """Offers on the thread not used, not closed and not expired at `now`, oldest first. Each: id,
-        thread_key, sender, slots (Slot, in offered order), length_min, created, expires."""
+        thread_key, sender, slots (Slot, in offered order), length_min, created, expires, nudged, nudge
+        (see _offer)."""
         rows = self._all("SELECT * FROM offers WHERE thread_norm = ? AND used = 0 AND closed_reason IS NULL "
                          "AND expires_utc > ? ORDER BY id", (norm_id(thread_key), _ts(now, "now")))
         return [self._offer(r) for r in rows]
@@ -722,8 +782,21 @@ class Ledger:
         return True
 
     def set_booking_state(self, booking_id, state):
+        """A booking's state. cancelling only ever follows written or confirmed (or itself, when its
+        message is read again): it says the booking was written and she is taking it off, which the
+        gate counts as written (G6), so no other state can become it."""
         if state not in BOOKING_STATES:
             raise ValueError("booking state must be one of %s, not %r" % (", ".join(BOOKING_STATES), state))
+        if state == "cancelling":
+            with self._tx() as con:
+                row = con.execute("SELECT state FROM bookings WHERE booking_id = ?", (booking_id,)).fetchone()
+                if row is None:
+                    raise KeyError(booking_id)
+                if row["state"] not in ON_CALENDAR_STATES + ("cancelling",):
+                    raise ValueError("booking %s is %s: only one written or confirmed can be marked cancelling"
+                                     % (booking_id, row["state"]))
+                con.execute("UPDATE bookings SET state = 'cancelling' WHERE booking_id = ?", (booking_id,))
+            return
         cur = self._con.execute("UPDATE bookings SET state = ? WHERE booking_id = ?", (state, booking_id))
         if cur.rowcount == 0:
             raise KeyError(booking_id)
@@ -734,7 +807,7 @@ class Ledger:
 
     def live_booking_for_thread(self, thread_key) -> Optional[dict]:
         """The oldest booking on the thread that may stand on the calendar (intent, written, confirmed,
-        unconfirmed, collision_unresolved). G12 compares its ID with the one being written."""
+        unconfirmed, collision_unresolved, cancelling). G12 compares its ID with the one being written."""
         row = self._one("SELECT * FROM bookings WHERE thread_norm = ? AND state IN (%s) ORDER BY rowid LIMIT 1"
                         % ", ".join("'%s'" % s for s in LIVE_BOOKING_STATES), (norm_id(thread_key),))
         return None if row is None else self._booking(row)
@@ -745,7 +818,8 @@ class Ledger:
                                                     (norm_id(thread_key),))]
 
     def future_bookings(self, now) -> List[dict]:
-        """Her bookings written or confirmed that start after `now`, soonest first (ruling 17 reads them)."""
+        """Her bookings written or confirmed that start after `now`, soonest first (ruling 17 reads them).
+        One she is taking off herself (cancelling) is not among them: its missing event is her own doing."""
         return [self._booking(r) for r in self._all(
             "SELECT * FROM bookings WHERE state IN ('written', 'confirmed') AND start_utc > ? ORDER BY start_utc, rowid",
             (_ts(now, "now"),))]

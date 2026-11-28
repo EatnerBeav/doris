@@ -43,6 +43,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import paths, receipts, supervisor, zones
 from .loop import count_outcomes
 from .shapes import CLASSES
+from .why import gone_notice
 from .why import FOLLOW_UP_WORDS
 
 HOST = "127.0.0.1"                  # fixed: no option serves the page to another computer
@@ -304,8 +305,12 @@ def _what(kind, p):
     if kind == "held":
         text = "Held for the owner: %s." % _token(p.get("outcome"))
         if p.get("step") == "booking_check":
-            text += (" Hold notice sent to the owner; nothing sent to the prospect." if p.get("notice_sent") is True
-                     else " No hold notice went; the digest lists the hold. Nothing sent to the prospect.")
+            text += {"sent": " Hold notice sent to the owner; nothing sent to the prospect.",
+                     "handed_over": " Hold notice handed to the mail server, not yet seen in Sent; nothing sent to "
+                                    "the prospect.",
+                     "unknown": " The hold notice may have gone (not confirmed in Sent); nothing sent to the prospect.",
+                     "none": " No hold notice went; the digest lists the hold. Nothing sent to the prospect.",
+                     }.get(gone_notice(p), " Whether a hold notice went is not recorded. Nothing sent to the prospect.")
         return text
     if kind == "checked":
         if p.get("passed") is True:
@@ -342,6 +347,9 @@ def _what(kind, p):
     if kind == "error" and "moved_to" in p:     # the writer's own line: a cut-off line moved aside, on reopening
         return "A cut-off line (%d bytes after line %s) was moved aside to %s." % (
             _int(p.get("torn_bytes")), _token(p.get("after_seq")), _token(p.get("moved_to")))
+    if kind == "error" and p.get("step") == "booking_check" and p.get("read") == "failed":
+        return ("Her calendar check could not read her booking %s. That is never \"missing\": she reads it again "
+                "at her next cycle." % (_token(p.get("booking_id")),))
     if kind == "error":
         error = p.get("error")
         name = error.split(":", 1)[0] if isinstance(error, str) else None

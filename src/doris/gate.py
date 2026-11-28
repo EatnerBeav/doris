@@ -53,7 +53,9 @@ BOOKING_PREFIX = "doris-"                               # her booking IDs (the c
 ICS_NEVER = frozenset({"ATTENDEE", "ORGANIZER"})        # locked call 3: so the calendar server mails nobody
 GONE_STATES = frozenset({"cancelled", "gone", "removed"})            # her event is no longer there (G14)
 CONFIRMABLE_STATES = frozenset({"written", "confirmed"})             # written and read back (G15)
-WRITTEN_STATES = CONFIRMABLE_STATES | GONE_STATES                     # the gate let it be written (G6)
+# The gate let it be written (G6). cancelling is her own cancel or move part way: her ledger gives that
+# state only to a booking that was written or confirmed, and her event may still be there (G14 passes it).
+WRITTEN_STATES = CONFIRMABLE_STATES | GONE_STATES | frozenset({"cancelling"})
 SENSITIVE_CHECKS = frozenset({"sender-domain", "subject-phrase", "one-time-code", "card-number",
                               "bank-routing", "bank-account", "ssn", "reset-or-login-alert"})
 UTC = _dt.timezone.utc

@@ -432,7 +432,8 @@ class GoneBooking(GoneSetup):
             s = self.run_once()
         self.assertEqual((self.booking()["state"], self.notices(), s.held), ("gone", [], 1))
         (held,) = self.lines(s, "held", booking_id=self.bid)
-        self.assertEqual((held["payload"]["notice_message_id"], held["payload"]["notice_sent"]), (None, False))
+        self.assertEqual((held["payload"]["notice_message_id"], held["payload"]["notice_sent"],
+                          held["payload"]["notice"]), (None, False, "none"))
         slots = digest.build(receipts.read_lines(s.receipts_path), utc("2026-12-02T01:00:00Z"), verified=True)
         self.assertEqual([(h["name"], h["reason"]) for h in slots["holds"]], [("Priya Raman", "hold.owner_removed")])
         self.assertEqual((slots["handled"], slots["held"]), (0, 1))
@@ -473,6 +474,156 @@ class GoneBooking(GoneSetup):
         s3 = self.run_once()                                        # and her next pass finishes it
         self.assertEqual((len(self.notices()), s3.held), (1, 1))
 
+    def test_a_step_that_failed_and_was_finished_later_is_never_named_as_dropped_by_a_stop(self):
+        """Fable review of PR #42, finding 6: the failed try's queue row is finished (as an error),
+        not left started for a later halted line to list under "dropped"."""
+        self.owner_deletes()
+        with mock.patch.object(loop._Run, "gone_notice", side_effect=RuntimeError("boom")):
+            self.run_once()
+        with self.ledger() as led:
+            self.assertEqual(led.queued_actions(), [])
+            self.assertEqual([(a["kind"], a["state"], a["outcome"]) for a in led.actions_for_message(PRIYA_KEY)
+                              if a["kind"] == "booking_check"], [("booking_check", "finished", "error")])
+        self.run_once()
+        with self.ledger() as led:
+            self.assertEqual(led.queued_actions(), [])
+            self.assertEqual([(a["state"], a["outcome"]) for a in led.actions_for_message(PRIYA_KEY)
+                              if a["kind"] == "booking_check"],
+                             [("finished", "error"), ("finished", "hold:owner_removed")])
+
+    def test_a_notice_the_mail_server_took_is_never_called_not_sent(self):
+        """Fable review of PR #42, finding 5: handed over, and her copy not seen in Sent on two looks.
+        The held line, the terminal and every reader say that, not "not sent"."""
+        self.owner_deletes()
+        self.said[:] = []
+        with mock.patch.object(sandbox_mod.SandboxMail, "find_in_sent", lambda mail, mid: False):
+            s = self.run_once()
+        self.assertEqual(len(self.notices()), 1)                    # the owner has it
+        (held,) = self.lines(s, "held", booking_id=self.bid)
+        self.assertEqual((held["payload"]["notice"], held["payload"]["notice_sent"]), ("handed_over", False))
+        (line,) = [l for l in self.said if "hold:owner_removed" in l]
+        self.assertIn("Hold notice to the owner handed to the mail server (her copy is not in Sent yet). "
+                      "Nothing sent to them.", line)
+        self.assertIn("Hold notice to the owner: handed to the mail server (Message-ID %s); her copy was not seen "
+                      "in Sent." % held["payload"]["notice_message_id"], replayed(s))
+        self.assertIn("Held for the owner: hold:owner_removed. Hold notice handed to the mail server, not yet seen "
+                      "in Sent; nothing sent to the prospect.", [r["what"] for r in watched(s)])
+        self.assertIn("held hold:owner_removed: hold notice to the owner handed to the mail server (not seen in "
+                      "Sent), nothing to the prospect", "\n".join(timeline(s)))
+        for text in (replayed(s), " ".join(r["what"] for r in watched(s)), "\n".join(timeline(s))):
+            self.assertNotIn("not sent", text)
+            self.assertNotIn("No hold notice went", text)
+
+    def test_the_held_line_says_which_way_the_notice_went(self):
+        self.owner_deletes()
+        s = self.run_once()
+        (held,) = self.lines(s, "held", booking_id=self.bid)
+        self.assertEqual((held["payload"]["notice"], held["payload"]["notice_sent"]), ("sent", True))
+
+    def test_a_line_that_does_not_say_how_the_notice_went_is_read_as_not_recorded(self):
+        line = {"seq": 9, "ts": "2026-12-01T16:10:00Z", "kind": "held", "subject": self.subject, "why": {},
+                "payload": {"outcome": "hold:owner_removed", "step": "booking_check", "booking_id": self.bid}}
+        self.assertEqual(watch.row(line)["what"], "Held for the owner: hold:owner_removed. Whether a hold notice went "
+                                                  "is not recorded. Nothing sent to the prospect.")
+        self.assertIn("hold notice to the owner not recorded, nothing to the prospect",
+                      "\n".join(livetrace.timeline([line])))
+
+    def test_the_notices_draft_never_offers_the_time_the_owner_just_removed(self):
+        """Fable review of PR #42, finding 9."""
+        self.owner_deletes()
+        self.run_once()
+        (notice,) = self.notices()
+        draft = notice.get_body(preferencelist=("plain",)).get_content().split("----", 1)[1]
+        self.assertNotIn("Wed Dec 2, 11:00 AM Pacific", draft)
+        self.assertEqual([l[:2] for l in draft.splitlines() if l[:2] in ("1.", "2.", "3.")], ["1.", "2.", "3."])
+
+
+class GoneCheckGoesOn(Base):
+    """Fable review of PR #42, finding 4: a booking that cannot be read is never "missing", and it
+    never ends the check for the bookings after it. Only a calendar that does not answer at all
+    (two bookings in a row) ends the cycle's check. Each one is said once a run, loud."""
+    names = ("01-priya-request.eml", "02-marcus-request.eml")
+    NEXT_CYCLE = "2026-12-01T18:20:00Z"
+
+    def setUp(self):
+        Base.setUp(self)
+        self.run_once()
+        (_, t2) = self.sent(MARCUS)[0]
+        tr.add(self.root, "20-marcus-pick.eml",
+               answer("Marcus Lee", MARCUS, "20261201.1000.marcus.pick@brightlane.example",
+                      "Tue, 01 Dec 2026 10:00:00 -0800", str(t2["Message-ID"]), MARCUS_KEY, "The first one works."),
+               {"forwarded": "no"})
+        self.run_once()
+        with self.ledger() as led:
+            self.first, self.second = [b["booking_id"] for b in led.future_bookings(utc("2026-12-01T18:10:00Z"))]
+        self.said[:] = []
+
+    def unreadable(self, bid):
+        with open(os.path.join(self.root, "calendar", bid + ".ics"), "wb") as fh:
+            fh.write(b"not a calendar file\r\n")
+
+    def states(self):
+        with self.ledger() as led:
+            return led.booking(self.first)["state"], led.booking(self.second)["state"]
+
+    def checked(self, summary):
+        """The bookings her check read in this run, in order, one entry per read."""
+        return [l["payload"]["target"] for l in self.lines(summary, "called", call="calendar_get")
+                if "booking_check" in l["payload"]]
+
+    def test_one_booking_that_cannot_be_read_does_not_stop_the_check_for_the_next(self):
+        self.unreadable(self.first)
+        os.remove(os.path.join(self.root, "calendar", self.second + ".ics"))       # the owner removes the later one
+        s = self.run_at(self.NEXT_CYCLE)
+        self.assertEqual(self.states(), ("confirmed", "gone"))                     # unread is never "missing"
+        (seen,) = self.lines(s, "observed", step="booking_check")
+        self.assertEqual(seen["payload"]["booking_id"], self.second)
+        self.assertEqual(len([m for t, m in self.sent(OWNER) if t == "S1"]), 1)
+        (err,) = self.lines(s, "error", step="booking_check")
+        self.assertEqual((err["subject"], err["payload"]["booking_id"]), ("booking:" + self.first, self.first))
+        (line,) = [l for l in self.said if "could not be read" in l]
+        self.assertIn("Calendar check: her booking for Wed Dec 2, 11:00 AM Pacific could not be read on the calendar "
+                      "(error line written). That is never \"missing\": she reads it again at her next cycle.", line)
+        self.assertEqual((s.held, s.errors), (1, 1))
+        self.assertTrue(s.verify_ok)
+
+    def test_it_is_said_once_a_run_however_many_cycles_fail(self):
+        self.unreadable(self.first)
+        for name in ("05-opsweekly-newsletter.eml", "09-ken-instruction.eml"):     # mail at two later cycles
+            with open(os.path.join(tr.demo_sandbox.SANDBOX, "inbox", name), "rb") as fh:
+                tr.add(self.root, name, fh.read(), {})
+        s = self.run_once()
+        self.assertGreater(self.checked(s).count(self.first), 2)                   # read again at each cycle
+        self.assertEqual(len(self.lines(s, "error", step="booking_check")), 1)
+        self.assertEqual(len([l for l in self.said if "could not be read" in l]), 1)
+        self.assertEqual(self.states(), ("confirmed", "confirmed"))
+
+    def test_every_reader_calls_it_her_calendar_check_and_never_a_mail(self):
+        self.unreadable(self.first)
+        s = self.run_at(self.NEXT_CYCLE)
+        text = replayed(s)
+        self.assertIn("Item 1 of 1: her calendar check, no mail: her booking %s could not be checked, and it is not "
+                      "called gone" % self.first, text)
+        self.assertNotIn("Message-ID booking:", text)
+        self.assertIn("is booking %s still there -> failed [" % self.first, text)   # said once, not "failed: failed"
+        (row,) = [r for r in watched(s) if r["step"] == "error"]
+        self.assertEqual(row["what"], "Her calendar check could not read her booking %s. That is never \"missing\": "
+                                      "she reads it again at her next cycle." % self.first)
+        self.assertIn("her calendar check (no mail): booking %s could not be read, never called missing, read again "
+                      "next cycle" % self.first, "\n".join(timeline(s)))
+        self.assertEqual(replay.BOOKING_KEY, ledger_mod.GONE_KEY)
+
+    def test_a_calendar_that_answers_nothing_ends_the_cycles_check_after_two_in_a_row(self):
+        with mock.patch.object(sandbox_mod.SandboxCalendar, "get", side_effect=CalendarError("down")):
+            s = self.run_at(self.NEXT_CYCLE)
+            self.assertEqual(sorted(set(self.checked(s))), sorted([self.first, self.second]))
+            with mock.patch.object(caps, "RULING17_UNREAD_IN_A_ROW", 1):
+                s2 = self.run_at("2026-12-01T18:30:00Z")
+        self.assertEqual(set(self.checked(s2)), {self.first})                      # the next one is left for her next cycle
+        self.assertEqual(self.states(), ("confirmed", "confirmed"))
+        self.assertEqual(self.lines(s, "observed", step="booking_check") + self.lines(s2, "observed", step="booking_check"), [])
+        self.assertEqual([m for t, m in self.sent(OWNER) if t == "S1"], [])
+
 
 class GoneBookingPartWay(Base):
     """A booking whose own message a kill left part way is that message's to finish, never ruling 17's."""
@@ -503,6 +654,111 @@ class GoneBookingPartWay(Base):
         self.assertEqual(self.lines(s3, "observed", step="booking_check"), [])
         self.assertEqual((s3.held, s3.errors), (1, 0))
         self.assertTrue(s3.verify_ok)
+
+
+class HerOwnCancelPartWay(Base):
+    """Her own cancel or move takes her event off the calendar because the sender asked. A kill, a
+    newer mail or a calendar that stops answering part way never turns that into "you removed this
+    booking" (Fable review of PR #42, finding 1): her ledger says she is taking the booking off
+    before her delete goes, and ruling 17 reads only bookings she never started to take off."""
+    names = ("01-priya-request.eml",)
+    CANCEL = "Please cancel our call."
+    MOVE = "Can we move our call to another time?"
+
+    def setUp(self):
+        Base.setUp(self)
+        self.first = self.run_once()
+        (self.event,) = self.events()
+        self.bid = self.event[:-len(".ics")]
+        (_, self.t1) = self.sent(PRIYA)[0]
+
+    def priya_writes(self, text, name="20-priya-asks.eml", mid="20261201.1000.priya.asks@northwind.example",
+                     date="Tue, 01 Dec 2026 10:00:00 -0800"):
+        tr.add(self.root, name, answer("Priya Raman", PRIYA, mid, date, str(self.t1["Message-ID"]), PRIYA_KEY,
+                                       text, subject="Re: Quick call"), {"forwarded": "no"})
+
+    def booking_state(self):
+        with self.ledger() as led:
+            return led.booking(self.bid)["state"]
+
+    def assert_never_called_removed_by_the_owner(self, *summaries):
+        for s in summaries:
+            self.assertEqual(self.lines(s, "observed", step="booking_check"), [])
+        self.assertEqual([m for t, m in self.sent(OWNER)
+                          if REMOVED in m.get_body(preferencelist=("plain",)).get_content()], [])
+
+    def killed_after_her_delete(self, text, between=None):
+        """The kill lands after her calendar delete and before her ledger says cancelled."""
+        self.priya_writes(text)
+        return self.crash_then_run(ledger_mod.Ledger, "set_booking_state",
+                                   lambda db, bid, state: state == "cancelled", between=between)
+
+    def test_a_kill_after_her_delete_finishes_the_cancel_and_never_blames_the_owner(self):
+        s2 = self.killed_after_her_delete(self.CANCEL)
+        self.assertEqual(self.templates_sent(PRIYA), ["T1", "T10"])
+        self.assertEqual(self.templates_sent(OWNER), [])
+        self.assert_never_called_removed_by_the_owner(s2)
+        self.assertEqual((self.booking_state(), self.events()), ("cancelled", []))
+        self.assertEqual(self.closing(s2, "priya.asks"), ["cancel"])
+        self.assertEqual((s2.handled, s2.held, s2.errors), (1, 0, 0))
+        self.assertTrue(s2.verify_ok)
+
+    def test_a_kill_after_her_delete_finishes_the_move_and_never_blames_the_owner(self):
+        s2 = self.killed_after_her_delete(self.MOVE)
+        self.assertEqual(self.templates_sent(PRIYA), ["T1", "T18"])
+        self.assertEqual(self.templates_sent(OWNER), [])
+        self.assert_never_called_removed_by_the_owner(s2)
+        self.assertEqual((self.booking_state(), self.events()), ("cancelled", []))
+        self.assertEqual(self.closing(s2, "priya.asks"), ["move"])
+        self.assertEqual((s2.handled, s2.held, s2.errors), (1, 0, 0))
+
+    def test_her_ledger_says_she_is_taking_it_off_before_her_delete_goes(self):
+        """Ledger first (A3): killed inside the calendar's delete, her ledger already says so, the
+        check on the restart leaves that booking to its own message, and the cancel is finished."""
+        self.priya_writes(self.CANCEL)
+        self.crash_once(sandbox_mod.SandboxCalendar, "delete", lambda cal, booking_id: True)
+        self.assertEqual((self.booking_state(), self.events()), ("cancelling", [self.event]))
+        s3 = self.run_once()
+        self.assertEqual(self.templates_sent(PRIYA), ["T1", "T10"])
+        self.assert_never_called_removed_by_the_owner(s3)
+        self.assertEqual((self.booking_state(), self.events()), ("cancelled", []))
+        self.assertEqual((s3.handled, s3.held), (1, 0))
+
+    def test_a_newer_mail_while_she_was_down_never_takes_the_place_of_her_half_done_cancel(self):
+        """Killed after her delete; a newer mail from the same sender on the thread is in before the
+        restart. The cancel is finished first (ruling 8), never superseded with her event already
+        off the calendar and her ledger still calling the booking confirmed."""
+        s2 = self.killed_after_her_delete(self.CANCEL, between=lambda: self.priya_writes(
+            "FYI, no action needed on my side.", name="21-priya-fyi.eml",
+            mid="20261201.1004.priya.fyi@northwind.example", date="Tue, 01 Dec 2026 10:04:00 -0800"))
+        self.assertEqual(self.closing(s2, "priya.asks"), ["cancel"])
+        self.assertEqual(self.closing(s2, "priya.fyi"), ["file"])
+        self.assertEqual(self.templates_sent(PRIYA), ["T1", "T10"])
+        self.assert_never_called_removed_by_the_owner(s2)
+        self.assertEqual(self.booking_state(), "cancelled")
+
+    def test_a_delete_that_landed_and_could_not_be_confirmed_is_never_called_the_owners(self):
+        """Her delete lands and the calendar then stops answering: the cancel is held for the owner
+        (calendar down). At her next cycles the event is missing, by her own hand: the check leaves
+        that booking alone, so no notice says the owner removed it."""
+        self.priya_writes(self.CANCEL)
+
+        def landed_but_unconfirmed(run, e, bid):
+            run.calendar.delete(bid)
+            return False
+
+        with mock.patch.object(loop._Run, "remove", landed_but_unconfirmed):
+            s2 = self.run_once()
+        self.assertEqual(self.closing(s2, "priya.asks"), ["hold:calendar_down"])
+        self.assertEqual((self.booking_state(), self.events()), ("cancelling", []))
+        s3 = self.run_at("2026-12-01T18:20:00Z")
+        s4 = self.run_at("2026-12-01T18:30:00Z")
+        self.assert_never_called_removed_by_the_owner(s2, s3, s4)
+        self.assertEqual([l["payload"]["target"] for s in (s3, s4) for l in self.lines(s, "called", call="calendar_get")
+                          if "booking_check" in l["payload"]], [])
+        self.assertEqual(self.templates_sent(PRIYA), ["T1"])
+        self.assertEqual(self.templates_sent(OWNER), ["S1"])        # the one notice: her cancel is held
+        self.assertEqual((self.booking_state(), s3.held, s4.held, s4.errors), ("cancelling", 0, 0, 0))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -678,8 +934,24 @@ class Nudge(NudgeSetup):
         self.assertEqual((done["payload"]["rule"], done["payload"]["check"]), ("gate_blocked", "G9"))
         self.assertEqual(self.lines(s, "called", call="send"), [])
 
-    def test_a_send_cap_makes_the_nudge_wait_and_it_goes_once_the_cap_frees(self):
+    def test_a_cap_that_never_frees_closes_the_entry_and_is_not_tried_every_pass(self):
+        """Fable review of PR #42, finding 8: the thread's sends ever are used up. Waiting would try,
+        and write, at every pass until the offer expires; the entry closes with no nudge instead."""
         with mock.patch.object(gate, "SEND_CAPS", (("sends_thread_ever", 1),)):   # her offer was the thread's one send
+            s = self.run_at(DUE)
+            s2 = self.run_at("2026-12-03T16:20:00Z")
+        self.assertEqual(self.templates_sent(MARCUS), ["T2"])
+        (check,) = self.lines(s, "checked", template="T9")
+        self.assertEqual((check["payload"]["passed"], check["payload"]["first_fail"]), (False, "G7"))
+        (done,) = self.lines(s, "decided", action="close_follow_up")
+        self.assertEqual((done["payload"]["rule"], done["payload"]["check"]), ("gate_blocked", "G7"))
+        self.assertEqual(self.lines(s, "decided", action="nudge_waits"), [])
+        self.assertEqual(self.lines(s2, "decided") + self.lines(s2, "checked") + self.lines(s2, "called", call="calendar_query"), [])
+        (fu,) = self.followups()
+        self.assertEqual((fu["state"], fu["outcome"]), ("done", "gate_blocked"))
+
+    def test_a_send_cap_makes_the_nudge_wait_and_it_goes_once_the_cap_frees(self):
+        with mock.patch.object(gate, "SEND_CAPS", (("sends_hour", 0),)):          # the hour's sends are used up
             s = self.run_at(DUE)
         self.assertEqual(self.templates_sent(MARCUS), ["T2"])
         (check,) = self.lines(s, "checked", template="T9")
@@ -745,6 +1017,55 @@ class Nudge(NudgeSetup):
         self.run_at("2026-12-03T16:30:00Z")
         self.assertEqual(self.templates_sent(MARCUS), ["T2", "T9"])
 
+    def test_a_failure_after_the_nudge_went_never_adds_a_close_line_that_says_no_nudge(self):
+        """Fable review of PR #42, finding 7: the nudge went and is in Sent, then the terminal write
+        fails. One error line, and the entry's one closing line still says its nudge is in Sent."""
+        class Terminal(list):
+            def append(self, line):
+                if "T9 sent" in line:
+                    raise OSError("terminal gone")
+                list.append(self, line)
+
+        self.said = Terminal()
+        s = self.run_at(DUE)
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T9"])
+        (done,) = self.lines(s, "decided", action="close_follow_up")
+        self.assertEqual(done["why"]["code"], "followup.nudge_done")
+        (err,) = self.lines(s, "error", step="follow_up")
+        self.assertEqual(err["payload"]["follow_up_kind"], "nudge")
+        (fu,) = self.followups()
+        self.assertEqual((fu["state"], fu["outcome"]), ("done", "nudged"))
+
+    def test_a_failure_before_the_nudge_went_still_closes_the_entry_with_no_nudge(self):
+        with mock.patch.object(compose, "reply_envelope", side_effect=RuntimeError("boom")):
+            s = self.run_at(DUE)
+        self.assertEqual(self.templates_sent(MARCUS), ["T2"])
+        (done,) = self.lines(s, "decided", action="close_follow_up")
+        self.assertEqual((done["why"]["code"], done["payload"]["rule"]), ("followup.no_nudge", "internal_error"))
+        self.assertEqual(len(self.lines(s, "error", step="follow_up")), 1)
+
+    def test_a_failure_between_the_send_and_the_close_leaves_the_entry_for_her_next_pass(self):
+        """The nudge is in Sent and the entry is still open: it is not closed as "no nudge". Her next
+        pass looks in Sent and closes it as sent."""
+        real = loop._Run.close_follow_up
+        failed = []
+
+        def fail_once(run, fu, code, *a, **k):
+            if code == "followup.nudge_done" and not failed:
+                failed.append(True)
+                raise RuntimeError("boom")
+            return real(run, fu, code, *a, **k)
+
+        with mock.patch.object(loop._Run, "close_follow_up", fail_once):
+            s = self.run_at(DUE)
+            self.assertEqual(self.lines(s, "decided", action="close_follow_up"), [])
+            (fu,) = self.followups()
+            self.assertEqual(fu["state"], "open")
+            s2 = self.run_at("2026-12-03T16:20:00Z")
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T9"])
+        (done,) = self.lines(s2, "decided", action="close_follow_up")
+        self.assertEqual(done["why"]["code"], "followup.nudge_done")
+
     def test_a_halt_before_the_nudge_names_it_as_dropped_and_resume_sends_it_once(self):
         from doris import supervisor
         real = loop._Run.deliver
@@ -764,6 +1085,181 @@ class Nudge(NudgeSetup):
         supervisor.resume("throwaway", state_dir=self.state)
         self.run_once()
         self.assertEqual(self.templates_sent(MARCUS), ["T2", "T9"])
+
+
+class NudgeThatDidNotGo(NudgeSetup):
+    """Fable review of PR #42, finding 2. Her ledger writes the nudge down before the send: the times
+    it lists, and when. That counts only once the mail server took the nudge. Until then the offer
+    reads as it went out, so a number or a yes means the list the sender has, never one nobody
+    received; and while the nudge may or may not have gone, no number and no bare yes books."""
+
+    def setUp(self):
+        NudgeSetup.setUp(self)
+        (_, self.t2) = self.sent(MARCUS)[0]
+
+    def marcus_writes(self, text):
+        tr.add(self.root, "21-marcus-pick.eml",
+               answer("Marcus Lee", MARCUS, "20261203.0815.marcus.pick@brightlane.example",
+                      "Thu, 03 Dec 2026 08:15:00 -0800", str(self.t2["Message-ID"]), MARCUS_KEY, text),
+               {"forwarded": "no"})
+
+    def booked(self):
+        with self.ledger() as led:
+            return [b["slot"].start_utc for b in led.bookings_for_thread(MARCUS_KEY) if b["state"] == "confirmed"]
+
+    def refused_nudge(self):
+        with mock.patch.object(sandbox_mod.SandboxMail, "send", side_effect=MailError("refused")):
+            s = self.run_at(DUE)
+        (waits,) = self.lines(s, "decided", action="nudge_waits")
+        self.assertEqual(waits["payload"]["rule"], "not_sent")
+
+    def resent_because(self, summary):
+        """The rule word of the one plan that sent the open times again (T12) and booked nothing."""
+        (plan,) = self.lines(summary, "decided", step="plan")
+        self.assertEqual((plan["payload"]["action"], plan["why"]["code"]), ("resend", "policy.pick_resend"))
+        return plan["why"]["text"].split("(", 1)[1].split(")", 1)[0]
+
+    def test_a_refused_nudge_leaves_the_offer_as_it_went_out(self):
+        self.busy(self.SLOTS[0])
+        self.refused_nudge()
+        o = self.offer()
+        self.assertEqual(([s.start_utc for s in o["slots"]], o["nudged"], o["nudge"]),
+                         ([utc(t) for t in self.SLOTS], None, None))
+
+    def test_a_number_after_a_refused_nudge_means_the_first_mails_list(self):
+        """Input A: 9:00 went busy, the nudge was refused, and Marcus, who has only the first mail,
+        answers "Number 2 works." before her next try. 2 is 9:30, as his mail says."""
+        self.busy(self.SLOTS[0])
+        self.refused_nudge()
+        self.marcus_writes("Number 2 works.")
+        s = self.run_once()
+        self.assertEqual(self.booked(), [utc(self.SLOTS[1])])
+        self.assertEqual(self.closing(s, "marcus.pick"), ["book"])
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T1"])        # he answered: the nudge never goes
+        self.run_at("2026-12-03T16:30:00Z")
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T1"])
+
+    def test_a_number_after_a_stop_at_the_nudge_means_the_first_mails_list(self):
+        """Input B: the stop lands at the nudge, the reply arrives while she is stopped."""
+        from doris import supervisor
+        real = loop._Run.deliver
+
+        def stop_then_deliver(run, e, mid, kind, template, *a, **k):
+            if template == "T9":
+                supervisor.request_stop("throwaway", "cli", state_dir=self.state)
+            return real(run, e, mid, kind, template, *a, **k)
+
+        self.busy(self.SLOTS[0])
+        set_clock(self.root, DUE)
+        with mock.patch.object(loop._Run, "deliver", stop_then_deliver):
+            s = self.run_once()
+        self.assertEqual((s.halted, self.templates_sent(MARCUS)), ("cli", ["T2"]))
+        self.marcus_writes("Number 2 works.")
+        supervisor.resume("throwaway", state_dir=self.state)
+        self.run_once()
+        self.assertEqual(self.booked(), [utc(self.SLOTS[1])])
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T1"])
+
+    def test_a_yes_after_a_refused_nudge_is_still_a_yes_to_three_times(self):
+        """Input C: 9:00 and 10:00 went busy, the nudge (one time left) was refused, and Marcus says
+        "Yes." to the three times he has. A yes to more than one time books nothing."""
+        self.busy(self.SLOTS[0], self.SLOTS[2])
+        self.refused_nudge()
+        self.marcus_writes("Yes.")
+        s = self.run_once()
+        self.assertEqual((self.booked(), self.events()), ([], []))
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T12"])
+        self.assertEqual(self.resent_because(s), "multiple")
+
+    def test_the_refused_nudge_goes_at_her_next_try_with_the_times_available_then(self):
+        """What a refused try wrote down is no part of the offer: the next try reads the offer's own
+        three times afresh, so a time that came free again is listed again."""
+        self.busy(self.SLOTS[0])
+        self.refused_nudge()
+        os.remove(os.path.join(self.root, "calendar", "owner-busy-test-0.ics"))     # 9:00 is free again
+        self.run_at("2026-12-03T16:20:00Z")
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T9"])
+        self.assertEqual(self.body(MARCUS, "T9")[1:4], ["1. Mon Dec 7, 9:00 AM Pacific (12:00 PM Eastern)",
+                                                        "2. Mon Dec 7, 9:30 AM Pacific (12:30 PM Eastern)",
+                                                        "3. Mon Dec 7, 10:00 AM Pacific (1:00 PM Eastern)"])
+        o = self.offer()
+        self.assertEqual((len(o["slots"]), o["nudged"], o["nudge"]), (3, utc("2026-12-03T16:20:00Z"), "sent"))
+
+    def cut_off_mid_send(self):
+        """A kill inside the transport's send of the nudge: it may have gone. The restart finds no
+        copy in Sent on two looks, so it stays unknown and is never sent again."""
+        set_clock(self.root, DUE)
+        self.crash_once(sandbox_mod.SandboxMail, "send", lambda mail, raw, envelope, mid, **k: True)
+        with self.ledger() as led:
+            (state,) = [r["state"] for r in led._all("SELECT state FROM sends WHERE template = 'T9'")]
+        self.assertEqual(state, "sending")
+
+    def test_a_number_while_the_nudge_may_have_gone_gets_the_times_again(self):
+        self.busy(self.SLOTS[0])
+        self.cut_off_mid_send()
+        self.marcus_writes("Number 2 works.")
+        s = self.run_once()
+        self.assertEqual((self.booked(), self.events()), ([], []))          # 2 is 9:30 or 10:00: nobody can tell
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T12"])
+        self.assertEqual(self.body(MARCUS, "T12")[1:3], ["1. Mon Dec 7, 17:30 UTC (9:30 AM Pacific)",
+                                                         "2. Mon Dec 7, 18:00 UTC (10:00 AM Pacific)"])
+        self.assertEqual(self.resent_because(s), "ambiguous")
+
+    def marcus_answers_the_t12(self, text):
+        (_, t12) = [(t, m) for t, m in self.sent(MARCUS) if t == "T12"][0]
+        tr.add(self.root, "22-marcus-pick.eml",
+               answer("Marcus Lee", MARCUS, "20261203.0900.marcus.again@brightlane.example",
+                      "Thu, 03 Dec 2026 09:00:00 -0800", str(t12["Message-ID"]), MARCUS_KEY, text),
+               {"forwarded": "no"})
+
+    def test_once_the_times_went_again_a_number_books_as_that_mail_numbered_them(self):
+        """T12 ends "Reply with the number of the one that suits you and I'll book it." Once the mail
+        server took it he holds its list for sure, whatever became of the nudge: the doubt is over."""
+        self.busy(self.SLOTS[0])
+        self.cut_off_mid_send()
+        self.assertEqual(self.offer()["nudge"], "in_doubt")
+        self.marcus_writes("Number 2 works.")
+        self.run_once()
+        self.assertEqual((self.templates_sent(MARCUS), self.booked()), (["T2", "T12"], []))
+        o = self.offer()
+        self.assertEqual(([x.start_utc for x in o["slots"]], o["nudge"]), ([utc(t) for t in self.SLOTS[1:]], "settled"))
+        self.marcus_answers_the_t12("Number 2 works.")
+        s = self.run_once()
+        self.assertEqual(self.booked(), [utc(self.SLOTS[2])])              # the T12's 2: 10:00
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T12", "T1"])
+        self.assertEqual(self.closing(s, "marcus.again"), ["book"])
+
+    def test_once_the_one_time_went_again_a_yes_books_it(self):
+        self.busy(self.SLOTS[0], self.SLOTS[2])
+        self.cut_off_mid_send()
+        self.marcus_writes("Yes.")
+        self.run_once()
+        self.assertEqual((self.templates_sent(MARCUS), self.booked()), (["T2", "T12"], []))
+        self.marcus_answers_the_t12("Yes.")
+        self.run_once()
+        self.assertEqual(self.booked(), [utc(self.SLOTS[1])])
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T12", "T1"])
+
+    def test_a_nudge_in_doubt_that_left_no_time_out_never_holds_up_a_number(self):
+        """Nothing went busy, so the nudge listed the offer's three times in the same order: a number
+        means the same time on either list, and it books at once."""
+        self.cut_off_mid_send()
+        self.assertEqual(self.offer()["nudge"], "settled")
+        self.marcus_writes("Number 2 works.")
+        self.run_once()
+        self.assertEqual(self.booked(), [utc(self.SLOTS[1])])
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T1"])
+
+    def test_a_yes_while_the_nudge_may_have_gone_gets_the_time_again(self):
+        self.busy(self.SLOTS[0], self.SLOTS[2])
+        self.cut_off_mid_send()
+        self.marcus_writes("Yes.")
+        s = self.run_once()
+        self.assertEqual((self.booked(), self.events()), ([], []))          # yes to three times, or to the one left
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T12"])
+        self.assertEqual(self.resent_because(s), "ambiguous")
+        self.assertEqual(self.body(MARCUS, "T12")[1:3], ["1. Mon Dec 7, 17:30 UTC (9:30 AM Pacific)",
+                                                         "Reply with the number of the one that suits you and I'll book it."])
 
 
 class NudgeAndTheirAnswer(Base):
@@ -827,6 +1323,28 @@ class NudgeAndTheirAnswer(Base):
         with self.ledger() as led:
             (b,) = led.bookings_for_thread(MARCUS_KEY)
         self.assertEqual(b["slot"].start_utc, utc("2026-12-07T17:30:00Z"))     # the nudge's 1, the offer's 2
+
+    def test_known_limit_a_number_written_after_the_nudge_is_read_on_the_nudges_list_whichever_mail_it_answers(self):
+        # AGENT.md, "Limits we state": after a nudge that dropped a time, the numbers are the nudge's.
+        # This reply answers the first offer mail, where "2" was 17:30 UTC; it is read as the nudge's 2.
+        end = "20261207T173000Z"
+        tr.owner_busy(self.root, "owner-busy-test", "20261207T170000Z", end)   # her first time went busy
+        self.run_at(DUE)
+        with self.ledger() as led:
+            (offer,) = led.open_offers(MARCUS_KEY, utc("2026-12-03T16:20:00Z"))
+        (nudge_1, nudge_2) = [s.start_utc for s in offer["slots"]]
+        self.assertEqual(nudge_1, utc("2026-12-07T17:30:00Z"))                 # the first mail's 2
+        self.marcus_writes("21-marcus-pick.eml", "20261203.0900.marcus.pick@brightlane.example",
+                           "Thu, 03 Dec 2026 09:00:00 -0800", str(self.t2["Message-ID"]), "Number 2 works.")
+        s = self.run_once()
+        self.assertEqual(self.closing(s, "marcus.pick"), ["book"])
+        with self.ledger() as led:
+            (b,) = led.bookings_for_thread(MARCUS_KEY)
+        self.assertEqual(b["slot"].start_utc, nudge_2)
+        self.assertEqual(nudge_2, utc("2026-12-07T18:00:00Z"))
+        # and what makes the limit bearable: her confirmation names the time she booked
+        self.assertEqual(self.body(MARCUS, "T1")[0],
+                         "You're booked with Shane Bornstein for Mon Dec 7, 10:00 AM Pacific (18:00 UTC), 30 min.")
 
     def test_a_number_written_before_the_nudge_and_read_after_it_gets_the_times_again(self):
         end = "20261207T173000Z"

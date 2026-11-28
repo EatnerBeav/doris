@@ -163,7 +163,9 @@ class OpenAndSchema(Base):
         # and everything version 4 adds works on it
         fid, new = self.db.file_followup("nudge", "t2@x.example", PRIYA, K2, T0 + 48 * H, T0, offer_id=still)
         self.assertTrue(new)
+        self.db.record_send("<n1@fastmail.com>", "send_reply", "T9", "t2@x.example", PRIYA, sha("b"), T0 + 48 * H, RUN)
         self.db.mark_nudged(still, [slot(7, 18), slot(9, 18)], T0 + 48 * H)
+        self.db.set_send_state("<n1@fastmail.com>", "handed_over")
         self.assertEqual(self.db.open_offers("t2@x.example", T0 + 48 * H)[0]["slots"], [slot(7, 18), slot(9, 18)])
         self.assertEqual(self.db.mark_booking_gone("doris-1", "<n1@fastmail.com>", T0),
                          self.db.followup_for_booking("doris-1")["id"])
@@ -731,11 +733,49 @@ class Bookings(Base):
 
     def test_future_bookings_are_written_or_confirmed_and_start_after_now(self):
         for bid, day, state in (("doris-1", 3, "confirmed"), ("doris-2", 2, "written"), ("doris-3", 4, "intent"),
-                                ("doris-4", 4, "cancelled"), ("doris-5", 1, "confirmed")):
+                                ("doris-4", 4, "cancelled"), ("doris-5", 1, "confirmed"), ("doris-6", 3, "cancelling")):
             self.book(bid, s=slot(day, 18), thread=bid)
+            if state == "cancelling":
+                self.db.set_booking_state(bid, "confirmed")               # the only way there (see below)
             self.db.set_booking_state(bid, state)
         self.assertEqual([b["booking_id"] for b in self.db.future_bookings(dt.datetime(2026, 12, 1, 18, 0, tzinfo=UTC))],
                          ["doris-2", "doris-1"])
+
+    def test_a_booking_she_is_taking_off_is_live_on_its_thread_and_never_read_as_gone(self):
+        """cancelling: her own cancel or move wrote it down before her delete. Her event may still be
+        there, so the thread takes no other booking (G12), and a missing event is her own doing, so
+        ruling 17 neither reads it nor can mark it gone."""
+        self.book("doris-1")
+        self.db.set_booking_state("doris-1", "confirmed")
+        self.db.set_booking_state("doris-1", "cancelling")
+        self.assertEqual(self.db.live_booking_for_thread(TH)["booking_id"], "doris-1")
+        self.assertEqual(self.db.future_bookings(T0), [])
+        self.assertEqual(self.db.unfinished_bookings(), [])
+        with self.assertRaises(ValueError):
+            self.db.mark_booking_gone("doris-1", None, T0)
+        self.assertEqual(self.db.booking("doris-1")["state"], "cancelling")
+        self.assertFalse(self.db.thread_held(TH))
+        self.db.set_booking_state("doris-1", "cancelling")                # asked again when its message is read again
+        self.db.set_booking_state("doris-1", "cancelled")
+        self.assertIsNone(self.db.live_booking_for_thread(TH))
+
+    def test_only_a_booking_on_the_calendar_can_be_marked_as_being_taken_off(self):
+        """cancelling says "this booking was written, and she is removing it": the gate counts it as
+        written (G6), so it only ever follows written or confirmed."""
+        for n, state in enumerate(("intent", "unconfirmed", "collision_unresolved", "blocked", "cancelled", "gone",
+                                   "removed")):
+            bid = "doris-%d" % n
+            self.book(bid, s=slot(2 + n, 18))
+            self.db.set_booking_state(bid, state)
+            with self.subTest(state=state), self.assertRaises(ValueError):
+                self.db.set_booking_state(bid, "cancelling")
+            self.assertEqual(self.db.booking(bid)["state"], state)
+        self.book("doris-w", s=slot(12, 18))
+        self.db.set_booking_state("doris-w", "written")
+        self.db.set_booking_state("doris-w", "cancelling")
+        self.assertEqual(self.db.booking("doris-w")["state"], "cancelling")
+        with self.assertRaises(KeyError):
+            self.db.set_booking_state("doris-none", "cancelling")
 
     def test_calendar_writes_counted_per_run(self):
         self.book("doris-1")
@@ -768,6 +808,8 @@ class FollowUps(Base):
 
     def booked(self, bid="doris-1", state="confirmed", thread=TH):
         self.db.record_booking(bid, K1, thread, PRIYA, slot(2, 18), T0, direct=False)
+        if state == "cancelling":
+            self.db.set_booking_state(bid, "confirmed")                   # cancelling only follows written or confirmed
         self.db.set_booking_state(bid, state)
 
     def test_filed_once_dated_and_open(self):
@@ -839,27 +881,107 @@ class FollowUps(Base):
             self.db.close_followup(fid + 9, "nudged", self.DUE)
 
     # --- the nudge's own mark on the offer -----------------------------------------------------
+    def nudge_send(self, state=None):
+        """The offer's nudge as the loop sends it: its send recorded (pending), then moved up to `state`."""
+        self.db.record_send("<n1@fastmail.com>", "send_reply", "T9", TH, PRIYA, sha("b"), self.DUE, RUN)
+        if state is not None:
+            self.db.set_send_state("<n1@fastmail.com>", state)
+
+    def read_offer(self):
+        [o] = self.db.open_offers(TH, self.DUE)
+        return o["slots"], o["nudged"], o["nudge"]
+
     def test_a_nudge_drops_slots_keeps_the_rest_and_moves_neither_date(self):
+        self.nudge_send()
         self.db.mark_nudged(self.oid, [slot(4, 20), slot(2, 18)], self.DUE)
+        self.db.set_send_state("<n1@fastmail.com>", "handed_over")        # the mail server took it
         [o] = self.db.open_offers(TH, self.DUE)
         self.assertEqual(o["slots"], [slot(2, 18), slot(4, 20)])          # in offered order, the dropped one closed
-        self.assertEqual((o["created"], o["expires"], o["nudged"]), (T0, T0 + dt.timedelta(days=7), self.DUE))
+        self.assertEqual((o["created"], o["expires"], o["nudged"], o["nudge"]),
+                         (T0, T0 + dt.timedelta(days=7), self.DUE, "sent"))
         self.assertEqual(self.db.offer_count(TH), 1)                      # not a new offer
         # a dropped time was still offered once: it never comes back, and a booking made from it is still found
         self.assertEqual(self.db.offered_starts(TH), {slot(2, 18).start_utc, slot(3, 19).start_utc, slot(4, 20).start_utc})
         self.assertEqual(self.db.offer_holding(TH, slot(3, 19)), self.oid)
+        self.db.set_send_state("<n1@fastmail.com>", "confirmed")          # and her copy is in Sent: the same
+        self.assertEqual(self.read_offer(), ([slot(2, 18), slot(4, 20)], self.DUE, "sent"))
 
-    def test_a_nudge_never_adds_a_time_or_brings_a_dropped_one_back(self):
+    def test_what_a_nudge_wrote_down_counts_only_once_it_may_have_reached_them(self):
+        """Fable review of PR #42, finding 2: written down before the send, in force from the send."""
+        everything = [slot(2, 18), slot(3, 19), slot(4, 20)]
+        self.db.mark_nudged(self.oid, [slot(2, 18)], self.DUE)            # written down, and no send recorded at all
+        self.assertEqual(self.read_offer(), (everything, None, None))
+        self.nudge_send()                                                 # pending: refused, or stopped before the transport
+        self.assertEqual(self.read_offer(), (everything, None, None))
+        self.db.mark_nudged(self.oid, [slot(2, 18), slot(3, 19)], self.DUE + H)   # her next try lists what is available then
+        self.assertEqual(self.read_offer(), (everything, None, None))
+        self.db.set_send_state("<n1@fastmail.com>", "sending")            # cut off here it may have gone
+        self.assertEqual(self.read_offer(), ([slot(2, 18), slot(3, 19)], self.DUE + H, "in_doubt"))
+        self.db.send_refused("<n1@fastmail.com>")                         # the transport said no: it surely did not go
+        self.assertEqual(self.read_offer(), (everything, None, None))
+        self.db.set_send_state("<n1@fastmail.com>", "sending")
+        self.db.set_send_state("<n1@fastmail.com>", "unknown")
+        self.assertEqual(self.read_offer(), ([slot(2, 18), slot(3, 19)], self.DUE + H, "in_doubt"))
+        self.db.set_send_state("<n1@fastmail.com>", "handed_over")
+        self.assertEqual(self.read_offer(), ([slot(2, 18), slot(3, 19)], self.DUE + H, "sent"))
+        self.assertEqual(self.db.offer(self.oid)["nudge"], "sent")
+        self.assertEqual(self.db.offer_for_send("<o1@fastmail.com>")["nudge"], "sent")
+
+    def test_a_nudge_in_doubt_that_left_no_time_out_changes_nothing_a_number_means(self):
+        everything = [slot(2, 18), slot(3, 19), slot(4, 20)]
+        self.nudge_send()
+        self.db.mark_nudged(self.oid, everything, self.DUE)
+        self.db.set_send_state("<n1@fastmail.com>", "sending")            # cut off: it may have gone
+        self.assertEqual(self.read_offer(), (everything, self.DUE, "settled"))   # one list either way
+        self.db.set_send_state("<n1@fastmail.com>", "unknown")
+        self.assertEqual(self.read_offer(), (everything, self.DUE, "settled"))
+
+    def test_the_doubt_ends_once_the_server_took_the_times_listed_again_after_it(self):
+        """T12 lists the open times again and ends "Reply with the number ... and I'll book it": once
+        the server took one sent after the nudge, the sender holds that list for sure, from then."""
+        kept = [slot(2, 18), slot(3, 19)]
+        self.db.record_send("<early@fastmail.com>", "send_reply", "T12", TH, PRIYA, sha("b"), T0 + H, RUN)
+        self.db.set_send_state("<early@fastmail.com>", "confirmed")       # a T12 from before the nudge settles nothing
+        self.nudge_send()
+        self.db.mark_nudged(self.oid, kept, self.DUE)
+        self.db.set_send_state("<n1@fastmail.com>", "unknown")
+        self.assertEqual(self.read_offer(), (kept, self.DUE, "in_doubt"))
+        self.db.record_send("<again@fastmail.com>", "send_reply", "T12", TH, PRIYA, sha("b"), self.DUE + H, RUN)
+        for state in (None, "sending", "unknown"):                        # not sent yet, or it may not have gone
+            if state is not None:
+                self.db.set_send_state("<again@fastmail.com>", state)
+            with self.subTest(state=state):
+                self.assertEqual(self.read_offer(), (kept, self.DUE, "in_doubt"))
+        self.db.set_send_state("<again@fastmail.com>", "handed_over")
+        self.assertEqual(self.read_offer(), (kept, self.DUE + H, "settled"))     # read on that list from when it went
+        self.db.record_send("<other@fastmail.com>", "send_reply", "T12", "t2@x.example", PRIYA, sha("b"),
+                            self.DUE + 3 * H, RUN)
+        self.db.set_send_state("<other@fastmail.com>", "confirmed")       # another thread's T12 is not this one's
+        self.assertEqual(self.read_offer(), (kept, self.DUE + H, "settled"))
+        with self.assertRaises(ValueError):                               # and what the nudge listed still never changes
+            self.db.mark_nudged(self.oid, [slot(2, 18)], self.DUE + 2 * H)
+
+    def test_another_threads_nudge_says_nothing_about_this_offer(self):
+        self.db.mark_nudged(self.oid, [slot(2, 18)], self.DUE)
+        self.db.record_send("<n2@fastmail.com>", "send_reply", "T9", "t2@x.example", PRIYA, sha("b"), self.DUE, RUN)
+        self.db.set_send_state("<n2@fastmail.com>", "confirmed")
+        self.db.record_send("<o9@fastmail.com>", "send_reply", "T12", TH, PRIYA, sha("b"), self.DUE, RUN)
+        self.db.set_send_state("<o9@fastmail.com>", "confirmed")          # a T12 on this thread is no nudge either
+        self.assertEqual(self.read_offer(), ([slot(2, 18), slot(3, 19), slot(4, 20)], None, None))
+
+    def test_a_nudge_never_adds_a_time_and_once_it_may_have_gone_what_it_listed_never_changes(self):
         for keep in ([slot(7, 18)], [slot(2, 18), slot(7, 18)], [slot(2, 18, length=45)], []):
             with self.subTest(keep=len(keep)), self.assertRaises(ValueError):
                 self.db.mark_nudged(self.oid, keep, self.DUE)
-        self.assertEqual(self.db.open_offers(TH, T0)[0]["slots"], [slot(2, 18), slot(3, 19), slot(4, 20)])
-        self.assertIsNone(self.db.open_offers(TH, T0)[0]["nudged"])
+        self.assertEqual(self.read_offer(), ([slot(2, 18), slot(3, 19), slot(4, 20)], None, None))
+        self.nudge_send()
         self.db.mark_nudged(self.oid, [slot(2, 18)], self.DUE)
-        with self.assertRaises(ValueError):
-            self.db.mark_nudged(self.oid, [slot(2, 18), slot(3, 19)], self.DUE + H)
-        self.db.mark_nudged(self.oid, [slot(2, 18)], self.DUE + H)        # the same nudge again after a restart
-        self.assertEqual(self.db.open_offers(TH, T0)[0]["nudged"], self.DUE + H)
+        for state in ("sending", "unknown", "handed_over", "confirmed"):
+            self.db.set_send_state("<n1@fastmail.com>", state)
+            for keep in ([slot(2, 18), slot(3, 19)], [slot(2, 18)], [slot(4, 20)]):
+                with self.subTest(state=state, keep=len(keep)), self.assertRaises(ValueError):
+                    self.db.mark_nudged(self.oid, keep, self.DUE + H)
+            self.assertEqual(self.read_offer()[:2], ([slot(2, 18)], self.DUE))
         with self.assertRaises(KeyError):
             self.db.mark_nudged(self.oid + 9, [slot(2, 18)], self.DUE)
 
@@ -926,7 +1048,8 @@ class FollowUps(Base):
         self.assertEqual([g["notice_message_id"] for g in self.db.gone_unfinished()], [None])
 
     def test_only_a_booking_on_the_calendar_can_be_found_gone(self):
-        for state in ("intent", "cancelled", "gone", "removed", "blocked", "unconfirmed", "collision_unresolved"):
+        for state in ("intent", "cancelling", "cancelled", "gone", "removed", "blocked", "unconfirmed",
+                      "collision_unresolved"):
             bid = "doris-" + state
             self.booked(bid, state, thread=bid)
             with self.subTest(state=state), self.assertRaises(ValueError):

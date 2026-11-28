@@ -59,6 +59,8 @@ MAIL_TIMEOUT_S = 30.0
 MODEL_TIMEOUT_S = 60.0
 MODEL_RETRY_WAIT_S = 2.0
 RULING17_REREAD_WAIT_S = 2.0             # "missing on two reads a short wait apart"
+RULING17_UNREAD_IN_A_ROW = 2             # this many bookings in a row that cannot be read (never "missing") end
+                                         # the cycle's check: the calendar is not answering; one alone does not
 SENT_LOOK_WAIT_S = 5.0                   # live: between her two looks in Sent after a send (ruling 8)
 
 # --- A run until stopped (`python -m doris run`) ---------------------------------------------

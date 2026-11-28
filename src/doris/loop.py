@@ -521,6 +521,7 @@ class _Run:
         self.batch_keys = set()
         self.read_failures = 0              # a run until stopped: her failed inbox reads in a row (pass_every_s)
         self.bookings_checked = False       # ruling 17 ran in this cycle (once a cycle)
+        self.unread_bookings = set()        # booking IDs her check could not read, said once a run
         self.nudge_said = {}                # follow-up id -> why its nudge waits, said once a run
         self.swept = []                     # the rule words of the follow-ups this pass closed, for its terminal line
 
@@ -1229,10 +1230,11 @@ class _Run:
         return out
 
     def unbooked_here(self, e, booked):
-        """The booking this message's own cancel or move already took off the calendar, or None."""
+        """The booking this message's own cancel or move took off the calendar (cancelled), or was
+        taking off when a kill came (cancelling: her delete may or may not have landed), or None."""
         ids = set(a["detail"].get("booking_id") for a in self.ledger.actions_for_message(e.key)
                   if a["kind"] in ("cancel", "move"))
-        return next((b for b in booked if b["state"] == "cancelled" and b["booking_id"] in ids), None)
+        return next((b for b in booked if b["state"] in ("cancelling", "cancelled") and b["booking_id"] in ids), None)
 
     # --- act ------------------------------------------------------------------------------------
     def act(self, e, f, plan):
@@ -1496,7 +1498,15 @@ class _Run:
     def unbook(self, e, f, bid, slot):
         """Her own event off the calendar, through the gate, confirmed by a re-read. The cancel .ics
         goes on the reply, where G13 reads it. Already off (this message took it off, then a kill
-        came before its reply): nothing is removed twice, and the reply goes on."""
+        came before its reply): nothing is removed twice, and the reply goes on.
+
+        Ledger first (A3), as the collision path does: once the gate lets the delete go, a booking
+        her ledger has on the calendar (written or confirmed, the only ones ruling 17 reads) is
+        marked cancelling before the calendar is asked. A kill between her delete and her ledger's
+        "cancelled" is then her own half-done cancel, finished when its message is read again
+        (delete is a no-op on an event already off), never "the owner removed this booking"
+        (Fable review of PR #42, finding 1). A delete that could not be confirmed stays cancelling
+        and the message is held: her event may or may not be there, and ruling 17 never reads it."""
         b = self.ledger.booking(bid)
         if b is not None and b["state"] == "cancelled":
             e.recovered = True
@@ -1508,6 +1518,10 @@ class _Run:
         if not g.passed:
             self.blocked(e, f, g)
             return False
+        if b is not None and b["state"] == "cancelling":
+            e.recovered = True              # this message's delete was started before a kill
+        elif b is not None and b["state"] in ledger_mod.ON_CALENDAR_STATES:
+            self.ledger.set_booking_state(bid, "cancelling")
         if not self.remove(e, bid):
             self.hold_code(e, "hold.calendar_down", f)
             return False
@@ -1968,9 +1982,15 @@ class _Run:
         long `run`, and on the sandbox's advancing clock each step of her clock to her next ten-minute
         cycle (so `demo`, one pass over a whole day, reads them cycle by cycle as a live day would).
         Gone means missing on two reads a short wait apart, both answered. A read that fails is never
-        "missing", and a calendar that does not answer ends this cycle's check (her next cycle reads
-        again). One still there leaves its read line and nothing more: edits are not checked. A
+        "missing": that booking gets an error line and a terminal line (once a run) and the check goes
+        on to the next, so one event that cannot be read never hides an owner's removal of another
+        (Fable review of PR #42, finding 4). Only caps.RULING17_UNREAD_IN_A_ROW in a row, a calendar
+        that is not answering, end this cycle's check; her next cycle reads them all again.
+        One still there leaves its read line and nothing more: edits are not checked. A
         booking whose own message a kill left part way is that message's to finish (resume_booking).
+        A booking her own cancel or move was taking off is not read at all (her ledger says
+        cancelling before her delete goes, and future_bookings leaves it out), so a missing event is
+        only ever called the owner's doing when she never started to remove it herself.
         One found gone before a kill or a stop is finished first."""
         if self.bookings_checked:
             return
@@ -1978,6 +1998,7 @@ class _Run:
         for g in self.ledger.gone_unfinished():
             self.check_halt()
             self.guarded_gone(g["booking"], g["notice_message_id"], True)
+        unread = 0
         for b in self.ledger.future_bookings(self.now()):
             self.check_halt()
             own = self.ledger.message(b["message_key"])
@@ -1985,9 +2006,31 @@ class _Run:
                 continue
             there = self.still_there(b["booking_id"])
             if there is None:
-                break
+                self.booking_unread(b)
+                unread += 1
+                if unread >= caps.RULING17_UNREAD_IN_A_ROW:
+                    break                   # the calendar is not answering: her next cycle reads again
+                continue
+            unread = 0
             if there is False:
                 self.guarded_gone(b, None, False)
+
+    def booking_unread(self, b):
+        """One of her future bookings could not be read on the calendar (the read failed after its one
+        retry): never "missing", so nothing is held and nobody is told it is gone. Loud all the same
+        (Contract 7): one error line and one terminal line a run for each such booking, however many
+        cycles it stays unreadable. She reads it again at her next cycle."""
+        bid = b["booking_id"]
+        if bid in self.unread_bookings:
+            return
+        self.unread_bookings.add(bid)
+        self.error(None, "booking_check",
+                   CalendarError("her booking could not be read on the calendar; that is never \"missing\", and she "
+                                 "reads it again at her next cycle"),
+                   subject=ledger_mod.GONE_KEY + bid, booking_id=bid, read="failed")
+        self.say("%s  Calendar check: her booking for %s could not be read on the calendar (error line written). "
+                 "That is never \"missing\": she reads it again at her next cycle."
+                 % (templates.fmt_pacific(self.now()), templates.fmt_pacific(b["slot"].start_utc)))
 
     def still_there(self, bid):
         """True: her event is on the calendar. False: gone, missing on two reads a short wait apart
@@ -2025,14 +2068,28 @@ class _Run:
         A kill after the ledger step is finished at her next pass (recovered), the notice never sent
         twice. Past the hourly cap on hold notices no notice goes: the hold stands and the digest
         lists it."""
+        bid, thread = b["booking_id"], b["thread_key"]
+        action_id = self.ledger.enqueue_action(self.run_id, b["message_key"], "booking_check",
+                                               {"template": "S1", "booking_id": bid, "thread": thread})
+        self.ledger.start_action(action_id)
+        try:
+            self.booking_gone_steps(b, notice, recovered, action_id)
+        except (Halted, Refused):
+            raise                           # left started: the halted line names it as dropped
+        except Exception:
+            # a step failed (guarded_gone writes the error line) and her next pass finishes the rest under a
+            # row of its own: this row ends here, so no later stop lists finished work as dropped (Fable
+            # review of PR #42, finding 6)
+            if (self.ledger.action(action_id) or {}).get("state") != "finished":
+                self.ledger.finish_action(action_id, "error")
+            raise
+
+    def booking_gone_steps(self, b, notice, recovered, action_id):
         bid, thread, now = b["booking_id"], b["thread_key"], self.now()
         subject = ledger_mod.GONE_KEY + bid
         fu = self.ledger.followup_for_booking(bid)
         kept = fu["detail"] if fu is not None else {}
         who = {"from_addr": b["sender"], "from_name": kept.get("name") or ""}
-        action_id = self.ledger.enqueue_action(self.run_id, b["message_key"], "booking_check",
-                                               {"template": "S1", "booking_id": bid, "thread": thread})
-        self.ledger.start_action(action_id)
         self.write("observed", dict(who, step="booking_check", owner_deleted=True, booking_id=bid,
                                     reads=0 if recovered else 2, slot=_span(b["slot"]), thread=thread,
                                     message=b["message_key"], clock=now, recovered=recovered), subject=subject)
@@ -2042,18 +2099,33 @@ class _Run:
             self.ledger.mark_booking_gone(bid, notice, now)
         self.ledger.close_offers(thread, "held")
         sent = self.gone_notice(b, subject, notice, kept) if notice is not None else False
+        went = self.notice_went(notice, sent)
         code = ledger_mod.GONE_HOLD
         why_ = why_mod.why(code)
         self.write("held", dict(who, outcome="hold:" + code[len("hold."):], template="-", step="booking_check",
-                                booking_id=bid, notice_message_id=notice, notice_sent=sent, thread=thread,
-                                message=b["message_key"], recovered=recovered), subject=subject, why=why_)
+                                booking_id=bid, notice_message_id=notice, notice=went, notice_sent=sent,
+                                thread=thread, message=b["message_key"], recovered=recovered),
+                   subject=subject, why=why_)
         self.ledger.close_followup(self.ledger.followup_for_booking(bid)["id"], "gone", now)
         self.ledger.finish_action(action_id, "hold:" + code[len("hold."):])
         self.say("%s  %s: hold:%s. %s Her booking for %s is gone from the calendar (missing on two reads). Hold "
                  "notice to the owner %s. Nothing sent to them."
                  % (templates.fmt_pacific(now), holds.sender_name(who["from_name"], who["from_addr"]),
                     code[len("hold."):], why_["text"], templates.fmt_pacific(b["slot"].start_utc),
-                    "sent" if sent else "not sent (the digest lists the hold)"))
+                    why_mod.GONE_NOTICE_WORDS[went]))
+
+    def notice_went(self, mid, found):
+        """How the hold notice for a booking found gone went, as its held line says it (`notice`):
+        "sent" (her copy is in Sent), "handed_over" (the mail server took it and Sent has not shown
+        her copy: the owner has it), "unknown" (it may have gone) or "none" (no notice went: past the
+        hourly cap, stopped by the gate, or refused). Never "not sent" for one the server took (Fable
+        review of PR #42, finding 5)."""
+        state = (self.ledger.send(mid) or {}).get("state") if mid is not None else None
+        if found or state == "confirmed":
+            return "sent"
+        if state == "handed_over":
+            return "handed_over"
+        return "unknown" if state in ("sending", "unknown") else "none"
 
     def gone_notice(self, b, subject, mid, kept):
         """The S1 for a booking found gone: to the owner only, through the gate, sent once (Sent is
@@ -2066,7 +2138,8 @@ class _Run:
         stand_in = types.SimpleNamespace(from_name=kept.get("name") or "", from_addr=b["sender"],
                                          own_text=kept.get("quote") or "")
         try:
-            ns = holds.notice_slots(stand_in, code, wrote_at, self.gone_draft_times(subject), kept.get("zone"))
+            ns = holds.notice_slots(stand_in, code, wrote_at, self.gone_draft_times(subject, b["slot"]),
+                                    kept.get("zone"))
             raw, body = compose.owner_notice("S1", ns, self.cfg.doris_addr, self.cfg.owner_addr, mid, self.now())
         except (templates.TemplateError, compose.ComposeError) as exc:
             self.error(None, "hold_notice", exc, subject=subject, template="S1", reason=code)
@@ -2081,16 +2154,18 @@ class _Run:
             return True
         return False
 
-    def gone_draft_times(self, subject):
+    def gone_draft_times(self, subject, removed):
         """The draft's times for that notice, worked out by code like any S1's; none when the calendar
-        does not answer."""
+        does not answer. Never the time of the booking the owner just removed: it reads as available
+        again, and it is the one time he has said no to (Fable review of PR #42, finding 9)."""
         now = self.now()
         try:
             events = self.read(None, now, now + WINDOW, subject=subject)
         except _CalendarDown:
             return []
         return [s.start_utc for s in slots.find_slots(events, now, caps.DEFAULT_LENGTH_MIN,
-                                                      count=caps.SLOTS_PER_OFFER)]
+                                                      count=caps.SLOTS_PER_OFFER,
+                                                      exclude_starts={removed.start_utc})]
 
     # --- the follow-up sweep: nudges due, and entries with nothing left to do ---------------------------
     def follow_ups(self):
@@ -2098,7 +2173,8 @@ class _Run:
         in her ledger is looked at. A booking's entry closes once the meeting started, or the booking
         was cancelled or is gone. An offer's entry closes with no nudge as soon as there is nobody to
         nudge (nudge_rule), and its one nudge goes once it is due (nudge). A bug on one entry is an
-        error line, that nudge never goes, and the run goes on (Contract 7)."""
+        error line and the run goes on (Contract 7); a nudge that had not gone then never goes
+        (nudge_failed)."""
         self.swept = []
         gone = set(g["followup"]["id"] for g in self.ledger.gone_unfinished())
         for fu in self.ledger.open_followups():
@@ -2113,8 +2189,23 @@ class _Run:
             except Exception as exc:
                 self.error(None, "follow_up", exc, follow_up=fu["id"], follow_up_kind=fu["kind"])
                 if fu["kind"] == "nudge":
-                    self.close_follow_up(fu, "followup.no_nudge", "internal_error")
+                    self.nudge_failed(fu)
         self.say_follow_ups()
+
+    def nudge_failed(self, fu):
+        """A bug on one offer's follow-up (its error line is written). The entry closes with no nudge
+        only while it is still open and its nudge surely did not go (no send recorded, or one still
+        pending): that nudge never goes. One whose nudge went or may have gone is left as it is: an
+        entry already closed keeps its one closing line, and an open one is looked up in Sent at her
+        next pass (sweep_nudge). Never "no nudge" after "its one nudge is in Sent" (Fable review of PR
+        #42, finding 7)."""
+        entry = self.ledger.followup(fu["id"])
+        if entry is None or entry["state"] != "open":
+            return
+        own = self.ledger.send(compose.new_message_id(self.cfg.doris_addr, fu["message_key"], "T9", 1))
+        if own is not None and own["state"] != "pending":
+            return
+        self.close_follow_up(fu, "followup.no_nudge", "internal_error")
 
     def say_follow_ups(self):
         """One terminal line for a sweep that closed something: how many and why, and what is still open."""
@@ -2206,8 +2297,11 @@ class _Run:
         offer's own slots are read on the calendar now, any that is no longer available is dropped and
         closed, and the rest go again (the one-slot form when one is left; no nudge when none is). To
         the address the offer went to, on their thread, the owner on blind copy, through the gate like
-        every send; her ledger marks the offer nudged before the send (A3). Not a new offer record,
-        and the offer's expiry does not move. Returns the outcome its queue row keeps."""
+        every send; her ledger writes down what the nudge lists before the send (A3), and that counts
+        only once the mail server took it: a try that was refused, or that a stop caught, leaves the
+        offer reading as it went out, so a number means the list the sender has (ledger._offer; Fable
+        review of PR #42, finding 2). Not a new offer record, and the offer's expiry does not move.
+        Returns the outcome its queue row keeps."""
         now, thread, sender, kept_ = self.now(), fu["thread_key"], offer["sender"], fu["detail"]
         who = holds.sender_name(kept_.get("name") or "", sender)
         try:
@@ -2242,9 +2336,8 @@ class _Run:
                         body_text=body, evidence={"length_min": length})
         g = self.check(None, action)
         if not g.passed:
-            if g.first_fail == "G7" and self.ledger.count_nudges(thread) - (
-                    1 if self.ledger.send(mid) is not None else 0) < caps.NUDGES_PER_THREAD_EVER:
-                self.nudge_waits(fu, "gate_blocked")        # a send cap: it frees up, and she tries again
+            if g.first_fail == "G7" and self.cap_frees(g):
+                self.nudge_waits(fu, "gate_blocked")        # a send cap that frees with time: she tries again
                 return "waits:gate_blocked"
             self.close_follow_up(fu, "followup.no_nudge", "gate_blocked", check=g.first_fail or "G16")
             return "no_nudge:gate_blocked"
@@ -2261,9 +2354,21 @@ class _Run:
         self.nudge_unconfirmed(fu, mid)
         return "no_nudge:send_unconfirmed"
 
+    @staticmethod
+    def cap_frees(g):
+        """True when G7 stopped the nudge on a send cap that frees with time: the hour's sends, the
+        run's, or the thread's for the day. The thread's sends ever and its one nudge ever never free:
+        waiting on those would try, and write its lines, at every pass until the offer expires, so
+        that entry closes with no nudge (Fable review of PR #42, finding 8). A cap the gate's line does
+        not name is read as one that never frees: fail closed."""
+        cap = next((r.detail.get("cap") for r in g.results if r.check == "G7"), None)
+        return cap in ("sends_hour", "sends_run", "sends_thread_day")
+
     def nudge_unconfirmed(self, fu, mid):
         """Her nudge went or may have gone and Sent shows no copy: an error line, and it is never sent
-        again (ruling 8). The offer stays open, with the times the nudge listed."""
+        again (ruling 8). The offer stays open, with the times the nudge listed. Where it may not
+        have gone at all (cut off mid-send, or unknown) her ledger calls the nudge in doubt: a number
+        or a bare yes then gets those times again (T12), never a booking."""
         self.error(None, "nudge", SendUnknown("her nudge is not in Sent after it went or may have gone; "
                                                "it is never sent again"), template="T9", follow_up=fu["id"],
                    message_id=mid)

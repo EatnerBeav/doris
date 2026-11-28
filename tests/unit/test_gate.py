@@ -624,6 +624,14 @@ class G6Test(GateTest):
             "booking_id": BOOKING, "message_key": KEY, "thread_key": THREAD, "sender": PAT, "state": "cancelled"}},
             **on_her_thread(offer_to=None)), "G6").status, "fail")
 
+    def test_g6_a_booking_her_own_cancel_was_taking_off_still_names_the_address_she_wrote_to(self):
+        """cancelling only ever follows written or confirmed (her ledger refuses anything else), so a
+        cancel read again after a kill is checked as it was the first time."""
+        for state in ("confirmed", "cancelling"):
+            with self.subTest(state=state):
+                result = self.check(delete(), state=state, **on_her_thread(offer_to=None))
+                self.assertEqual(self.one(result, "G6").status, "pass")
+
     def test_g6_an_offer_address_off_the_contract_errors(self):
         facts = {"branch": 1, "own_thread": False, "others_on_thread": 0, "offer_to": [RAE]}
         self.assertBlocked(self.check(reply("T2"), screen_facts=facts), "G6", status="error")
@@ -1324,6 +1332,15 @@ class G14Test(GateTest):
     def test_g14_blocks_an_event_id_that_is_not_hers(self):
         result = self.check(delete(booking_id="owner-evt-1"), ledger=self.record(booking_id="owner-evt-1"))
         self.assertBlocked(result, "G14")
+
+    def test_g14_passes_a_booking_her_own_cancel_was_taking_off(self):
+        """cancelling: this sender's cancel or move wrote it down before her delete, then a kill came.
+        The message read again deletes once more (a no-op on an event already off), through the gate."""
+        for state in ("confirmed", "cancelling"):
+            with self.subTest(state=state):
+                result = self.check(delete(), ledger=self.record(state=state))
+                self.assertEqual(self.one(result, "G14").status, "pass")
+                self.assertEqual(self.one(result, "G14").detail["state"], state)
 
 
 # --- G15: clean read-back ---------------------------------------------------------------------------

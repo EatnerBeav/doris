@@ -170,13 +170,31 @@ def _all_open_slots(thread):
 def _after_newest_offer(f):
     """True when the message reached her after her newest open offer to the sender last went out: its
     send time (set again whenever a restart sends it), or the time of its nudge when one went (a nudge
-    lists the offer's times again, numbered anew once one is dropped). A time unknown is False: fail
-    closed."""
+    lists the offer's times again, numbered anew once one is dropped; her ledger gives `nudged` only
+    for a nudge the mail server took or one that may have gone, and for one in doubt that a T12
+    settled it is when that T12 went). A time unknown is False: fail closed."""
     sent = [o.get("created") for o in f.thread.open_offers]
     sent += [o["nudged"] for o in f.thread.open_offers if o.get("nudged") is not None]
     if not sent or not all(_aware(s) for s in sent) or not _aware(f.arrived):
         return False
     return f.arrived > max(sent)
+
+
+def _nudge_in_doubt(thread):
+    """True when the nudge on an open offer to the sender may or may not have gone (its send was cut
+    off by a kill, or its result is unknown), it left a time out, and the times have not gone again
+    since. Whether they hold the offer's list or the nudge's is then not known, and the two number
+    the times differently. Her ledger says so (ledger._offer): once the T12 below is in their hands
+    the doubt is over, so its "reply with the number and I'll book it" holds."""
+    return any(o.get("nudge") == "in_doubt" for o in thread.open_offers)
+
+
+def _two_lists():
+    """Fable review of PR #42, finding 2: a number or a bare yes names a time only by its place in a
+    list, and while her nudge is in doubt there are two lists it could mean. They get the open times
+    again (T12, no new offer record), never a booking. A time they write out still books."""
+    return Plan(action="resend", outcome="offer", why=_why("policy.pick_resend", rule="ambiguous"), template="T12",
+                pick_kind="ambiguous")
 
 
 def _aware(t):
@@ -200,8 +218,11 @@ def _pick(f):
     pk = f.pick
     if pk is not None and pk.kind == "matched_slot" and pk.slot_index is not None:
         offer = _offer_holding(t, pk.slot_index)
-        if offer is not None and getattr(pk, "by", None) != "time" and not _after_newest_offer(f):
-            return _before_offer("matched_slot")
+        if offer is not None and getattr(pk, "by", None) != "time":
+            if _nudge_in_doubt(t):
+                return _two_lists()
+            if not _after_newest_offer(f):
+                return _before_offer("matched_slot")
         if offer is not None:
             oid, s, length = offer
             code = "policy.pick_plus_question" if f.answer.side_question and f.answer.side_question_text else None
@@ -227,6 +248,8 @@ def _offer_holding(thread, index):
 def _yes(f):
     t = f.thread
     flat = _all_open_slots(t)
+    if len(flat) == 1 and _nudge_in_doubt(t):
+        return _two_lists()             # a yes to the one time her nudge listed, or to the offer's several
     if len(flat) == 1 and not _after_newest_offer(f):
         return _before_offer("yes_single")
     if len(flat) == 1:

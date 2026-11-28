@@ -44,7 +44,7 @@ import re
 import sys
 
 from . import netguard, paths, receipts, templates
-from .why import FOLLOW_UP_WORDS
+from .why import FOLLOW_UP_WORDS, gone_notice
 
 EXIT_OK, EXIT_BROKEN, EXIT_USAGE = 0, 1, 2
 SHOWN = 200                                   # characters of one value shown, at most
@@ -334,8 +334,8 @@ def render(lines, path, label=None, message=None):
     for n in picked:
         subject, group = blocks[n]
         out.append("")
-        out.append("%s %d of %d: %s" % ("Item" if _gone(group) is not None else "Message", n + 1, len(blocks),
-                                        _title(subject, group)))
+        own = _gone(group) is not None or _own_check(subject)
+        out.append("%s %d of %d: %s" % ("Item" if own else "Message", n + 1, len(blocks), _title(subject, group)))
         out.extend(_steps(group, t))
     shown_run = run_lines if message is None else [l for l in run_lines if l.get("kind") == "halted"]
     if shown_run:
@@ -463,12 +463,23 @@ def _gone(group):
     return p if p.get("step") == "booking_check" else None
 
 
+BOOKING_KEY = "booking:"                      # ledger.GONE_KEY: the subject of her own calendar check's lines
+
+
+def _own_check(subject):
+    """A subject her own calendar check wrote (ruling 17): one of her bookings, never a mail."""
+    return isinstance(subject, str) and subject.startswith(BOOKING_KEY)
+
+
 def _with(p):
     return _who(p) if p.get("from_addr") else "a sender not recorded"
 
 
 def _title(subject, group):
     seen = next((l for l in group if l.get("kind") == "observed"), None)
+    if seen is None and _own_check(subject):      # her check wrote an error line for it and never called it gone
+        return "her calendar check, no mail: her booking %s could not be checked, and it is not called gone" % (
+            shown(subject[len(BOOKING_KEY):]),)
     if seen is None:
         return "Message-ID %s" % (shown(subject),)
     p = _payload(seen)
@@ -812,10 +823,12 @@ def _closed(p, why):
     if isinstance(p.get("follow_up"), dict):
         notes.append("Follow-up filed: %s." % (_entry(p),))
     if p.get("step") == "booking_check":
-        sent = p.get("notice_sent")
-        notes.append("Hold notice to the owner: %s." % (
-            "sent (Message-ID %s)" % (shown(p.get("notice_message_id")),) if sent is True else
-            "not sent, so the digest lists the hold" if sent is False else "not recorded whether it went"))
+        mid = shown(p.get("notice_message_id"))
+        notes.append("Hold notice to the owner: %s." % ({
+            "sent": "sent (Message-ID %s)" % (mid,),
+            "handed_over": "handed to the mail server (Message-ID %s); her copy was not seen in Sent" % (mid,),
+            "unknown": "it may have gone (Message-ID %s); it is not confirmed in Sent and never sent again" % (mid,),
+            "none": "not sent, so the digest lists the hold"}.get(gone_notice(p), "not recorded whether it went"),))
     if p.get("retried"):
         notes.append("A failed call was retried (the steps above show which).")
     if p.get("recovered"):
@@ -939,7 +952,8 @@ def _outcome(r, in_flight):
     if r.get("ok") is True:
         return "ok"
     if r.get("ok") is False:
-        return "failed%s" % (": %s" % (shown(r.get("error")),) if r.get("error") else "")
+        error = r.get("error")                # "failed" alone says nothing more: the word is not said twice
+        return "failed%s" % (": %s" % (shown(error),) if error and error != "failed" else "")
     return "outcome not recorded" + (" (ok: %s)" % (shown(r.get("ok")),) if "ok" in r else "")
 
 
