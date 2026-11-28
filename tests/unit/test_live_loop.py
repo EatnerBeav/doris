@@ -185,6 +185,7 @@ class LiveFixture(EnvFolder):
                     "127.0.0.1", self.dav.port, timeout=timeout)),
                 mock.patch.object(model_mod, "_urllib_post", self.post),
                 mock.patch.object(loop, "_wall_now", lambda: self.clock),
+                mock.patch.object(paths, "TRACES", os.path.join(self.dir, "traces")),
                 mock.patch.dict(os.environ, SHELL)):
             patch.start()
             self.addCleanup(patch.stop)
@@ -1695,6 +1696,153 @@ class RunCommandTest(LiveFixture):
         self.assertGreaterEqual(len(fetches), 2)
         self.assertTrue(receipts.verify(started["receipts"]).ok)     # the parent writes the halted line
         self.assert_no_value(out)
+
+
+
+COMMIT = "89abcdef" * 5
+
+
+class LiveTraceTest(LiveFixture):
+    """`run --live` keeps traces/live-run-<UTC stamp>/ when it ends, pass or fail: her receipts as
+    written, manifest.json, a timeline and terminal.log, every line the command printed (the worker's
+    and the kill switch's included). A start refused before anything was contacted writes none."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = os.path.join(self.dir, "repo")
+        heads = os.path.join(self.repo, ".git", "refs", "heads")
+        os.makedirs(heads)
+        with open(os.path.join(self.repo, ".git", "HEAD"), "w", encoding="ascii") as fh:
+            fh.write("ref: refs/heads/live-integrated\n")
+        with open(os.path.join(heads, "live-integrated"), "w", encoding="ascii") as fh:
+            fh.write(COMMIT + "\n")
+        self.traces = paths.TRACES
+        self.receipts_path, self.before_worker = None, None
+        self.arrived, self.stopped = [], []
+        fake = FakeTime(1199.0, self.tick)
+        for patch in (mock.patch.object(paths, "STATE", os.path.join(self.dir, "state")),
+                      mock.patch.object(paths, "REPO", self.repo),
+                      mock.patch.object(supervisor, "run_supervised", self.supervised),
+                      mock.patch.object(loop, "_time", fake.time), mock.patch.object(loop, "_sleep", fake.sleep)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def tick(self):
+        """Her first wait: Priya writes; the wait after her reply: a stop on the command line."""
+        if not self.arrived:
+            self.arrived.append(self.inbox.add(request(1), u(2026, 12, 1, 16, 2)))
+            self.clock = u(2026, 12, 1, 16, 10)
+        elif self.jmap.delivered and not self.stopped:
+            self.stopped.append(supervisor.request_stop("live", "cli"))
+
+    def supervised(self, mode, run_name, worker_argv, receipts_path, ledger_path, *, say=None, **kw):
+        """The kill switch in this process: the worker runs here; when it stopped for a halt, the
+        halted line is written as the supervisor writes it, and its summary said through `say`."""
+        say = say or supervisor._say
+        self.receipts_path = receipts_path
+        if self.before_worker is not None:
+            self.before_worker()
+        code = cli.main([cli.WORKER, worker_argv[4]])
+        if code != supervisor.WORKER_EXIT_HALTED:
+            return code
+        line = supervisor.record_halt(mode, run_name, supervisor.halt_cause(mode), receipts_path, ledger_path,
+                                      run_id=run_name, worker_exit=code)
+        say(supervisor._summary(line, 12))
+        return supervisor.EXIT_HALTED
+
+    def cli(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cli.main(list(argv))
+        return code, out.getvalue()
+
+    def trace(self):
+        (name,) = os.listdir(self.traces)
+        return os.path.join(self.traces, name)
+
+    def read(self, folder, name):
+        with open(os.path.join(folder, name), "rb") as fh:
+            return fh.read()
+
+    def assert_no_value_in(self, folder, *more):
+        for name in os.listdir(folder):
+            data = self.read(folder, name)
+            for value in (PASSWORD, TOKEN, API_KEY, LINK, SHELL["ANTHROPIC_API_KEY"]) + more:
+                self.assertNotIn(value.encode("utf-8"), data, name)
+
+    def test_a_run_stopped_on_the_command_line_keeps_its_whole_trace_with_outcome_pass(self):
+        code, out = self.cli("run", "--live", "--fresh", "--env", self.env_path)
+        self.assertEqual(code, supervisor.EXIT_HALTED, out)
+        self.assertEqual(len(self.stopped), 1)
+        folder = self.trace()
+        run_name = os.path.basename(os.path.dirname(self.receipts_path))
+        self.assertEqual(os.path.basename(folder), "live-run-" + run_name[len("model-live-live-"):])   # one start
+        self.assertEqual(sorted(os.listdir(folder)), ["manifest.json", "receipts.jsonl", "terminal.log", "timeline.txt"])
+        with open(self.receipts_path, "rb") as fh:
+            self.assertEqual(self.read(folder, "receipts.jsonl"), fh.read())          # as written, the halted line too
+        manifest = json.loads(self.read(folder, "manifest.json").decode("utf-8"))
+        self.assertEqual({k: manifest[k] for k in ("mode", "kind", "commit", "model", "cost_usd", "outcome",
+                                                     "first_failing_step", "run_name", "exit_code")},
+                         {"mode": "live", "kind": "run", "commit": COMMIT, "model": model_mod.DEFAULT_MODEL,
+                          "cost_usd": 0.0024, "outcome": "pass", "first_failing_step": None, "run_name": run_name,
+                          "exit_code": supervisor.EXIT_HALTED})
+        self.assertEqual(manifest["counts"], {"messages": 1, "model_calls": 1, "sends": 1, "errors": 0, "handled": 1,
+                                              "held": 0, "human_approvals": 0})
+        self.assertEqual(manifest["receipt_chain"]["ok"], True)
+        for key in ("started_utc", "ended_utc"):
+            self.assertRegex(manifest[key], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\Z")
+        self.assertLessEqual(manifest["started_utc"], manifest["ended_utc"])
+        timeline = self.read(folder, "timeline.txt").decode("utf-8")
+        for said in ("Live. Every setting from the env file", "run started: mode live, model " + model_mod.DEFAULT_MODEL,
+                     "message read", "gate passed", "send T", "her copy in Sent: found", "halted: cli"):
+            self.assertIn(said, timeline)
+        lines = out.splitlines()
+        self.assertTrue(lines[0].startswith("Live. "), out)
+        self.assertTrue(any("Priya Raman" in line for line in lines), out)          # the worker's line
+        self.assertTrue(any("Nothing in flight." in line for line in lines), out)   # the kill switch's line
+        self.assertEqual(lines[-1], "Live trace kept in %s: outcome pass." % folder)
+        self.assertEqual(self.read(folder, "terminal.log").decode("utf-8"), out)     # every line, as printed
+        self.assert_no_value_in(folder)
+        self.assert_no_value(out)
+
+    def test_a_run_that_ends_on_failed_reads_keeps_its_trace_with_outcome_fail(self):
+        self.imap.password = "dummy-other-pass"                       # every login refused: no read goes
+        code, out = self.cli("run", "--live", "--fresh", "--env", self.env_path)
+        self.assertEqual(code, 1, out)
+        folder = self.trace()
+        manifest = json.loads(self.read(folder, "manifest.json").decode("utf-8"))
+        self.assertEqual(manifest["outcome"], "fail")
+        self.assertRegex(manifest["first_failing_step"], r"^error line at seq \d+ \(fetch\)\Z")
+        self.assertEqual(manifest["counts"]["errors"], caps.MAIL_READ_FAILURES_IN_A_ROW)
+        self.assertEqual(manifest["exit_code"], 1)
+        self.assertIn("Stopped: the inbox could not be read", self.read(folder, "terminal.log").decode("utf-8"))
+        self.assertTrue(out.splitlines()[-1].startswith("Live trace kept in %s: outcome fail (first failing step: "
+                                                        "error line at seq " % folder), out)
+        self.assert_no_value_in(folder, "dummy-other-pass")
+
+    def test_a_start_refused_before_anything_was_contacted_writes_no_trace(self):
+        def no_proof():
+            self.prove_smoke(None)
+
+        def halted():
+            supervisor.request_stop("live", "cli")
+
+        def key_gone_before_the_worker():                         # the worker's own checks refuse it
+            self.before_worker = lambda: self.write_env(ANTHROPIC_API_KEY=None)
+
+        for setup, exit_code in ((no_proof, 2), (halted, supervisor.EXIT_REFUSED_HALT),
+                                 (key_gone_before_the_worker, 2)):
+            with self.subTest(case=setup.__name__):
+                setup()
+                code, out = self.cli("run", "--live", "--fresh", "--env", self.env_path)
+                self.assertEqual(code, exit_code, out)
+                self.assertFalse(os.path.exists(self.traces), out)
+                self.assertNotIn("Live trace", out)
+                supervisor.resume("live")
+                self.prove_smoke(self.smoke_record())
+                self.before_worker = None
+                self.env_path = self.write_env()
+        self.nothing_contacted()
 
 
 if __name__ == "__main__":
