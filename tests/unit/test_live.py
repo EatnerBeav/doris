@@ -595,7 +595,8 @@ class FetchTest(ImapFixture):
         items = mail.fetch_new()
         self.assertEqual([i.server_id for i in items], ["INBOX:1700000001:%d" % uid3, "INBOX:1700000001:%d" % uid4])
         searches = [a for v, a in self.imap.commands if v == "UID SEARCH"]
-        self.assertEqual(searches, ["SINCE 26-Nov-2026 NOT KEYWORD " + live.SMOKE_TEST_KEYWORD])
+        self.assertEqual(searches, ['SINCE 26-Nov-2026 NOT KEYWORD %s NOT HEADER Message-ID "%s"'
+                                    % (live.SMOKE_TEST_KEYWORD, live.SMOKE_MID_MARK)])
 
     def test_the_start_time_can_be_set_after_construction(self):
         self.inbox.add(eml(1), u(2026, 11, 20, 9, 0))
@@ -632,9 +633,29 @@ class FetchTest(ImapFixture):
         got = self.mail.fetch_new()
         self.assertEqual([item.server_id for item in got], ["INBOX:1700000001:1", "INBOX:1700000001:3"])
         (search,) = [args for verb, args in self.imap.commands if verb == "UID SEARCH"]
-        self.assertTrue(search.endswith("NOT KEYWORD " + live.SMOKE_TEST_KEYWORD), search)
+        self.assertIn("NOT KEYWORD %s " % live.SMOKE_TEST_KEYWORD, search)
         self.mail.since_utc = u(2026, 11, 27)
         self.assertEqual(len(self.mail.fetch_new()), 2)
+
+    def test_a_request_the_smoke_minted_is_never_handed_over_even_unmarked(self):
+        """A smoke cut short (or whose mark failed) between wolf's send and its mark leaves its request
+        in her INBOX without the keyword: its Message-ID, which the smoke mints as SMOKE_TEST_KEYWORD +
+        "." + hex, keeps it from every live run all the same, in the search and again when it is read."""
+        smoke_mid = live.SMOKE_TEST_KEYWORD + ".0123456789abcdef0123456789abcdef@fastmail.com"
+        for n, mid in ((1, None), (2, smoke_mid), (3, "x" + smoke_mid), (4, None)):
+            self.inbox.add(eml(n, mid=mid), u(2026, 11, 27, 9, n))
+        got = self.mail.fetch_new()
+        self.assertEqual([item.raw for item in got], [eml(1), eml(4)])
+        (search,) = [args for verb, args in self.imap.commands if verb == "UID SEARCH"]
+        self.assertTrue(search.endswith('NOT KEYWORD %s NOT HEADER Message-ID "%s."'
+                                        % (live.SMOKE_TEST_KEYWORD, live.SMOKE_TEST_KEYWORD)), search)
+        real_search = live.LiveMail._search                   # a server that leaves that criterion out
+        with mock.patch.object(live.LiveMail, "_search", lambda mail, conn, criteria, step: real_search(
+                mail, conn, criteria[:criteria.index("HEADER") - 1], step)):
+            self.assertEqual([item.raw for item in self.mail.fetch_new()], [eml(1), eml(4)])
+        smoke_run = self.make_mail(smoke_message_id="<%s>" % smoke_mid)    # the smoke's own run still reads it
+        self.inbox.messages[2]["flags"].add(live.SMOKE_TEST_KEYWORD)
+        self.assertEqual([item.raw for item in smoke_run.fetch_new()], [eml(2, mid=smoke_mid)])
 
     def test_the_smokes_own_run_reads_its_marked_request_and_nothing_else(self):
         """The smoke's run on its throwaway ledger reads exactly one message: the one carrying her

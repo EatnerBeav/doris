@@ -66,6 +66,7 @@ DEFAULT_IMAP_PORT = 993
 # Her keyword on the smoke's own test request in INBOX (set by the smoke under her login, before its
 # run answers it on the smoke's throwaway ledger): no live run reads it again, whatever its ledger.
 SMOKE_TEST_KEYWORD = "doris-smoke-test"
+SMOKE_MID_MARK = SMOKE_TEST_KEYWORD + "."   # in every Message-ID the smoke mints: no live run reads such a message
 
 # Every pattern that validates a whole value ends in \Z: in Python, $ also matches before a final
 # newline, which would let "name\n" through to a protocol line.
@@ -492,9 +493,10 @@ class LiveMail(MailAdapter):
     # -- the interface ---------------------------------------------------------------------------
     def fetch_new(self):
         """Every INBOX message received at or after since_utc, oldest first (INTERNALDATE, then
-        UID), leaving out any carrying SMOKE_TEST_KEYWORD (the smoke's own test request, answered
-        on the smoke's ledger); with smoke_message_id, only that request: the keyword and exactly
-        that Message-ID. Read-only (EXAMINE) and with BODY.PEEK[], so nothing about her mail changes. Each
+        UID), leaving out the smoke's own test requests, answered on the smoke's ledger: any
+        carrying SMOKE_TEST_KEYWORD, and any whose Message-ID holds SMOKE_MID_MARK (one the smoke
+        cut short before its mark), in the search and again once read; with smoke_message_id,
+        only that request: the keyword and exactly that Message-ID. Read-only (EXAMINE) and with BODY.PEEK[], so nothing about her mail changes. Each
         message's RFC822.SIZE is read with its date: one over caps.MAX_RAW_BYTES is handed over
         as only its first MAX_RAW_BYTES + 1 octets, never downloaded whole, and the reader holds
         it as oversize. Raises MailError on any failure, including a message the server named
@@ -506,7 +508,7 @@ class LiveMail(MailAdapter):
             uidvalidity, _ = self._open(conn, "INBOX", True, step)
             criteria = ("ALL",) if since is None else ("SINCE", _imap_day(since - _DAY))
             if self.smoke_message_id is None:
-                criteria += ("NOT", "KEYWORD", SMOKE_TEST_KEYWORD)
+                criteria += ("NOT", "KEYWORD", SMOKE_TEST_KEYWORD, "NOT", "HEADER", "Message-ID", '"%s"' % SMOKE_MID_MARK)
             else:                          # a substring search: each match is read back below
                 criteria += ("KEYWORD", SMOKE_TEST_KEYWORD, "HEADER", "Message-ID", '"%s"' % self.smoke_message_id)
             uids = self._search(conn, criteria, step)
@@ -530,8 +532,11 @@ class LiveMail(MailAdapter):
                 for received, uid, _ in batch:
                     if uid not in bodies:
                         raise _failure(MailError, step, detail="the server left a message out")
-                    if self.smoke_message_id is not None and self.smoke_message_id not in _message_ids(bodies[uid]):
+                    mids = _message_ids(bodies[uid])
+                    if self.smoke_message_id is not None and self.smoke_message_id not in mids:
                         continue           # it only contains the smoke's Message-ID: never the smoke's to read
+                    if self.smoke_message_id is None and any(SMOKE_MID_MARK in mid.lower() for mid in mids):
+                        continue           # the smoke's request, unmarked: a server that searched loosely
                     items.append(InboundItem(server_id=server_id(uidvalidity, uid), raw=bodies[uid],
                                              received_utc=received))
             return items
