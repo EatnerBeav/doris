@@ -18,7 +18,9 @@ From `src/`:
     python3 -m doris traps --model replayed --answers FILE
 
 Each file runs through the real Doris loop on its own fresh throwaway state under
-`state/throwaway/<run>/<item>/`, with the network guard allowing no host. A web page becomes one
+`state/throwaway/<source>-<UTC stamp>/<NN>/` (NN its place in the pack: short, so every path a run
+writes fits Windows' default path limit from a clone folder of up to about 115 characters), with
+the network guard allowing no host. A web page becomes one
 text/html part, a document or transcript one text/plain part, the file's bytes unchanged; an `.eml`
 goes in as is. The first line of the report prints the whole setup.
 

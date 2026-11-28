@@ -3,7 +3,7 @@
 tests/__init__.py's load_tests runs these after every other test (and takes the working tree's
 picture before the first one). A test may start threads and processes and write files, but only
 for itself: by the time the suite ends no thread or process a test started is still running,
-nothing landed in the suite's throwaway default state folder, and the working tree is as the suite
+nothing landed in the suite's throwaway default state or traces folder, and the working tree is as the suite
 found it: no HALT, no STOP and nothing new under state/ (a HALT left there stops the next `demo`),
 and no file anywhere else added, changed or removed.
 
@@ -71,6 +71,7 @@ def marked(value, proc="/proc"):
 class NothingLeftBehind(unittest.TestCase):
     at_start = None          # the working tree before the first test (set by load_tests)
     default_state = None     # the suite's throwaway default state folder (tests/__init__.py)
+    default_traces = None    # and its throwaway default traces folder
     mark = None              # MARK's value in this run (tests/__init__.py)
 
     def test_1_no_thread_a_test_started_is_still_running(self):
@@ -100,6 +101,12 @@ class NothingLeftBehind(unittest.TestCase):
             self.skipTest("the suite ran without its own default state folder")
         self.assertEqual(sorted(tree(self.default_state)), [],
                          "a test wrote in the default state folder instead of a folder of its own")
+
+    def test_3b_nothing_landed_in_the_default_traces_folder(self):
+        if self.default_traces is None:
+            self.skipTest("the suite ran without its own default traces folder")
+        self.assertEqual(sorted(tree(self.default_traces)), [],
+                         "a test wrote a trace in the default traces folder instead of a folder of its own")
 
     def test_4_the_working_tree_is_as_the_suite_found_it(self):
         if self.at_start is None:

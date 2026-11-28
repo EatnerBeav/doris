@@ -39,8 +39,10 @@ lifeline works on all three.
 """
 
 import datetime as _dt
+import hashlib
 import json
 import os
+import re
 import signal as _signal
 import subprocess
 import tempfile
@@ -352,9 +354,33 @@ def _detail(row):
     return detail if isinstance(detail, dict) else {}
 
 
+# A Message-ID or thread key can hold the meeting link (Message-ID: <meet.example/room@x>), and the
+# supervisor never loads the env, so it cannot find the link as the worker's receipts do
+# (templates.redact_values). Every form of the link templates.has_link finds holds "/" or ":" (a live
+# link is https: its path, or with no path its scheme's "://"), or "%" or "&" (an escaped form), so
+# a key made only of the plain characters below is shown as written; any other key, non-ASCII
+# included, is shown by its hash (review of 7e1a9fa, item 2).
+_PLAIN_KEY = re.compile(r"[A-Za-z0-9.@_+=!#$'*?^`{|}~<>\[\]-]+")
+_RAW_KEY = re.compile(r"sha256:[0-9a-f]{64}")        # mail.message_key of a mail with no Message-ID
+
+
+def shown_key(key):
+    """A ledger key as the supervisor's halted line shows it: as written when it cannot spell the
+    meeting link, else "key-sha256:" and ledger.key_sha256 of it (so it can be matched in the ledger)."""
+    if not isinstance(key, str) or _PLAIN_KEY.fullmatch(key) or _RAW_KEY.fullmatch(key):
+        return key
+    from .ledger import key_sha256
+    try:
+        digest = key_sha256(key)
+    except (ValueError, UnicodeError):          # an empty key: never a reason to lose the list
+        digest = hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()
+    return "key-sha256:" + digest
+
+
 def _dropped(ledger, cause, run_id):
     """Every queued action (dropped now, in the ledger) and every fetched message not yet
-    processed, each with its kind, thread Message-ID, message and template or booking ID."""
+    processed, each with its kind, thread Message-ID, message and template or booking ID; the
+    keys as shown_key shows them."""
     out, listed = [], set()
     for raw in ledger.drop_queued(cause) or []:
         row = _row(raw)
@@ -363,8 +389,9 @@ def _dropped(ledger, cause, run_id):
         listed.add(message)
         out.append({
             "kind": row.get("kind"),
-            "thread": row.get("thread_key") or detail.get("thread_key") or ledger.thread_of_message(message),
-            "message": message,
+            "thread": shown_key(row.get("thread_key") or detail.get("thread_key")
+                                or ledger.thread_of_message(message)),
+            "message": shown_key(message),
             "template": row.get("template") or detail.get("template"),
             "booking_id": row.get("booking_id") or detail.get("booking_id"),
         })
@@ -374,8 +401,8 @@ def _dropped(ledger, cause, run_id):
         if key in listed:
             continue
         listed.add(key)
-        out.append({"kind": "message", "thread": row.get("thread_key") or ledger.thread_of_message(key),
-                    "message": key, "template": None, "booking_id": None})
+        out.append({"kind": "message", "thread": shown_key(row.get("thread_key") or ledger.thread_of_message(key)),
+                    "message": shown_key(key), "template": None, "booking_id": None})
     return out
 
 

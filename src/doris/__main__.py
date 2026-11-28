@@ -12,6 +12,9 @@
     resume   clear a halt (only here, on the command line)
     smoke    every live adapter call once against the real servers, before a live run
 
+Every live run, the smoke included, keeps its trace in traces/live-<run|smoke>-<UTC stamp>/ when
+it ends, pass or fail (livetrace.py); a start refused before anything was contacted keeps none.
+
 redteam, replay and watch are not built yet: each says so and exits 2.
 """
 
@@ -21,7 +24,7 @@ import json
 import os
 import sys
 
-from . import caps, loop, paths, receipts, supervisor
+from . import caps, livetrace, loop, paths, receipts, supervisor
 
 SANDBOX_OWNER = loop.SANDBOX_OWNER
 SANDBOX_DORIS = loop.SANDBOX_DORIS
@@ -44,9 +47,11 @@ def demo_source(env, answers_exist):
     return "replayed" if answers_exist else "stub"
 
 
-def run_name(source, mode):
-    """model-<source>-<mode>-<wall clock, UTC>: the source and mode first, so a trace says what it is (A6)."""
-    return "model-%s-%s-%s" % (source, mode, _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+def run_name(source, mode, when=None):
+    """model-<source>-<mode>-<wall clock, UTC>: the source and mode first, so a trace says what it is (A6).
+    when: the run's start (an aware datetime), else now."""
+    when = when or _dt.datetime.now(_dt.timezone.utc)
+    return "model-%s-%s-%s" % (source, mode, when.astimezone(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
 
 
 def _recorded_run(path):
@@ -119,15 +124,35 @@ def run_cmd(argv):
     except loop.Refused as refused:
         print(refused)
         return refused.exit_code
-    name, run_dir = new_run_dir(state, run_name("live", "live"))
-    _say("Live. Every setting from the env file %s; model called live (%s). She reads her own inbox %s.%s"
+    started = livetrace.now()
+    name, run_dir = new_run_dir(state, run_name("live", "live", started))
+    # Every line from here goes to the terminal and to the run's terminal.log, the worker's too.
+    term = livetrace.Printed(out=_say, path=os.path.join(run_dir, livetrace.TERMINAL))
+    term("Live. Every setting from the env file %s; model called live (%s). She reads her own inbox %s.%s"
          % (env_path, settings.model_id, every,
             " A fresh live ledger: she reads only mail that arrives from now on." if args.fresh else ""))
     # No setting goes in the config: the worker loads the env file itself.
-    return supervise("live", state, name, run_dir, {
+    code = supervise("live", state, name, run_dir, {
         "mode": "live", "run_name": name, "state_dir": state, "env_path": env_path, "fresh": args.fresh,
         "model_source": "live", "record_path": os.path.join(run_dir, "recorded-answers.jsonl"),
-        "clock_mode": "fixed", "digest": True, "cycles": None, "cycle_s": RUN_CYCLE_S})
+        "clock_mode": "fixed", "digest": True, "cycles": None, "cycle_s": RUN_CYCLE_S}, say=term)
+    return live_trace(run_dir, name, started, code, term)
+
+
+def live_trace(run_dir, name, started, code, term):
+    """traces/live-run-<stamp>/ for a live run that has ended, pass or fail (livetrace). A start
+    refused before her loop wrote a receipt (a halt, the lock, a setting the worker checks again under
+    its lock) contacted nothing and is no run: it keeps none. Returns the run's exit code, as it was."""
+    receipts_path = os.path.join(run_dir, "receipts.jsonl")
+    if not os.path.isfile(receipts_path):
+        return code
+    outcome, first = livetrace.judge_run(receipts_path, code)
+    try:
+        livetrace.write("run", started, livetrace.now(), outcome, first, printed=term, receipts_path=receipts_path,
+                        extra={"run_name": name, "exit_code": code})
+    except Exception as exc:                 # said loudly; the run's own outcome stands
+        term("Live trace NOT kept: %s. Her receipts are in %s." % (type(exc).__name__, _display(receipts_path)))
+    return code
 
 
 def sandbox_source():
@@ -161,15 +186,16 @@ def new_run_dir(state, base):
     return name, run_dir
 
 
-def supervise(mode, state, name, run_dir, config):
-    """The run's config.json, then its worker under the kill switch."""
+def supervise(mode, state, name, run_dir, config, say=None):
+    """The run's config.json, then its worker under the kill switch, whose lines go through say."""
     config_path = os.path.join(run_dir, "config.json")
     with open(config_path, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(config, fh, indent=1, sort_keys=True)
         fh.write("\n")
     return supervisor.run_supervised(
         mode, name, [sys.executable, "-m", "doris", WORKER, config_path],
-        os.path.join(run_dir, "receipts.jsonl"), os.path.join(state, "ledger.sqlite"), cwd=paths.SRC, run_id=name)
+        os.path.join(run_dir, "receipts.jsonl"), os.path.join(state, "ledger.sqlite"), say=say, cwd=paths.SRC,
+        run_id=name)
 
 
 def _span(seconds):
@@ -184,37 +210,42 @@ def worker(argv):
     failed (the inbox could not be read: once in a finite run, caps.MAIL_READ_FAILURES_IN_A_ROW
     cycles running in a run until stopped; or the chain failed its own check), 3 another Doris
     holds the ledger, 4 halted (the parent writes that line; when her supervisor is gone, she has
-    written it herself). Under run_supervised her stdin is her lifeline to it (supervisor.Lifeline)."""
+    written it herself). Under run_supervised her stdin is her lifeline to it (supervisor.Lifeline).
+    A live worker's lines also go to terminal.log beside its config, for the run's trace."""
     with open(argv[0], encoding="utf-8") as fh:
         fields = json.load(fh)
+    say = _say
+    if fields.get("mode") == "live":
+        say = livetrace.Printed(out=_say, path=os.path.join(os.path.dirname(os.path.abspath(argv[0])),
+                                                            livetrace.TERMINAL))
     lifeline = supervisor.lifeline(fields.get("mode"), fields.get("state_dir"))
-    cfg = loop.RunConfig(supervised=True, say=_say, lifeline=lifeline, **fields)
+    cfg = loop.RunConfig(supervised=True, say=say, lifeline=lifeline, **fields)
     try:
         s = loop.run(cfg)
     except loop.Refused as refused:
-        _say(str(refused))
+        say(str(refused))
         return refused.exit_code
     except loop.Halted:
         return supervisor.WORKER_EXIT_HALTED
     if s.halted:                    # her supervisor is gone: she wrote the halted line and the summary
         why = ("Halted: her supervisor is gone, so she stopped herself" if s.halted == "supervisor_gone" else
                "Halted (%s), and her supervisor is gone, so she stopped" % (supervisor.CAUSE_WORDS.get(s.halted, s.halted),))
-        _say("%s and wrote the halted line. %d handled, %d held before it. Receipts %s: %s. Run `%s` to go on."
-             % (why, s.handled, s.held, _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN",
-                supervisor._resume_command()))
+        say("%s and wrote the halted line. %d handled, %d held before it. Receipts %s: %s. Run `%s` to go on."
+            % (why, s.handled, s.held, _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN",
+               supervisor._resume_command()))
         return supervisor.WORKER_EXIT_HALTED
     if s.read_failed:
         times = "" if cfg.cycles is not None else " %d times in a row" % caps.MAIL_READ_FAILURES_IN_A_ROW
-        _say("Stopped: the inbox could not be read%s, so the run ended there (%d handled, %d held before it). "
-             "Nothing was read as an empty inbox. Receipts %s: %s."
-             % (times, s.handled, s.held, _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
+        say("Stopped: the inbox could not be read%s, so the run ended there (%d handled, %d held before it). "
+            "Nothing was read as an empty inbox. Receipts %s: %s."
+            % (times, s.handled, s.held, _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
         return 1
     cost = "none (stub)" if cfg.model_source == "stub" else "$%.4f%s" % (
         s.cost_usd, " (recorded)" if cfg.model_source == "replayed" else "")
-    _say("Done: %d handled, %d held, %d human approvals. %d sent to prospects, %d hold notices, %d bookings. "
-         "Model calls %d, cost %s. Receipts %s: %s."
-         % (s.handled, s.held, s.human_approvals, s.sends, s.hold_notices, s.bookings, s.model_calls, cost,
-            _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
+    say("Done: %d handled, %d held, %d human approvals. %d sent to prospects, %d hold notices, %d bookings. "
+        "Model calls %d, cost %s. Receipts %s: %s."
+        % (s.handled, s.held, s.human_approvals, s.sends, s.hold_notices, s.bookings, s.model_calls, cost,
+           _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
     return 0 if s.verify_ok else 1
 
 

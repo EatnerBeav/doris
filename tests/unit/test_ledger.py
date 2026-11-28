@@ -344,7 +344,7 @@ class Sends(Base):
         self.assertEqual(ledger_mod.NEVER_AGAIN_STATES, ("sending", "unknown", "handed_over", "confirmed"))
 
     def test_a_send_the_server_took_is_never_taken_back(self):
-        # decision 76: SMTP's 250 is written down as handed_over before the Sent look; from there the
+        # decision 76: the server taking it is written down as handed_over before the Sent look; from there the
         # send can only become confirmed, whatever a later look, a restart or the kill switch writes
         self.reply("<a1@fastmail.com>")
         self.db.set_send_state("<a1@fastmail.com>", "handed_over")

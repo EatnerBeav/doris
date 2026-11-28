@@ -1,9 +1,9 @@
 """Live mode in the loop: her settings from the env file alone, the live ledger's fresh start, the
 live adapters under the network guard, and the meeting link and the model key from the env file.
 
-The real LiveMail and LiveCalendar talk to test_live's fake IMAP, SMTP and CalDAV servers on
-127.0.0.1 (the adapters' default transports swapped for plain connections to them), as in
-test_smoke. No test reads a real env file or reaches a real server.
+The real LiveMail and LiveCalendar talk to test_live's fake IMAP and CalDAV servers and
+fake_jmap's JMAP server on 127.0.0.1 (the adapters' default transports swapped for plain
+connections to them), as in test_smoke. No test reads a real env file or reaches a real server.
 """
 import base64
 import contextlib
@@ -11,6 +11,7 @@ import datetime as dt
 import email
 import email.policy
 import hashlib
+import html
 import http.client
 import imaplib
 import io
@@ -18,27 +19,28 @@ import json
 import os
 import re
 import shutil
-import smtplib
 import sys
 import tempfile
 import traceback
 import unittest
+import urllib.parse
 from unittest import mock
 
 from doris import __main__ as cli
-from doris import caps, compose, ledger as ledger_mod
+from doris import caps, compose, envfile, ledger as ledger_mod
 from doris import loop, model as model_mod, netguard, paths, receipts, sentrecord, smoke, supervisor, templates
-from doris.adapters import live
+from doris.adapters import jmap, live
 from doris.shapes import MailError, SendUnknown
-from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, FakeSMTP, u
+from tests.unit.fake_jmap import TOKEN, FakeJMAP
+from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, u
 
 LINK = "https://meet.example/" + "live-loop-room"
 API_KEY = "dummy-anthropic-key-for-live-loop-tests"
 SETTINGS = (("DORIS_MAIL_ADDRESS", DORIS), ("DORIS_APP_PASSWORD", PASSWORD), ("DORIS_OWNER_ADDRESS", OWNER),
-            ("DORIS_IMAP_HOST", "127.0.0.1"), ("DORIS_SMTP_HOST", "127.0.0.1"),
+            ("DORIS_IMAP_HOST", "127.0.0.1"), ("DORIS_JMAP_TOKEN", TOKEN),
             ("DORIS_CALDAV_URL", "https://127.0.0.1" + COLLECTION), ("DORIS_MEETING_LINK", LINK),
             ("ANTHROPIC_API_KEY", API_KEY), ("DORIS_MODEL", ""))
-VALUES = (PASSWORD, LINK, API_KEY, DORIS, OWNER)          # none of these is ever printed
+VALUES = (PASSWORD, TOKEN, LINK, API_KEY, DORIS, OWNER)   # none of these is ever printed
 
 
 def env_text(**overrides):
@@ -77,7 +79,7 @@ class LiveSettingsTest(EnvFolder):
         with mock.patch.dict(os.environ, elsewhere):
             s = loop.live_settings(self.env_path, "live")
         self.assertEqual((s.owner_addr, s.doris_addr, s.meeting_link), (OWNER, DORIS, LINK))
-        self.assertEqual(s.hosts, ("127.0.0.1",))
+        self.assertEqual(s.hosts, ("127.0.0.1", "api.fastmail.com"))
         self.assertEqual(s.model_id, model_mod.DEFAULT_MODEL)
         self.assertEqual(s.env["ANTHROPIC_API_KEY"], API_KEY)
 
@@ -94,7 +96,9 @@ class LiveSettingsTest(EnvFolder):
                  ("DORIS_MEETING_LINK", "http://meet.example/" + "plain-room"),
                  ("DORIS_MEETING_LINK", "https://meet.example/" + "café-room"),
                  ("DORIS_MEETING_LINK", "https://meet.example/" + "two words"),
-                 ("ANTHROPIC_API_KEY", None), ("DORIS_MODEL", "claude-without-a-price")]
+                 ("ANTHROPIC_API_KEY", None), ("DORIS_MODEL", "claude-without-a-price"),
+                 ("DORIS_JMAP_TOKEN", None), ("DORIS_JMAP_TOKEN", "dummy-short-token"),
+                 ("DORIS_JMAP_TOKEN", TOKEN[:20] + " " + TOKEN[20:]), ("DORIS_JMAP_TOKEN", TOKEN + "\u00e9")]
         for name, value in cases:
             with self.subTest(name=name, value=value):
                 with self.assertRaises(loop.Refused) as cm:
@@ -121,6 +125,19 @@ class LiveSettingsTest(EnvFolder):
     def test_the_settings_never_show_a_value(self):
         s = loop.live_settings(self.env_path, "live")
         self.assert_no_value(repr(s) + str(s))
+
+
+class SmokeOnlySettingsTest(EnvFolder):
+    """WOLF_EMAIL and WOLF_JMAP_TOKEN, in the same env file, are the smoke's alone (its forward test
+    from the wolf.whizz account): her loop never holds or reads them."""
+    WOLF_TOKEN = "dummy-wolf-jmap-token-for-live-loop-tests-5151"
+
+    def test_her_live_settings_hold_only_the_names_she_reads(self):
+        path = self.write_env(WOLF_EMAIL="wolf.whizz@fastmail.com", WOLF_JMAP_TOKEN=self.WOLF_TOKEN,
+                              SOMETHING_ELSE="dummy-other-value")
+        s = loop.live_settings(path, "live")
+        self.assertEqual(set(s.env), {name for name, value in SETTINGS if value is not None})
+        self.assertNotIn(self.WOLF_TOKEN, repr(sorted(s.env.values())))
 
 
 # ===========================================================================================
@@ -151,12 +168,12 @@ def model_answer(cls="meeting_request"):
 class LiveFixture(EnvFolder):
     def setUp(self):
         super().setUp()
-        self.imap, self.smtp, self.dav = FakeIMAP(), FakeSMTP(), FakeCalDAV()
-        for server in (self.imap, self.smtp, self.dav):
+        self.imap, self.jmap, self.dav = FakeIMAP(), FakeJMAP().as_fastmail(), FakeCalDAV()
+        for server in (self.imap, self.jmap, self.dav):
             self.addCleanup(server.stop)
         self.inbox = self.imap.boxes["INBOX"]
         self.sent = self.imap.boxes["Sent Items"] = Box(1700000002, special=("\\Sent",))
-        self.smtp.on_deliver = lambda sender, rcpts, message: self.sent.add(message, self.clock)
+        self.jmap.on_deliver = lambda sender, rcpts, message: self.sent.add(message, self.clock)
         self.state = os.path.join(self.dir, "state", "live")
         self.prove_smoke(self.smoke_record())
         self.clock = u(2026, 12, 1, 16, 0)
@@ -164,12 +181,13 @@ class LiveFixture(EnvFolder):
         for patch in (
                 mock.patch.object(live, "_imap_tls", lambda host, port, timeout: imaplib.IMAP4(
                     "127.0.0.1", self.imap.port, timeout=timeout)),
-                mock.patch.object(live, "_smtp_tls", lambda host, port, timeout: smtplib.SMTP(
-                    "127.0.0.1", self.smtp.port, local_hostname="[127.0.0.1]", timeout=timeout)),
+                mock.patch.object(jmap, "_https", lambda host, port, timeout: http.client.HTTPConnection(
+                    "127.0.0.1", self.jmap.port, timeout=timeout)),
                 mock.patch.object(live, "_https", lambda host, port, timeout: http.client.HTTPConnection(
                     "127.0.0.1", self.dav.port, timeout=timeout)),
                 mock.patch.object(model_mod, "_urllib_post", self.post),
                 mock.patch.object(loop, "_wall_now", lambda: self.clock),
+                mock.patch.object(paths, "TRACES", os.path.join(self.dir, "traces")),
                 mock.patch.dict(os.environ, SHELL)):
             patch.start()
             self.addCleanup(patch.stop)
@@ -210,7 +228,7 @@ class LiveFixture(EnvFolder):
         return line["payload"]
 
     def nothing_contacted(self):
-        self.assertEqual((self.imap.commands, self.smtp.sessions, self.dav.requests), ([], [], []))
+        self.assertEqual((self.imap.commands, self.jmap.requests, self.dav.requests), ([], [], []))
 
     def started_fresh_then_asked(self, **kw):
         """A fresh start at 4:00 PM UTC with an empty inbox; Priya's request lands at 4:02; her 4:10 cycle."""
@@ -249,7 +267,7 @@ class LiveStartTest(LiveFixture):
             self.assertTrue(s.verify_ok)
             with open(s.receipts_path, encoding="utf-8") as fh:
                 self.assertNotIn("live-1@northwind.example", fh.read())
-        self.assertEqual([rcpts[0] for _, rcpts, _ in self.smtp.delivered], [PROSPECT])
+        self.assertEqual([rcpts[0] for _, rcpts, _ in self.jmap.delivered], [PROSPECT])
 
     def test_fresh_with_a_live_ledger_already_there_refuses_and_keeps_its_start(self):
         self.go(fresh=True)
@@ -350,7 +368,7 @@ class LiveRunTest(LiveFixture):
         self.assertEqual((s.handled, s.held, s.sends, s.bookings), (1, 0, 1, 1))
         (put,) = [r for r in self.dav.requests if r[0] == "PUT"]
         self.assertIn(b"LOCATION:" + LINK.encode("ascii"), put[3])
-        (_, rcpts, data), = self.smtp.delivered
+        (_, rcpts, data), = self.jmap.delivered
         self.assertEqual(rcpts[0], PROSPECT)
         msg = email.message_from_bytes(data, policy=email.policy.default)
         texts = "\n".join(p.get_content() for p in msg.walk() if p.get_content_maintype() == "text")
@@ -376,7 +394,7 @@ class LiveRunTest(LiveFixture):
             for name in names:
                 with open(os.path.join(folder, name), "rb") as fh:
                     data = fh.read()
-                found += [(name, v) for v in (PASSWORD, API_KEY, LINK, SHELL["ANTHROPIC_API_KEY"])
+                found += [(name, v) for v in (PASSWORD, TOKEN, API_KEY, LINK, SHELL["ANTHROPIC_API_KEY"])
                           if v.encode("utf-8") in data]
         self.assertEqual(found, [])
         self.assert_no_value("\n".join(self.said))
@@ -392,7 +410,8 @@ class LiveRunTest(LiveFixture):
         with mock.patch.object(netguard, "install", spy):
             self.started_fresh_then_asked()
             self.go(model_source="live")
-        self.assertEqual(installed, [("127.0.0.1",)] * 2 + [("127.0.0.1", "api.anthropic.com")])
+        self.assertEqual(installed, [("127.0.0.1", "api.fastmail.com")] * 2
+                         + [("127.0.0.1", "api.fastmail.com", "api.anthropic.com")])
         self.assertIsNone(netguard.active())
 
 
@@ -450,7 +469,7 @@ class MeetingLinkTest(LiveFixture):
         answers = os.path.join(self.state, "recorded-answers.jsonl")
         s = self.go(model_source="live", record_path=answers)
         self.assertEqual((s.handled, s.held, s.sends, s.bookings, s.verify_ok), (1, 0, 1, 1, True))
-        (_, rcpts, data), = self.smtp.delivered
+        (_, rcpts, data), = self.jmap.delivered
         self.assertIn(b"Join: " + LINK.encode("ascii"), data)               # the link still goes where it belongs
         self.assertEqual([name for name, data in self.files() if room_in(data)], [])
         self.assertNotIn("live-loop-room", "\n".join(self.said))
@@ -462,6 +481,32 @@ class MeetingLinkTest(LiveFixture):
         self.assertEqual(seen["copy_redacted"], "meeting_link")
         with open(os.path.join(s.run_dir, seen["message_copy"]), "rb") as fh:
             self.assertEqual(fh.read().count(b"[meeting link]"), 3)
+
+    def test_a_percent_escaped_link_in_the_body_or_the_from_name_reaches_nothing_she_keeps(self):
+        """Review of 7e1a9fa, item 1: https://meet.example/live%2Dloop-room in the body and the From
+        display name reached the observed from_name, the classified raw and the recorded answer."""
+        escaped = LINK.replace("live-loop", "live%2Dloop")
+        self.answer("meeting_request", quote="Is %s the right room?" % escaped)
+        self.go(fresh=True, model_source="live")
+        ask = ("Hi, could Shane do Wednesday, December 2 at 1:00 PM Central for 30 minutes? Is %s the right "
+               "room?\r\n\r\nPriya\r\n" % escaped)
+        mail = priya_mail(1, ask.encode("ascii")).replace(b"From: Priya Raman <",
+                                                          b'From: "Priya via %s" <' % escaped.encode("ascii"))
+        self.inbox.add(mail, u(2026, 12, 1, 16, 2))
+        self.clock = u(2026, 12, 1, 16, 10)
+        answers = os.path.join(self.state, "recorded-answers.jsonl")
+        s = self.go(model_source="live", record_path=answers)
+        self.assertEqual((s.handled, s.verify_ok), (1, True))
+        unescaped = [(name, html.unescape(urllib.parse.unquote_to_bytes(data).decode("latin-1")).encode("latin-1"))
+                     for name, data in self.files()]
+        self.assertEqual([name for name, data in unescaped if room_in(data)], [])
+        (seen,) = self.observed(s).values()
+        self.assertEqual(seen["from_name"], "[meeting link]")
+        (classified,) = [l["payload"] for l in receipts.read_lines(s.receipts_path) if l["kind"] == "classified"]
+        self.assertEqual(json.loads(classified["raw"])["side_question_quote"], "[meeting link]")   # still the answer
+        with open(answers, encoding="utf-8") as fh:
+            recorded = json.loads(json.loads(fh.read())["raw"])
+        self.assertEqual((recorded["cls"], recorded["side_question_quote"]), ("meeting_request", "[meeting link]"))
 
     def test_a_copy_keeps_its_bytes_loses_the_link_or_is_not_kept_when_only_decoding_shows_it(self):
         self.answer("fyi")
@@ -494,10 +539,46 @@ class MeetingLinkTest(LiveFixture):
             withheld = seen["live-link-%d@northwind.example" % n]
             self.assertNotIn("message_copy", withheld)
             self.assertEqual(withheld["copy_withheld"], "meeting_link")
-            self.assertFalse(os.path.exists(os.path.join(copies, hashlib.sha256(mails[n]).hexdigest() + ".eml")))
-        self.assertEqual(sorted(os.listdir(copies)), sorted(hashlib.sha256(mails[n]).hexdigest() + ".eml"
-                                                            for n in (1, 2)))
+            for digits in (64, loop.COPY_NAME_HEX):
+                self.assertFalse(os.path.exists(os.path.join(copies, hashlib.sha256(mails[n]).hexdigest()[:digits]
+                                                             + ".eml")))
+        self.assertEqual(sorted(os.listdir(copies)), sorted(hashlib.sha256(mails[n]).hexdigest()[:loop.COPY_NAME_HEX]
+                                                            + ".eml" for n in (1, 2)))
         self.assertEqual([name for name, data in self.files() if room_in(data)], [])
+
+    def test_a_copy_that_shows_the_link_only_as_a_reader_sees_it_is_not_kept(self):
+        """Review of 7e1a9fa, item 3: the link written with a zero-width space, a soft hyphen or
+        fullwidth letters, or split by an empty HTML tag, was kept in her copy byte for byte."""
+        self.answer("fyi")
+        self.go(fresh=True, model_source="live")
+        wide = "".join(chr(ord(c) + 0xFEE0) if c.isalnum() else c for c in "live-loop-room")
+        html_part = b"Content-Type: text/plain"
+        mails = {
+            5: priya_mail(5, ("Notes. Join: https://meet.example/live-​loop-room\r\n").encode("utf-8"), cte="8bit"),
+            6: priya_mail(6, b"Notes. Join: https://meet.example/live-lo=C2=ADop-room\r\n", cte="quoted-printable"),
+            7: priya_mail(7, base64.b64encode(("Notes. Join: meet.example/%s\r\n" % wide).encode("utf-8")) + b"\r\n",
+                          cte="base64"),
+            8: priya_mail(8, b"<p>Notes. Join: https://meet.example/live-<b></b>loop-room</p>\r\n").replace(
+                html_part, b"Content-Type: text/html"),
+            9: priya_mail(9, ("Notes. Another room: https://meet.example/other-​room\r\n").encode("utf-8"),
+                          cte="8bit"),
+        }
+        for raw in mails.values():
+            self.inbox.add(raw, u(2026, 12, 1, 16, 2))
+        self.clock = u(2026, 12, 1, 16, 10)
+        s = self.go(model_source="live")
+        self.assertTrue(s.verify_ok)
+        seen = self.observed(s)
+        for n in (5, 6, 7, 8):
+            with self.subTest(mail=n):
+                withheld = seen["live-link-%d@northwind.example" % n]
+                self.assertNotIn("message_copy", withheld)
+                self.assertEqual(withheld["copy_withheld"], "meeting_link")
+        other = seen["live-link-9@northwind.example"]
+        with open(os.path.join(s.run_dir, other["message_copy"]), "rb") as fh:
+            self.assertEqual(fh.read(), mails[9])                            # another room: kept byte for byte
+        copies = os.path.join(s.run_dir, "messages")
+        self.assertEqual(os.listdir(copies), [hashlib.sha256(mails[9]).hexdigest()[:loop.COPY_NAME_HEX] + ".eml"])
 
 
 def sent_lookups(summary):
@@ -520,7 +601,7 @@ class SentLookTest(LiveFixture):
     def setUp(self):
         super().setUp()
         self.waits, self.held, self.file_late = [], [], False
-        self.smtp.on_deliver = lambda sender, rcpts, message: self.held.append(message)
+        self.jmap.on_deliver = lambda sender, rcpts, message: self.held.append(message)
         patch = mock.patch.object(loop, "_sleep", self.wait)
         patch.start()
         self.addCleanup(patch.stop)
@@ -548,12 +629,12 @@ class SentLookTest(LiveFixture):
         # the T1 and then the hold notice (S1) it leads to: each looked for twice, a wait between
         self.assertEqual(self.waits, [caps.SENT_LOOK_WAIT_S] * 2)
         self.assertEqual(sent_lookups(s), [(None, False), (caps.SENT_LOOK_WAIT_S, False)] * 2)
-        self.assertEqual(send_states(self.state), ["handed_over", "handed_over"])     # decision 76: SMTP took both
+        self.assertEqual(send_states(self.state), ["handed_over", "handed_over"])     # decision 76: the server took both
         (held,) = [l["payload"] for l in receipts.read_lines(s.receipts_path) if l["kind"] == "held"]
         self.assertEqual(held["outcome"], "hold:send_unconfirmed")
 
     def test_a_copy_found_at_once_needs_no_wait(self):
-        self.smtp.on_deliver = lambda sender, rcpts, message: self.sent.add(message, self.clock)
+        self.jmap.on_deliver = lambda sender, rcpts, message: self.sent.add(message, self.clock)
         s = self.started_fresh_then_asked()
         self.assertEqual(self.waits, [])
         self.assertEqual(sent_lookups(s), [(None, True)])
@@ -567,7 +648,7 @@ class ReadBackTest(LiveFixture):
         real_put = self.dav.put
         self.dav.put = lambda name, data: real_put(name, change(data))
         s = self.started_fresh_then_asked()
-        self.assertEqual([rcpts for _, rcpts, _ in self.smtp.delivered if rcpts[0] == PROSPECT], [])
+        self.assertEqual([rcpts for _, rcpts, _ in self.jmap.delivered if rcpts[0] == PROSPECT], [])
         lines = receipts.read_lines(s.receipts_path)
         (got,) = [l["payload"] for l in lines if l["kind"] == "result" and "fields_match" in l["payload"]]
         self.assertFalse(got["fields_match"])
@@ -595,21 +676,21 @@ class Crash(BaseException):
 
 
 class HandedOverTest(LiveFixture):
-    """Decision 76: SMTP's 250 is written down as handed_over before the Sent look, and nothing in
-    that state is ever sent again, whatever the Sent look or a restart finds. Here, as Fastmail may,
-    the server never files her SMTP mail in Sent."""
+    """Decision 76: the server taking it (a JMAP submission created) is written down as handed_over
+    before the Sent look, and nothing in that state is ever sent again, whatever the Sent look or a
+    restart finds. Here, as Fastmail may, the server never files her mail in Sent."""
 
     def setUp(self):
         super().setUp()
-        self.smtp.on_deliver = None
+        self.jmap.on_deliver = None
         patch = mock.patch.object(loop, "_sleep", lambda seconds: None)
         patch.start()
         self.addCleanup(patch.stop)
 
     def to(self, address):
-        return [data for _, rcpts, data in self.smtp.delivered if rcpts[0] == address]
+        return [data for _, rcpts, data in self.jmap.delivered if rcpts[0] == address]
 
-    def test_a_restart_right_after_the_250_never_sends_the_reply_again(self):
+    def test_a_restart_right_after_the_handover_never_sends_the_reply_again(self):
         self.go(fresh=True)
         self.inbox.add(request(1), u(2026, 12, 1, 16, 2))
         self.clock = u(2026, 12, 1, 16, 10)
@@ -619,7 +700,7 @@ class HandedOverTest(LiveFixture):
         def killed_at_the_first_look(mail, message_id):
             if not fired:
                 fired.append(message_id)
-                raise Crash("killed right after the 250, before the Sent look")
+                raise Crash("killed right after the handover, before the Sent look")
             return real(mail, message_id)
 
         with mock.patch.object(live.LiveMail, "find_in_sent", killed_at_the_first_look):
@@ -648,7 +729,7 @@ def held_outcomes(summary):
 
 class SendingTest(LiveFixture):
     """Review 2, finding 1: a send is marked sending in the ledger right before the transport is
-    called, so a kill between SMTP's 250 and its handed_over record can no longer leave it pending
+    called, so a kill between the server taking it and its handed_over record can no longer leave it pending
     and send it twice. Cut off there, it may have gone: the next run looks for it in Sent twice (the
     wait between, live); found, it is done; not found, it is never sent again and the message is held
     for the owner. The transport's answer is read the same for any transport: MailError means it
@@ -662,10 +743,10 @@ class SendingTest(LiveFixture):
         self.addCleanup(patch.stop)
 
     def to(self, address):
-        return [data for _, rcpts, data in self.smtp.delivered if rcpts[0] == address]
+        return [data for _, rcpts, data in self.jmap.delivered if rcpts[0] == address]
 
-    def killed_after_the_250(self):
-        """Her 4:10 cycle dies right after SMTP's 250 for T1, before handed_over is written down;
+    def killed_after_the_handover(self):
+        """Her 4:10 cycle dies right after the server took T1, before handed_over is written down;
         the next run at 4:20."""
         self.go(fresh=True)
         self.inbox.add(request(1), u(2026, 12, 1, 16, 2))
@@ -674,7 +755,7 @@ class SendingTest(LiveFixture):
 
         def dies_before_the_record(db, message_id, state):
             if state == "handed_over":
-                raise Crash("killed after the 250, before it was written down")
+                raise Crash("killed after the handover, before it was written down")
             return real(db, message_id, state)
 
         with mock.patch.object(ledger_mod.Ledger, "set_send_state", dies_before_the_record):
@@ -686,9 +767,9 @@ class SendingTest(LiveFixture):
         self.clock = u(2026, 12, 1, 16, 20)
         return self.go()
 
-    def test_cut_off_after_the_250_with_no_copy_in_sent_it_is_never_sent_again_and_held(self):
-        self.smtp.on_deliver = None                                     # as Fastmail may: nothing filed in Sent
-        s = self.killed_after_the_250()
+    def test_cut_off_after_the_handover_with_no_copy_in_sent_it_is_never_sent_again_and_held(self):
+        self.jmap.on_deliver = None                                     # as Fastmail may: nothing filed in Sent
+        s = self.killed_after_the_handover()
         self.assertEqual(len(self.to(PROSPECT)), 1)                     # one T1, never a second
         lookups = sent_lookups(s)
         self.assertEqual(lookups[:2], [(None, False), (caps.SENT_LOOK_WAIT_S, False)])   # reconcile: two looks
@@ -704,16 +785,16 @@ class SendingTest(LiveFixture):
         self.assertEqual(sent_lookups(again), [(None, False)])          # unknown: one look, no wait, nothing sent
         self.assertTrue(again.verify_ok)
 
-    def test_cut_off_after_the_250_her_copy_in_sent_settles_it_at_the_restart(self):
-        s = self.killed_after_the_250()
+    def test_cut_off_after_the_handover_her_copy_in_sent_settles_it_at_the_restart(self):
+        s = self.killed_after_the_handover()
         self.assertEqual(len(self.to(PROSPECT)), 1)
         self.assertEqual(sent_lookups(s)[0], (None, True))
         self.assertEqual(send_states(self.state), ["confirmed"])
         self.assertEqual((s.handled, s.held, len(self.to(OWNER))), (1, 0, 0))
 
-    def test_cut_off_after_the_250_a_copy_filed_during_the_wait_is_found_on_the_second_look(self):
+    def test_cut_off_after_the_handover_a_copy_filed_during_the_wait_is_found_on_the_second_look(self):
         delivered = []
-        self.smtp.on_deliver = lambda sender, rcpts, message: delivered.append(message)
+        self.jmap.on_deliver = lambda sender, rcpts, message: delivered.append(message)
 
         def files_late(seconds):
             self.waits.append(seconds)
@@ -722,7 +803,7 @@ class SendingTest(LiveFixture):
             del delivered[:]
 
         with mock.patch.object(loop, "_sleep", files_late):
-            s = self.killed_after_the_250()
+            s = self.killed_after_the_handover()
         self.assertEqual(sent_lookups(s)[:2], [(None, False), (caps.SENT_LOOK_WAIT_S, True)])
         self.assertEqual(send_states(self.state), ["confirmed"])
         self.assertEqual((len(self.to(PROSPECT)), held_outcomes(s)), (1, []))
@@ -732,7 +813,7 @@ class SendingTest(LiveFixture):
 
         def refuses_t1(mail, raw, envelope, message_id, template=None):
             if template == "T1":
-                raise MailError("554 refused")
+                raise MailError("jmap send: 400")
             return real(mail, raw, envelope, message_id, template=template)
 
         with mock.patch.object(live.LiveMail, "send", refuses_t1):
@@ -746,21 +827,21 @@ class SendingTest(LiveFixture):
         self.assertEqual(held_outcomes(s), ["hold:send_unconfirmed"])
 
     def test_a_send_that_may_have_gone_is_unknown_before_any_look_and_never_sent_again(self):
-        self.smtp.on_deliver = None
+        self.jmap.on_deliver = None
         real = live.LiveMail.send
         states_at_look = []
         real_look = live.LiveMail.find_in_sent
 
-        def times_out_after_data(mail, raw, envelope, message_id, template=None):
+        def times_out_after_the_submission(mail, raw, envelope, message_id, template=None):
             real(mail, raw, envelope, message_id, template=template)
             if template == "T1":
-                raise SendUnknown("timed out after DATA")
+                raise SendUnknown("jmap send: timeout")
 
         def look(mail, message_id):
             states_at_look.append(send_states(self.state)[0])
             return real_look(mail, message_id)
 
-        with mock.patch.object(live.LiveMail, "send", times_out_after_data), \
+        with mock.patch.object(live.LiveMail, "send", times_out_after_the_submission), \
                 mock.patch.object(live.LiveMail, "find_in_sent", look):
             s = self.started_fresh_then_asked()
         self.assertEqual(states_at_look[0], "unknown")
@@ -769,6 +850,346 @@ class SendingTest(LiveFixture):
         self.clock = u(2026, 12, 1, 16, 20)
         self.go()
         self.assertEqual(len(self.to(PROSPECT)), 1)
+
+
+class HaltBeforeTheCallTest(LiveFixture):
+    """A halt that lands after a send is recorded pending and before the transport is called: G1
+    passed a moment before, but she reads the halt again right before the JMAP call, so nothing
+    goes, the send stays pending, no send line is left without its answer, and the run after
+    `resume` sends it once."""
+
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.object(loop, "_sleep", lambda seconds: None)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def halted_after_recording(self, template):
+        """Her 4:10 cycle: a stop is asked for right after the send of `template` is recorded pending."""
+        self.go(fresh=True)
+        self.inbox.add(request(1), u(2026, 12, 1, 16, 2))
+        self.clock = u(2026, 12, 1, 16, 10)
+        real = ledger_mod.Ledger.record_send
+
+        def recorded_then_stopped(db, message_id, kind, template_, *args, **kw):
+            out = real(db, message_id, kind, template_, *args, **kw)
+            if template_ == template:
+                supervisor.request_stop("live", "cli", state_dir=self.state)
+            return out
+
+        with mock.patch.object(ledger_mod.Ledger, "record_send", recorded_then_stopped):
+            return self.go()
+
+    def test_a_halt_between_pending_and_the_call_sends_nothing_and_the_restart_sends_once(self):
+        s = self.halted_after_recording("T1")
+        self.assertEqual(s.halted, "cli")
+        self.assertEqual(self.jmap.requests, [])                  # not even a session: the call never began
+        self.assertEqual(send_states(self.state), ["pending"])
+        lines = receipts.read_lines(s.receipts_path)
+        self.assertEqual([l for l in lines if l["kind"] == "called" and l["payload"]["call"] == "send"], [])
+        (halted,) = [l["payload"] for l in lines if l["kind"] == "halted"]
+        self.assertEqual((halted["cause"], halted["in_flight"]), ("cli", "none"))
+        self.assertTrue(s.verify_ok)
+        self.assertTrue(supervisor.resume("live", state_dir=self.state).ok)
+        self.clock = u(2026, 12, 1, 16, 20)
+        again = self.go()
+        self.assertEqual([rcpts for _, rcpts, _ in self.jmap.delivered], [[PROSPECT, OWNER]])   # once
+        self.assertEqual(send_states(self.state), ["confirmed"])
+        self.assertEqual((again.handled, again.held, again.sends), (1, 0, 1))
+        self.assertTrue(again.verify_ok)
+
+
+def send_results(summary):
+    """The state each send's result line names, in order."""
+    lines = receipts.read_lines(summary.receipts_path)
+    sends = set(l["seq"] for l in lines if l["kind"] == "called" and l["payload"]["call"] == "send")
+    return [l["payload"]["state"] for l in lines if l["kind"] == "result" and l["payload"]["call_seq"] in sends]
+
+
+class WolfNeverReadTest(LiveFixture):
+    """A whole live run with the smoke's wolf.whizz settings in her env file: every name her loop
+    asks the env for is one she reads (live.ENV_NAMES, loop.ENV_NAMES); the wolf token is in none of
+    her objects' reach and in nothing she writes."""
+
+    def test_a_live_run_asks_the_env_for_her_names_alone(self):
+        wolf_token = SmokeOnlySettingsTest.WOLF_TOKEN
+        self.env_path = self.write_env(WOLF_EMAIL="wolf.whizz@fastmail.com", WOLF_JMAP_TOKEN=wolf_token)
+        asked = []
+
+        class Spy(dict):
+            def __getitem__(self, name):
+                asked.append(name)
+                return dict.__getitem__(self, name)
+
+            def get(self, name, default=None):
+                asked.append(name)
+                return dict.get(self, name, default)
+
+            def __contains__(self, name):
+                asked.append(name)
+                return dict.__contains__(self, name)
+
+            def __iter__(self):
+                asked.append("(every name)")
+                return dict.__iter__(self)
+
+            def keys(self):
+                asked.append("(every name)")
+                return dict.keys(self)
+
+            def items(self):
+                asked.append("(every name)")
+                return dict.items(self)
+
+            def values(self):
+                asked.append("(every name)")
+                return dict.values(self)
+
+        real_load = envfile.load
+        with mock.patch.object(envfile, "load", lambda *a, **kw: Spy(real_load(*a, **kw))):
+            s = self.started_fresh_then_asked(model_source="live")
+        self.assertEqual((s.handled, s.sends), (1, 1))
+        self.assertLessEqual(set(asked), set(live.ENV_NAMES) | set(loop.ENV_NAMES))
+        for folder, _, names in os.walk(self.dir):
+            for name in names:
+                if name != "test.env":
+                    with open(os.path.join(folder, name), "rb") as fh:
+                        self.assertNotIn(wolf_token.encode("ascii"), fh.read(), name)
+
+
+WOLF = "wolf.whizz@fastmail.com"
+SMOKE_MID = "<smoke-0123456789abcdef@fastmail.com>"
+
+
+def wolf_request(mid=SMOKE_MID):
+    """The smoke's test request: from the wolf.whizz account to the owner, a call with no exact time."""
+    return ("From: Wolf Whizz <%s>\r\nTo: %s\r\nSubject: Smoke test: a call next week?\r\n"
+            "Date: Tue, 01 Dec 2026 08:01:00 -0800\r\nMessage-ID: %s\r\nMIME-Version: 1.0\r\n"
+            "Content-Type: text/plain; charset=\"utf-8\"\r\n\r\nHi Shane, could we find 30 minutes next week "
+            "to talk about the inbox agent? Any afternoon works for me.\r\n\r\nWolf\r\n" % (WOLF, OWNER, mid)
+            ).encode("ascii")
+
+
+class SmokeRunTest(LiveFixture):
+    """The smoke's own run of her loop (smoke_message_id, live_dir, calendar_read_only): live mode on
+    a throwaway ledger of its own, handed only the smoke's marked request; the live folder's halt,
+    STOP and smoke record are the ones it obeys; and nothing it does reaches the owner's calendar."""
+
+    def setUp(self):
+        super().setUp()
+        self.smoke_state = os.path.join(self.state, "smoke", "s1")
+        ledger_mod.start_fresh(os.path.join(self.smoke_state, "ledger.sqlite"), u(2026, 12, 1, 15, 0))
+        self.inbox.add(request(1), u(2026, 12, 1, 16, 1))                        # Priya's: never the smoke's
+        uid = self.inbox.add(wolf_request(), u(2026, 12, 1, 16, 2))
+        self.inbox.messages[uid]["flags"].add(live.SMOKE_TEST_KEYWORD)
+        self.clock = u(2026, 12, 1, 16, 10)
+        self.with_a_time = False
+        patch = mock.patch.object(loop, "_sleep", lambda seconds: None)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def post(self, url, headers, body, timeout):
+        """The model reads no exact time in the smoke's request (unless with_a_time: then she would book)."""
+        self.posts.append((url, dict(headers), json.loads(body.decode("utf-8"))))
+        answer = model_answer()
+        if not self.with_a_time:
+            fields = json.loads(answer["content"][0]["text"])
+            fields.update(date=None, time24=None, zone=None)
+            answer["content"][0]["text"] = json.dumps(fields)
+        return 200, json.dumps(answer).encode("utf-8")
+
+    def smoke_run(self, **kw):
+        fields = dict(state_dir=self.smoke_state, model_source="live", cycles=1, smoke_message_id=SMOKE_MID,
+                      live_dir=self.state, calendar_read_only=True, retry_wait_s=0.0)
+        fields.update(kw)
+        return self.go(**fields)
+
+    def test_it_reads_the_smokes_request_alone_and_answers_it_with_an_offer(self):
+        s = self.smoke_run()
+        self.assertEqual((s.handled, s.held, s.sends, s.model_calls), (1, 0, 1, 1))
+        self.assertTrue(s.verify_ok)
+        lines = receipts.read_lines(s.receipts_path)
+        observed = [l for l in lines if l["kind"] == "observed" and l["payload"].get("step") != "start"]
+        self.assertEqual(len(observed), 1)
+        with open(s.receipts_path, encoding="utf-8") as fh:
+            self.assertNotIn("live-1@northwind.example", fh.read())               # Priya's never read
+        (sent,) = self.jmap.delivered
+        self.assertEqual(sent[1], [WOLF, OWNER])
+        self.assertEqual(email.message_from_bytes(sent[2])["In-Reply-To"], SMOKE_MID)
+        self.assertEqual([r[0] for r in self.dav.requests if r[0] in ("PUT", "DELETE")], [])
+        with ledger_mod.Ledger(os.path.join(self.smoke_state, "ledger.sqlite"), create=False) as db:
+            self.assertEqual([row[0] for row in db._all("SELECT state FROM sends")], ["confirmed"])
+        self.assertFalse(os.path.exists(os.path.join(self.state, "ledger.sqlite")))   # the live ledger untouched
+
+    def test_a_booking_it_would_make_never_reaches_the_owners_calendar(self):
+        self.inbox.messages.clear()                           # a request with an exact time: she would book
+        uid = self.inbox.add(request(1).replace(b"<live-1@northwind.example>", SMOKE_MID.encode("ascii")),
+                             u(2026, 12, 1, 16, 2))
+        self.inbox.messages[uid]["flags"].add(live.SMOKE_TEST_KEYWORD)
+        self.with_a_time = True
+        s = self.smoke_run()
+        self.assertEqual([r[0] for r in self.dav.requests if r[0] in ("PUT", "DELETE")], [])
+        self.assertEqual(held_outcomes(s), ["hold:calendar_down"])
+        self.assertEqual([rcpts for _, rcpts, _ in self.jmap.delivered], [[OWNER]])   # the owner told, no reply
+
+    def test_the_live_folders_halt_stop_and_smoke_record_are_the_ones_it_obeys(self):
+        supervisor.request_stop("live", "cli", state_dir=self.state)
+        with self.assertRaises(loop.Refused) as cm:
+            self.smoke_run()
+        self.assertEqual(cm.exception.exit_code, supervisor.WORKER_EXIT_HALTED)
+        os.remove(supervisor.halt_file("live", self.state))
+        with open(os.path.join(self.state, "STOP"), "w") as fh:
+            fh.write("")
+        with self.assertRaises(loop.Refused):
+            self.smoke_run()
+        os.remove(os.path.join(self.state, "STOP"))
+        self.prove_smoke(None)
+        with self.assertRaises(loop.Refused) as cm:
+            self.smoke_run()
+        self.assertEqual(str(cm.exception), loop.SMOKE_REFUSAL)
+        self.nothing_contacted()
+
+    def test_a_halt_in_the_live_folder_mid_run_stops_it_before_the_send(self):
+        real = ledger_mod.Ledger.record_send
+
+        def recorded_then_stopped(db, *args, **kw):
+            out = real(db, *args, **kw)
+            supervisor.request_stop("live", "cli", state_dir=self.state)
+            return out
+
+        with mock.patch.object(ledger_mod.Ledger, "record_send", recorded_then_stopped):
+            s = self.smoke_run()
+        self.assertEqual((s.halted, self.jmap.delivered), ("cli", []))
+
+    def test_its_settings_are_for_a_live_run_and_its_message_needs_the_live_folder(self):
+        for extra in ({"live_dir": None}, {"smoke_message_id": "not-a-message-id"}):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                self.smoke_run(**extra)
+        for extra in ({"smoke_message_id": SMOKE_MID}, {"live_dir": self.state}, {"calendar_read_only": True}):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                loop.run(loop.RunConfig(mode="sandbox", run_name="model-stub-sandbox-x", state_dir=self.dir,
+                                        sandbox_root=self.dir, owner_addr=OWNER, doris_addr=DORIS, **extra))
+
+
+class JmapAnswerTest(LiveFixture):
+    """The send states over the fake JMAP server's own answers, nothing in LiveMail patched: a
+    submission created is handed_over, written down before the Sent look; one turned away (a 4xx,
+    or not created) surely did not go and is pending again; no answer in time, a lost connection, a
+    5xx or an answer it cannot read once the submission request went is unknown, written down
+    before any look, and never sent again, whatever a restart finds. A fault is staged on her
+    first submission (T1) only; the hold notice after it goes as normal."""
+
+    def setUp(self):
+        super().setUp()
+        self.waits, self.at_look = [], []
+        real_look = live.LiveMail.find_in_sent
+
+        def look(mail, message_id):
+            self.at_look.append(send_states(self.state)[0])
+            return real_look(mail, message_id)
+
+        for patch in (mock.patch.object(loop, "_sleep", self.waits.append),
+                      mock.patch.object(live.LiveMail, "find_in_sent", look)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def to(self, address):
+        return [data for _, rcpts, data in self.jmap.delivered if rcpts[0] == address]
+
+    def first_send(self, **faults):
+        """faults (fault=, status=, not_created=) on the first submission request only."""
+        sends = []
+
+        def staged(kind):
+            if kind != "send":
+                return
+            sends.append(kind)
+            self.jmap.fault.pop("send", None)
+            self.jmap.status.pop("send", None)
+            self.jmap.not_created.clear()
+            if len(sends) == 1:
+                if "fault" in faults:
+                    self.jmap.fault["send"] = faults["fault"]
+                if "status" in faults:
+                    self.jmap.status["send"] = faults["status"]
+                if "not_created" in faults:
+                    self.jmap.not_created["EmailSubmission/set"] = faults["not_created"]
+        self.jmap.on_request = staged
+
+    def restart(self):
+        """The next run, ten minutes on: it must send nothing more."""
+        before = len(self.jmap.delivered)
+        self.clock += dt.timedelta(minutes=10)
+        again = self.go()
+        self.assertEqual(len(self.jmap.delivered), before)
+        self.assertTrue(again.verify_ok)
+        return again
+
+    def test_a_submission_created_is_handed_over_before_the_look_then_confirmed(self):
+        s = self.started_fresh_then_asked()
+        self.assertEqual(send_results(s), ["handed_over"])
+        self.assertEqual(self.at_look[0], "handed_over")
+        self.assertEqual(send_states(self.state), ["confirmed"])
+        self.assertEqual((len(self.to(PROSPECT)), s.handled, s.held), (1, 1, 0))
+        self.restart()
+
+    def refused_once(self, **fault):
+        self.first_send(**fault)
+        s = self.started_fresh_then_asked()
+        self.assertEqual(self.to(PROSPECT), [])
+        self.assertEqual(send_results(s), ["refused", "handed_over"])        # T1, then its hold notice
+        self.assertEqual(send_states(self.state), ["pending", "confirmed"])
+        self.assertEqual(held_outcomes(s), ["hold:send_unconfirmed"])
+        self.assertEqual(len(self.to(OWNER)), 1)
+        self.restart()
+        self.assertEqual(send_states(self.state), ["pending", "confirmed"])
+
+    def test_a_submission_the_server_turned_away_surely_did_not_go_and_is_pending_again(self):
+        self.refused_once(status=400)
+
+    def test_a_submission_not_created_surely_did_not_go_and_is_pending_again(self):
+        self.refused_once(not_created="forbiddenToSend")
+
+    def unknown_once(self, filed, **fault):
+        """T1 goes, then no clear answer: unknown before any look. Her copy filed in Sent settles it;
+        not filed, it is held and never sent again."""
+        if not filed:
+            self.jmap.on_deliver = lambda sender, rcpts, message: (None if rcpts[0] == PROSPECT
+                                                                   else self.sent.add(message, self.clock))
+        self.first_send(**fault)
+        s = self.started_fresh_then_asked()
+        self.assertEqual(send_results(s)[0], "unknown")
+        self.assertEqual(self.at_look[0], "unknown")
+        self.assertEqual(len(self.to(PROSPECT)), 1)
+        if filed:
+            self.assertEqual(send_states(self.state), ["confirmed"])
+            self.assertEqual((s.handled, s.held, len(self.to(OWNER))), (1, 0, 0))
+        else:
+            self.assertEqual(send_states(self.state), ["unknown", "confirmed"])
+            self.assertEqual(held_outcomes(s), ["hold:send_unconfirmed"])
+            self.assertEqual(self.waits, [caps.SENT_LOOK_WAIT_S])           # two looks for T1, the wait between
+        self.restart()
+        self.assertEqual(len(self.to(PROSPECT)), 1)
+
+    def test_no_answer_in_time_after_the_submission_is_unknown_and_never_sent_again(self):
+        self.jmap.hang_s = 1.0
+        short = mock.patch.object(jmap, "_https", lambda host, port, timeout: http.client.HTTPConnection(
+            "127.0.0.1", self.jmap.port, timeout=0.3))
+        short.start()
+        self.addCleanup(short.stop)
+        self.unknown_once(False, fault="hang")
+
+    def test_an_answer_it_cannot_read_after_the_submission_is_unknown_and_never_sent_again(self):
+        self.unknown_once(False, fault="garbage")
+
+    def test_a_server_error_after_the_submission_is_unknown_and_never_sent_again(self):
+        self.unknown_once(False, fault=502)
+
+    def test_a_connection_lost_after_the_submission_is_unknown_and_never_sent_again(self):
+        self.unknown_once(False, fault="drop")
+
+    def test_an_unknown_send_whose_copy_is_in_sent_is_confirmed_by_the_look(self):
+        self.unknown_once(True, fault="garbage")
 
 
 class Steps(object):
@@ -825,13 +1246,13 @@ class KillAtEveryStepTest(LiveFixture):
     def setUp(self):
         super().setUp()
         if not self.FILE_SENT:
-            self.smtp.on_deliver = None
+            self.jmap.on_deliver = None
         patch = mock.patch.object(loop, "_sleep", lambda seconds: None)
         patch.start()
         self.addCleanup(patch.stop)
 
     def to(self, address):
-        return [data for _, rcpts, data in self.smtp.delivered if rcpts[0] == address]
+        return [data for _, rcpts, data in self.jmap.delivered if rcpts[0] == address]
 
     def fresh_world(self):
         """A live ledger started fresh at 4:00 PM (the first one's copy, after the first), nothing in
@@ -840,7 +1261,7 @@ class KillAtEveryStepTest(LiveFixture):
         shutil.rmtree(state, True)
         for box in (self.inbox, self.sent):
             box.messages.clear()
-        del self.smtp.delivered[:]
+        del self.jmap.delivered[:]
         del self.dav.requests[:]
         self.dav.resources.clear()
         if os.path.isdir(fresh):
@@ -899,7 +1320,7 @@ class DigestKillTest(LiveFixture):
     def setUp(self):
         super().setUp()
         if not self.FILE_SENT:
-            self.smtp.on_deliver = None
+            self.jmap.on_deliver = None
         patch = mock.patch.object(loop, "_sleep", lambda seconds: None)
         patch.start()
         self.addCleanup(patch.stop)
@@ -911,7 +1332,7 @@ class DigestKillTest(LiveFixture):
             k += 1
             shutil.rmtree(state, True)
             self.sent.messages.clear()
-            del self.smtp.delivered[:]
+            del self.jmap.delivered[:]
             if os.path.isdir(fresh):
                 shutil.copytree(fresh, state)
             else:
@@ -931,7 +1352,7 @@ class DigestKillTest(LiveFixture):
             for minute in (20, 30):
                 self.clock = u(2026, 12, 2, 1, minute)
                 after.append(self.go(digest=True))
-            digests = len(self.smtp.delivered)
+            digests = len(self.jmap.delivered)
             with self.subTest(k=k, where=steps.where):
                 self.assertLessEqual(digests, 1)
                 self.assertTrue(all(s.verify_ok for s in after))
@@ -1026,7 +1447,7 @@ class LongRunTest(LiveFixture):
         self.inbox.add(request(1), u(2026, 12, 1, 16, 2))
         self.clock = u(2026, 12, 1, 16, 10)
         calls = self.fetches_failing({1})
-        fake = FakeTime(1000.0, lambda: self.smtp.delivered and supervisor.request_stop("live", "cli",
+        fake = FakeTime(1000.0, lambda: self.jmap.delivered and supervisor.request_stop("live", "cli",
                                                                                          state_dir=self.state))
         self.use(fake)
         s = self.go(cycles=None, cycle_s=600.0)
@@ -1098,7 +1519,7 @@ class LongRunTest(LiveFixture):
 
     def owner_mail(self):
         return [email.message_from_bytes(data, policy=email.policy.default)
-                for _, rcpts, data in self.smtp.delivered if rcpts == [OWNER]]
+                for _, rcpts, data in self.jmap.delivered if rcpts == [OWNER]]
 
     def test_the_days_digest_goes_at_her_first_cycle_from_five_pacific_on_the_wall_clock(self):
         from doris import supervisor
@@ -1179,6 +1600,12 @@ class RunCommandTest(LiveFixture):
         def no_key():
             return ["--env", self.write_env(ANTHROPIC_API_KEY=None), "--fresh"]
 
+        def no_token():
+            return ["--env", self.write_env(DORIS_JMAP_TOKEN=None), "--fresh"]
+
+        def bad_token():
+            return ["--env", self.write_env(DORIS_JMAP_TOKEN="dummy-" + "\u00e9" * 40), "--fresh"]
+
         def no_proof():
             self.prove_smoke(None)
             return ["--env", self.write_env(), "--fresh"]
@@ -1199,6 +1626,7 @@ class RunCommandTest(LiveFixture):
             return ["--env", self.write_env(), "--fresh"]
 
         cases = ((no_env, "absent.env"), (no_owner, "DORIS_OWNER_ADDRESS"), (no_key, "ANTHROPIC_API_KEY"),
+                 (no_token, "DORIS_JMAP_TOKEN"), (bad_token, "DORIS_JMAP_TOKEN"),
                  (no_proof, loop.SMOKE_REFUSAL),
                  (loose_proof, "Not started: the smoke check's record (smoke-sent.json) is not as the smoke writes "
                                "it: its keys are not exactly look, sent_copy_found, ts, waited_s. " + loop.SMOKE_FIRST),
@@ -1238,7 +1666,7 @@ class RunCommandTest(LiveFixture):
         code, out = self.cli("run", "--live", "--fresh", "--env", self.env_path)
         self.assertEqual(code, 0, out)
         self.assertEqual(len(self.started), 1)
-        self.smtp.on_deliver = lambda sender, rcpts, message: None          # no copy reaches Sent now
+        self.jmap.on_deliver = lambda sender, rcpts, message: None          # no copy reaches Sent now
         code, out = self.cli("smoke", "--env", self.env_path, "--send-to", "whizz@fastmail.com")
         self.assertEqual(code, 1, out)
         code, out = self.cli("run", "--live", "--fresh", "--env", self.env_path)
@@ -1311,7 +1739,7 @@ class RunCommandTest(LiveFixture):
             if not arrived:
                 arrived.append(self.inbox.add(request(1), u(2026, 12, 1, 16, 2)))
                 self.clock = u(2026, 12, 1, 16, 10)
-            elif self.smtp.delivered and not stopped:
+            elif self.jmap.delivered and not stopped:
                 stopped.append(supervisor.request_stop("live", "cli"))
 
         fake = FakeTime(1199.0, tick)
@@ -1321,7 +1749,7 @@ class RunCommandTest(LiveFixture):
         code, out = self.cli(cli.WORKER, started["argv"][4])
         self.assertEqual(code, supervisor.WORKER_EXIT_HALTED, out)
         self.assertEqual(len(stopped), 1)
-        self.assertEqual([rcpts[0] for _, rcpts, _ in self.smtp.delivered], [PROSPECT])
+        self.assertEqual([rcpts[0] for _, rcpts, _ in self.jmap.delivered], [PROSPECT])
         (url, headers, body), = self.posts
         self.assertEqual((headers["x-api-key"], body["model"]), (API_KEY, model_mod.DEFAULT_MODEL))
         self.assertEqual(self.ledger_start(), u(2026, 12, 1, 16, 0))
@@ -1332,6 +1760,186 @@ class RunCommandTest(LiveFixture):
         self.assertGreaterEqual(len(fetches), 2)
         self.assertTrue(receipts.verify(started["receipts"]).ok)     # the parent writes the halted line
         self.assert_no_value(out)
+
+
+
+COMMIT = "89abcdef" * 5
+
+
+class LiveTraceTest(LiveFixture):
+    """`run --live` keeps traces/live-run-<UTC stamp>/ when it ends, pass or fail: her receipts as
+    written, manifest.json, a timeline and terminal.log, every line the command printed (the worker's
+    and the kill switch's included). A start refused before anything was contacted writes none."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = os.path.join(self.dir, "repo")
+        heads = os.path.join(self.repo, ".git", "refs", "heads")
+        os.makedirs(heads)
+        with open(os.path.join(self.repo, ".git", "HEAD"), "w", encoding="ascii") as fh:
+            fh.write("ref: refs/heads/live-integrated\n")
+        with open(os.path.join(heads, "live-integrated"), "w", encoding="ascii") as fh:
+            fh.write(COMMIT + "\n")
+        self.traces = paths.TRACES
+        self.receipts_path, self.before_worker = None, None
+        self.arrived, self.stopped = [], []
+        fake = FakeTime(1199.0, self.tick)
+        for patch in (mock.patch.object(paths, "STATE", os.path.join(self.dir, "state")),
+                      mock.patch.object(paths, "REPO", self.repo),
+                      mock.patch.object(supervisor, "run_supervised", self.supervised),
+                      mock.patch.object(loop, "_time", fake.time), mock.patch.object(loop, "_sleep", fake.sleep)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def tick(self):
+        """Her first wait: Priya writes; the wait after her reply: a stop on the command line."""
+        if not self.arrived:
+            self.arrived.append(self.inbox.add(request(1), u(2026, 12, 1, 16, 2)))
+            self.clock = u(2026, 12, 1, 16, 10)
+        elif self.jmap.delivered and not self.stopped:
+            self.stopped.append(supervisor.request_stop("live", "cli"))
+
+    def supervised(self, mode, run_name, worker_argv, receipts_path, ledger_path, *, say=None, **kw):
+        """The kill switch in this process: the worker runs here; when it stopped for a halt, the
+        halted line is written as the supervisor writes it, and its summary said through `say`."""
+        say = say or supervisor._say
+        self.receipts_path = receipts_path
+        if self.before_worker is not None:
+            self.before_worker()
+        code = cli.main([cli.WORKER, worker_argv[4]])
+        if code != supervisor.WORKER_EXIT_HALTED:
+            return code
+        line = supervisor.record_halt(mode, run_name, supervisor.halt_cause(mode), receipts_path, ledger_path,
+                                      run_id=run_name, worker_exit=code)
+        say(supervisor._summary(line, 12))
+        return supervisor.EXIT_HALTED
+
+    def cli(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cli.main(list(argv))
+        return code, out.getvalue()
+
+    def trace(self):
+        (name,) = os.listdir(self.traces)
+        return os.path.join(self.traces, name)
+
+    def read(self, folder, name):
+        with open(os.path.join(folder, name), "rb") as fh:
+            return fh.read()
+
+    def assert_no_value_in(self, folder, *more):
+        for name in os.listdir(folder):
+            data = self.read(folder, name)
+            for value in (PASSWORD, TOKEN, API_KEY, LINK, SHELL["ANTHROPIC_API_KEY"]) + more:
+                self.assertNotIn(value.encode("utf-8"), data, name)
+
+    def test_a_run_stopped_on_the_command_line_keeps_its_whole_trace_with_outcome_pass(self):
+        code, out = self.cli("run", "--live", "--fresh", "--env", self.env_path)
+        self.assertEqual(code, supervisor.EXIT_HALTED, out)
+        self.assertEqual(len(self.stopped), 1)
+        folder = self.trace()
+        run_name = os.path.basename(os.path.dirname(self.receipts_path))
+        self.assertEqual(os.path.basename(folder), "live-run-" + run_name[len("model-live-live-"):])   # one start
+        self.assertEqual(sorted(os.listdir(folder)), ["manifest.json", "receipts.jsonl", "terminal.log", "timeline.txt"])
+        with open(self.receipts_path, "rb") as fh:
+            self.assertEqual(self.read(folder, "receipts.jsonl"), fh.read())          # as written, the halted line too
+        manifest = json.loads(self.read(folder, "manifest.json").decode("utf-8"))
+        self.assertEqual({k: manifest[k] for k in ("mode", "kind", "commit", "model", "cost_usd", "outcome",
+                                                     "first_failing_step", "run_name", "exit_code")},
+                         {"mode": "live", "kind": "run", "commit": COMMIT, "model": model_mod.DEFAULT_MODEL,
+                          "cost_usd": 0.0024, "outcome": "pass", "first_failing_step": None, "run_name": run_name,
+                          "exit_code": supervisor.EXIT_HALTED})
+        self.assertEqual(manifest["counts"], {"messages": 1, "model_calls": 1, "sends": 1, "errors": 0, "handled": 1,
+                                              "held": 0, "human_approvals": 0})
+        self.assertEqual(manifest["receipt_chain"]["ok"], True)
+        for key in ("started_utc", "ended_utc"):
+            self.assertRegex(manifest[key], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\Z")
+        self.assertLessEqual(manifest["started_utc"], manifest["ended_utc"])
+        timeline = self.read(folder, "timeline.txt").decode("utf-8")
+        for said in ("Live. Every setting from the env file", "run started: mode live, model " + model_mod.DEFAULT_MODEL,
+                     "message read", "gate passed", "send T", "her copy in Sent: found", "halted: cli"):
+            self.assertIn(said, timeline)
+        lines = out.splitlines()
+        self.assertTrue(lines[0].startswith("Live. "), out)
+        self.assertTrue(any("Priya Raman" in line for line in lines), out)          # the worker's line
+        self.assertTrue(any("Nothing in flight." in line for line in lines), out)   # the kill switch's line
+        self.assertEqual(lines[-1], "Live trace kept in %s: outcome pass." % folder)
+        self.assertEqual(self.read(folder, "terminal.log").decode("utf-8"), out)     # every line, as printed
+        self.assert_no_value_in(folder)
+        self.assert_no_value(out)
+
+    def test_a_run_that_ends_on_failed_reads_keeps_its_trace_with_outcome_fail(self):
+        self.imap.password = "dummy-other-pass"                       # every login refused: no read goes
+        code, out = self.cli("run", "--live", "--fresh", "--env", self.env_path)
+        self.assertEqual(code, 1, out)
+        folder = self.trace()
+        manifest = json.loads(self.read(folder, "manifest.json").decode("utf-8"))
+        self.assertEqual(manifest["outcome"], "fail")
+        self.assertRegex(manifest["first_failing_step"], r"^error line at seq \d+ \(fetch\)\Z")
+        self.assertEqual(manifest["counts"]["errors"], caps.MAIL_READ_FAILURES_IN_A_ROW)
+        self.assertEqual(manifest["exit_code"], 1)
+        self.assertIn("Stopped: the inbox could not be read", self.read(folder, "terminal.log").decode("utf-8"))
+        self.assertTrue(out.splitlines()[-1].startswith("Live trace kept in %s: outcome fail (first failing step: "
+                                                        "error line at seq " % folder), out)
+        self.assert_no_value_in(folder, "dummy-other-pass")
+
+    def test_no_planted_value_reaches_the_trace_or_any_file_the_run_writes(self):
+        """The brief's (6) and scope D, for run --live: a made-up value for every name wide's env file
+        holds (wolf's and the two nothing reads included). None reaches any file the run writes (her
+        state and the trace alike), what it printed, or a request's body; the trace's own files, the
+        receipts aside, name no address either."""
+        wolf_token, wolf_password, owner_calendar = (SmokeOnlySettingsTest.WOLF_TOKEN, "dummy-wolf-app-pass-5252",
+                                                     "dummy-owner-calendar-5353")
+        self.env_path = self.write_env(WOLF_EMAIL=WOLF, WOLF_JMAP_TOKEN=wolf_token, WOLF_APP_PASSWORD=wolf_password,
+                                       OWNER_CALENDAR=owner_calendar)
+        code, out = self.cli("run", "--live", "--fresh", "--env", self.env_path)
+        self.assertEqual(code, supervisor.EXIT_HALTED, out)
+        planted = [PASSWORD, TOKEN, API_KEY, LINK, wolf_token, wolf_password, owner_calendar, COLLECTION]
+        planted += [base64.b64encode(v.encode()).decode() for v in (PASSWORD, TOKEN, API_KEY, wolf_token)]
+        planted.append(base64.b64encode(("%s:%s" % (DORIS, PASSWORD)).encode()).decode())
+        found = []
+        for folder, _, names in os.walk(self.dir):
+            for name in names:
+                path = os.path.join(folder, name)
+                if path == self.env_path:
+                    continue
+                data = self.read(folder, name)
+                found += [(os.path.relpath(path, self.dir), v) for v in planted if v.encode() in data]
+                if folder == self.trace() and name != "receipts.jsonl":
+                    found += [(os.path.relpath(path, self.dir), v) for v in (DORIS, OWNER, WOLF) if v.encode() in data]
+        found += [("printed", v) for v in planted + [DORIS, OWNER, WOLF] if v in out]
+        for kind, method, path, headers, body in self.jmap.requests:     # the link only in her reply's own bytes
+            found += [(kind, v) for v in planted if v.encode() in body and not (kind == "upload" and v == LINK)]
+        found += [("model", v) for url, headers, body in self.posts for v in planted if v in json.dumps(body)]
+        self.assertEqual(found, [])
+        self.assertEqual(len(os.listdir(self.trace())), 4)
+        self.assertEqual([kind for kind, method, path, headers, body in self.jmap.requests
+                          if LINK.encode() in body], ["upload"])                  # her confirmation carries it
+
+    def test_a_start_refused_before_anything_was_contacted_writes_no_trace(self):
+        def no_proof():
+            self.prove_smoke(None)
+
+        def halted():
+            supervisor.request_stop("live", "cli")
+
+        def key_gone_before_the_worker():                         # the worker's own checks refuse it
+            self.before_worker = lambda: self.write_env(ANTHROPIC_API_KEY=None)
+
+        for setup, exit_code in ((no_proof, 2), (halted, supervisor.EXIT_REFUSED_HALT),
+                                 (key_gone_before_the_worker, 2)):
+            with self.subTest(case=setup.__name__):
+                setup()
+                code, out = self.cli("run", "--live", "--fresh", "--env", self.env_path)
+                self.assertEqual(code, exit_code, out)
+                self.assertFalse(os.path.exists(self.traces), out)
+                self.assertNotIn("Live trace", out)
+                supervisor.resume("live")
+                self.prove_smoke(self.smoke_record())
+                self.before_worker = None
+                self.env_path = self.write_env()
+        self.nothing_contacted()
 
 
 if __name__ == "__main__":

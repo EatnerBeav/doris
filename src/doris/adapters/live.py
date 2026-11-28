@@ -1,15 +1,21 @@
-"""The live adapters: IMAP and SMTP for her own mailbox, CalDAV for the owner's shared calendar.
+"""The live adapters: IMAP for her own mailbox, her sends over JMAP, CalDAV for the owner's calendar.
 
-Doris holds one key: an app password for her own Fastmail account (doris.htm@fastmail.com).
-Mail runs under that login; so does CalDAV, against the URL of the owner's calendar as it is
-shared to her account. She never holds a key to the owner's account.
+The law: live mail is sent via Fastmail JMAP over HTTPS (DigitalOcean blocks SMTP). LiveMail reads
+and files over IMAP and hands each send to adapters/jmap.py's JmapSender; there is no SMTP here.
+
+Doris holds two keys, both for her own Fastmail account (doris.htm@fastmail.com) only: an app
+password for IMAP and CalDAV (against the URL of the owner's calendar as it is shared to her
+account), and an API token for JMAP (DORIS_JMAP_TOKEN: scopes Email and Email submission). She
+never holds a key to the owner's account.
 
 Every rule of adapters/base.py holds here:
 - A failure raises MailError, SendUnknown, CalendarError, CalendarTimeout or AlreadyExists.
   It is never read as an empty inbox, a free calendar or a sent message.
 - Mail: fetch reads INBOX read-only with BODY.PEEK, statelessly; filing is a keyword on her own
-  copy. There is no delete, expunge, move, copy, append or forward here. A send is one SMTP
-  transaction over TLS, never retried here.
+  copy. There is no delete, expunge, move, copy, append or forward here. A send is one JMAP
+  submission over HTTPS (jmap.JmapSender.send), never retried here. A message carrying her
+  keyword SMOKE_TEST_KEYWORD is the smoke's own test request: fetch never hands it over, and
+  the smoke's own run (smoke_message_id) is handed that one message and nothing else.
 - Calendar: reads times, status and transparency only, never a title; writes create-only;
   deletes only her own event by booking ID.
 - No secret reaches an exception message: errors carry the step, a status code or the
@@ -17,8 +23,8 @@ Every rule of adapters/base.py holds here:
 - Every socket has the timeout given. Every TLS connection verifies the server certificate.
 
 Hosts (Fastmail's own help pages, read Nov 27 2026: "Server names and ports",
-fastmail.help/hc/en-us/articles/1500000278342): IMAP imap.fastmail.com:993 (SSL/TLS), SMTP
-smtp.fastmail.com:465 (SSL/TLS; 587 is STARTTLS, not used here), CalDAV https://caldav.fastmail.com/.
+fastmail.help/hc/en-us/articles/1500000278342): IMAP imap.fastmail.com:993 (SSL/TLS), JMAP
+https://api.fastmail.com/jmap/session (jmap.HOST), CalDAV https://caldav.fastmail.com/.
 hosts(env) names exactly the hosts these adapters connect to, for the run's network guard.
 """
 
@@ -26,13 +32,10 @@ import base64
 import contextlib
 import datetime as _dt
 import email.parser
-import email.policy
-import email.utils
 import http.client
 import imaplib
 import io
 import re
-import smtplib
 import socket
 import ssl
 import time
@@ -43,26 +46,27 @@ import xml.parsers.expat
 from .. import caps, ics, slots
 from ..shapes import (AlreadyExists, CalendarError, CalendarTimeout, Event, InboundItem, MailError, NotHers,
                       SendUnknown)
+from . import jmap
 from .base import CalendarAdapter, MailAdapter
 
 UTC = _dt.timezone.utc
 _DAY = _dt.timedelta(days=1)
 
 # --- the env names this module reads (values live only in the server's .env) -------------------
-ENV_ADDRESS = "DORIS_MAIL_ADDRESS"     # her address: the login for IMAP, SMTP and CalDAV, the envelope sender
-ENV_PASSWORD = "DORIS_APP_PASSWORD"    # the app password for her own account
+ENV_ADDRESS = "DORIS_MAIL_ADDRESS"     # her address: the login for IMAP and CalDAV, her JMAP account, the sender
+ENV_PASSWORD = "DORIS_APP_PASSWORD"    # the app password for her own account (IMAP and CalDAV)
 ENV_IMAP_HOST = "DORIS_IMAP_HOST"
 ENV_IMAP_PORT = "DORIS_IMAP_PORT"
-ENV_SMTP_HOST = "DORIS_SMTP_HOST"
-ENV_SMTP_PORT = "DORIS_SMTP_PORT"
+ENV_JMAP_TOKEN = jmap.ENV_TOKEN        # her JMAP API token: every send
 ENV_CALDAV_URL = "DORIS_CALDAV_URL"    # the owner's shared calendar, as her account sees it
-ENV_NAMES = (ENV_ADDRESS, ENV_PASSWORD, ENV_IMAP_HOST, ENV_IMAP_PORT, ENV_SMTP_HOST, ENV_SMTP_PORT,
-             ENV_CALDAV_URL)
+ENV_NAMES = (ENV_ADDRESS, ENV_PASSWORD, ENV_IMAP_HOST, ENV_IMAP_PORT, ENV_JMAP_TOKEN, ENV_CALDAV_URL)
 
 DEFAULT_IMAP_HOST = "imap.fastmail.com"
 DEFAULT_IMAP_PORT = 993
-DEFAULT_SMTP_HOST = "smtp.fastmail.com"
-DEFAULT_SMTP_PORT = 465
+# Her keyword on the smoke's own test request in INBOX (set by the smoke under her login, before its
+# run answers it on the smoke's throwaway ledger): no live run reads it again, whatever its ledger.
+SMOKE_TEST_KEYWORD = "doris-smoke-test"
+SMOKE_MID_MARK = SMOKE_TEST_KEYWORD + "."   # in every Message-ID the smoke mints: no live run reads such a message
 
 # Every pattern that validates a whole value ends in \Z: in Python, $ also matches before a final
 # newline, which would let "name\n" through to a protocol line.
@@ -86,15 +90,10 @@ _SERVER_ID = re.compile(r"^INBOX:([1-9][0-9]{0,9}):([1-9][0-9]{0,9})\Z")
 _MESSAGE_ID = re.compile(r"^[!#-;=?A-\[\]-~]{1,200}@[!#-;=?A-\[\]-~]{1,200}\Z")   # printable, no space " < > @ \
 _URL_PATH = re.compile(r"^[A-Za-z0-9._~%!$&'()*+,;=:@/-]+\Z")                      # RFC 3986 path characters
 _IMAP_FAILURES = (imaplib.IMAP4.error, OSError, EOFError, ValueError)
-_SMTP_FAILURES = (smtplib.SMTPException, OSError, ValueError)
-_HEADER_FIELD = re.compile(rb"([!-9;-~]+)[ \t]*:")  # a field name; RFC 5322's obsolete syntax allows blanks before the colon
-_NEVER_HEADERS = ("bcc", "resent-bcc")             # the owner's copy rides on the envelope, never in a header
-_MIME_HEADERS = ("Content-Type", "Content-Transfer-Encoding", "Content-Disposition")
-EHLO_NAME = "[127.0.0.1]"                           # an address literal: the EHLO never names this machine
 
-
-class ConfigError(ValueError):
-    """The env lacks or misstates a setting. Names the setting, never its value."""
+# The env lacks or misstates a setting: one class for this module and the JMAP sender LiveMail
+# builds, so a caller catches either one. It names the setting, never its value.
+ConfigError = jmap.ConfigError
 
 
 class _Secret(object):
@@ -192,11 +191,11 @@ def _timeout(value):
 
 
 def hosts(env) -> list:
-    """Every host the two adapters connect to, each once: her IMAP server, her SMTP server and
-    the calendar URL's host. The run's network guard allows these and nothing else."""
+    """Every host the two adapters connect to, each once: her IMAP server, the JMAP host her sends
+    go to (jmap.HOST) and the calendar URL's host. The run's network guard allows these and
+    nothing else."""
     found = []
-    for host in (_host(env, ENV_IMAP_HOST, DEFAULT_IMAP_HOST), _host(env, ENV_SMTP_HOST, DEFAULT_SMTP_HOST),
-                 _caldav(env)[0]):
+    for host in (_host(env, ENV_IMAP_HOST, DEFAULT_IMAP_HOST), jmap.HOST, _caldav(env)[0]):
         if host not in found:
             found.append(host)
     return found
@@ -207,8 +206,8 @@ def hosts(env) -> list:
 # ------------------------------------------------------------------------------------------------
 def _tls():
     """A client context that verifies the server's certificate and name (never the stdlib's
-    unverified default, which smtplib and imaplib fall back to when given none), TLS 1.2 or
-    newer: Python 3.9's default context sets no floor of its own."""
+    unverified default, which imaplib falls back to when given none), TLS 1.2 or newer: Python
+    3.9's default context sets no floor of its own."""
     ctx = ssl.create_default_context()
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     return ctx
@@ -220,12 +219,6 @@ def _imap_tls(host, port, timeout):
 
 def _https(host, port, timeout):
     return http.client.HTTPSConnection(host, port, timeout=timeout, context=_tls())
-
-
-def _smtp_tls(host, port, timeout):
-    """Implicit TLS from the first byte (port 465). smtplib's own EHLO name would be this
-    machine's looked-up name; hers is an address literal, as Thunderbird's is by default."""
-    return smtplib.SMTP_SSL(host=host, port=port, local_hostname=EHLO_NAME, timeout=timeout, context=_tls())
 
 
 def _failure(cls, step, exc=None, status=None, detail=None):
@@ -353,62 +346,6 @@ def _flagged(data, flag):
     return names
 
 
-def _header_fields(message):
-    """[name in lowercase, raw value] for each field in the header block of a CRLF message, or
-    None when a line there is not a header field (then nothing about the headers is certain)."""
-    lines = message.split(b"\r\n\r\n", 1)[0].split(b"\r\n")
-    if lines[-1] == b"":
-        lines.pop()                    # a message that is all header and no body
-    fields = []
-    for line in lines:
-        if line[:1] in (b" ", b"\t") and fields:
-            fields[-1][1] += line      # a folded line continues the field before it
-            continue
-        found = _HEADER_FIELD.match(line)
-        if found is None:
-            return None
-        fields.append([found.group(1).decode("ascii").lower(), line[found.end():]])
-    return fields
-
-
-def _dot_stuffed(message):
-    """The DATA payload: a dot doubled at the start of each line, then the final dot line."""
-    payload = re.sub(rb"(?m)^\.", b"..", message)
-    if not payload.endswith(b"\r\n"):
-        payload += b"\r\n"
-    return payload + b".\r\n"
-
-
-def _parts_ok(message):
-    """True when every part of the message is inline text/plain (no file name) or her own .ics
-    (text/calendar whose content is her fixed form, ics.fields_ok), alone or inside one
-    multipart/mixed, and the MIME structure reads without a defect or a doubled Content-* header
-    (two readers could see two different messages). Never raises: what it cannot read is False."""
-    try:
-        root = email.parser.BytesParser(policy=email.policy.compat32).parsebytes(message)
-        if root.is_multipart():
-            if root.get_content_type() != "multipart/mixed":
-                return False
-            leaves = root.get_payload()
-        else:
-            leaves = [root]
-        for part in [root] + list(leaves):
-            if part.defects or any(len(part.get_all(name) or ()) > 1 for name in _MIME_HEADERS):
-                return False
-        for part in leaves:
-            kind = part.get_content_type()
-            if part.is_multipart() or kind not in ("text/plain", "text/calendar"):
-                return False
-            if kind == "text/plain" and (part.get_filename() is not None
-                                         or part.get_content_disposition() == "attachment"):
-                return False
-            if kind == "text/calendar" and not ics.fields_ok(part.get_payload(decode=True)):
-                return False
-        return True
-    except Exception:          # a check that cannot run fails closed
-        return False
-
-
 def _message_ids(header_bytes):
     headers = email.parser.BytesHeaderParser().parsebytes(bytes(header_bytes))
     return {_norm_mid(str(value)) for value in headers.get_all("Message-ID") or ()}
@@ -418,14 +355,18 @@ def _message_ids(header_bytes):
 # Mail
 # ------------------------------------------------------------------------------------------------
 class LiveMail(MailAdapter):
-    """Her mailbox over IMAP (read, file) and SMTP (send), both over TLS, under her own login.
+    """Her mailbox over IMAP (read, file) under her own login, over TLS; her sends over JMAP
+    (jmap.JmapSender, HTTPS) under her own API token.
 
     fetch_new is stateless: every INBOX message received at or after since_utc (all of them
-    when it is None), oldest first; the ledger decides what is new. Each call opens its own
-    connection, logs in, and logs out when done."""
+    when it is None), oldest first, but never one carrying SMOKE_TEST_KEYWORD; the ledger decides
+    what is new. With smoke_message_id (the smoke's own run) it hands over only the message that
+    carries SMOKE_TEST_KEYWORD and exactly that Message-ID. Each IMAP call opens its own
+    connection, logs in, and logs out when done. jmap_factory(host, port, timeout) makes the
+    sender's connections (a test's fake server); without it they are verified HTTPS."""
 
     def __init__(self, env, doris_addr, timeout_s=caps.MAIL_TIMEOUT_S, since_utc=None,
-                 imap_factory=None, smtp_factory=None):
+                 imap_factory=None, jmap_factory=None, smoke_message_id=None):
         login = _address(env)
         if not isinstance(doris_addr, str) or doris_addr.strip().lower() != login.lower():
             raise ConfigError("her address must be %s, the login of her own account" % ENV_ADDRESS)
@@ -434,12 +375,16 @@ class LiveMail(MailAdapter):
         self._password = _password(env)
         self.imap_host = _host(env, ENV_IMAP_HOST, DEFAULT_IMAP_HOST)
         self.imap_port = _port(env, ENV_IMAP_PORT, DEFAULT_IMAP_PORT)
-        self.smtp_host = _host(env, ENV_SMTP_HOST, DEFAULT_SMTP_HOST)
-        self.smtp_port = _port(env, ENV_SMTP_PORT, DEFAULT_SMTP_PORT)
         self.timeout_s = _timeout(timeout_s)
         self.since_utc = since_utc
+        self.smoke_message_id = None
+        if smoke_message_id is not None:
+            target = _norm_mid(smoke_message_id) if isinstance(smoke_message_id, str) else ""
+            if not _MESSAGE_ID.match(target):
+                raise ConfigError("the smoke's Message-ID is not one it can search for")
+            self.smoke_message_id = target
         self._imap_factory = imap_factory or _imap_tls
-        self._smtp_factory = smtp_factory or _smtp_tls
+        self._sender = jmap.JmapSender(env, self.doris_addr, timeout_s=self.timeout_s, http_factory=jmap_factory)
 
     @property
     def since_utc(self):
@@ -548,7 +493,10 @@ class LiveMail(MailAdapter):
     # -- the interface ---------------------------------------------------------------------------
     def fetch_new(self):
         """Every INBOX message received at or after since_utc, oldest first (INTERNALDATE, then
-        UID). Read-only (EXAMINE) and with BODY.PEEK[], so nothing about her mail changes. Each
+        UID), leaving out the smoke's own test requests, answered on the smoke's ledger: any
+        carrying SMOKE_TEST_KEYWORD, and any whose Message-ID holds SMOKE_MID_MARK (one the smoke
+        cut short before its mark), in the search and again once read; with smoke_message_id,
+        only that request: the keyword and exactly that Message-ID. Read-only (EXAMINE) and with BODY.PEEK[], so nothing about her mail changes. Each
         message's RFC822.SIZE is read with its date: one over caps.MAX_RAW_BYTES is handed over
         as only its first MAX_RAW_BYTES + 1 octets, never downloaded whole, and the reader holds
         it as oversize. Raises MailError on any failure, including a message the server named
@@ -559,6 +507,10 @@ class LiveMail(MailAdapter):
         with self._imap(step) as conn:
             uidvalidity, _ = self._open(conn, "INBOX", True, step)
             criteria = ("ALL",) if since is None else ("SINCE", _imap_day(since - _DAY))
+            if self.smoke_message_id is None:
+                criteria += ("NOT", "KEYWORD", SMOKE_TEST_KEYWORD, "NOT", "HEADER", "Message-ID", '"%s"' % SMOKE_MID_MARK)
+            else:                          # a substring search: each match is read back below
+                criteria += ("KEYWORD", SMOKE_TEST_KEYWORD, "HEADER", "Message-ID", '"%s"' % self.smoke_message_id)
             uids = self._search(conn, criteria, step)
             dated = []
             for batch in _batches(uids):
@@ -580,6 +532,11 @@ class LiveMail(MailAdapter):
                 for received, uid, _ in batch:
                     if uid not in bodies:
                         raise _failure(MailError, step, detail="the server left a message out")
+                    mids = _message_ids(bodies[uid])
+                    if self.smoke_message_id is not None and self.smoke_message_id not in mids:
+                        continue           # it only contains the smoke's Message-ID: never the smoke's to read
+                    if self.smoke_message_id is None and any(SMOKE_MID_MARK in mid.lower() for mid in mids):
+                        continue           # the smoke's request, unmarked: a server that searched loosely
                     items.append(InboundItem(server_id=server_id(uidvalidity, uid), raw=bodies[uid],
                                              received_utc=received))
             return items
@@ -625,16 +582,41 @@ class LiveMail(MailAdapter):
         with self._imap(step) as conn:
             for folder in self._sent_folders(conn, step):
                 self._open(conn, folder, True, step)
-                uids = self._search(conn, ("HEADER", "Message-ID", '"%s"' % target), step)
-                for batch in _batches(uids):
-                    headers = self._literals(conn, batch, "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])",
-                                             _HEADER_LITERAL, step)
-                    if any(target in _message_ids(header) for header in headers.values()):
-                        return True
-                    unread = unread or any(uid not in headers for uid in batch)
+                found, missed = self._with_message_id(conn, target, step)
+                if found:
+                    return True
+                unread = unread or missed
         if unread:
             raise _failure(MailError, step, detail="a message the search named could not be read; cannot tell")
         return False
+
+    def find_in_inbox(self, message_id):
+        """The server IDs of every INBOX message whose Message-ID is exactly this one, oldest UID
+        first ([] when none): the smoke's look for its own test request. Read-only (EXAMINE,
+        BODY.PEEK). Raises MailError when it cannot tell: a message the search named that the
+        fetch then left out or answered without a header literal."""
+        step = "imap inbox lookup"
+        target = _norm_mid(message_id)
+        if not _MESSAGE_ID.match(target):
+            raise _failure(MailError, step, detail="not a Message-ID it can search for")
+        with self._imap(step) as conn:
+            uidvalidity, _ = self._open(conn, "INBOX", True, step)
+            found, missed = self._with_message_id(conn, target, step)
+        if missed:
+            raise _failure(MailError, step, detail="a message the search named could not be read; cannot tell")
+        return [server_id(uidvalidity, uid) for uid in found]
+
+    def _with_message_id(self, conn, target, step):
+        """(the UIDs in the open mailbox whose Message-ID is exactly target, oldest first; whether a
+        message the search named was left unread). The HEADER search is a substring match, so
+        each message it names is read back by its Message-ID header."""
+        found, missed = [], False
+        for batch in _batches(self._search(conn, ("HEADER", "Message-ID", '"%s"' % target), step)):
+            headers = self._literals(conn, batch, "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])",
+                                     _HEADER_LITERAL, step)
+            found.extend(uid for uid in batch if uid in headers and target in _message_ids(headers[uid]))
+            missed = missed or any(uid not in headers for uid in batch)
+        return found, missed
 
     def _sent_folders(self, conn, step):
         """Every mailbox flagged \\Sent: asked for with LIST ... RETURN (SPECIAL-USE), then a
@@ -657,104 +639,28 @@ class LiveMail(MailAdapter):
             raise _failure(MailError, step, detail="no folder carries the \\Sent special-use flag")
         return found
 
-    # -- SMTP ------------------------------------------------------------------------------------
-    @contextlib.contextmanager
-    def _smtp(self, step):
-        """One logged-in SMTP connection. A failure inside becomes a MailError naming the step;
-        a MailError the caller raises (SendUnknown included) passes through as it is."""
-        try:
-            conn = self._smtp_factory(self.smtp_host, self.smtp_port, self.timeout_s)
-        except _SMTP_FAILURES as exc:
-            raise _failure(MailError, step + " connect", exc) from None
-        try:
-            try:
-                conn.login(self._user, self._password.reveal())
-            except _SMTP_FAILURES as exc:
-                raise _failure(MailError, step + " login", exc, getattr(exc, "smtp_code", None)) from None
-            try:
-                yield conn
-            except MailError:
-                raise
-            except _SMTP_FAILURES as exc:
-                raise _failure(MailError, step, exc, getattr(exc, "smtp_code", None)) from None
-        finally:
-            try:
-                conn.quit()
-            except Exception:
-                _quietly(conn.close)
-
-    def _checked(self, raw, envelope_to, message_id, step):
-        """(the message with CRLF line ends, the recipients), or a MailError before any connection:
-        bytes only; no Bcc or Resent-Bcc header; exactly one From, hers; exactly one Message-ID,
-        the one the caller recorded (find_in_sent looks for it); every recipient one bare address;
-        every part text/plain or her own .ics (_parts_ok)."""
-        def refuse(why):
-            return _failure(MailError, step, detail="refused before connecting: " + why)
-        if not isinstance(raw, (bytes, bytearray)) or not raw:
-            raise refuse("the message is not bytes")
-        message = re.sub(rb"\r\n|\r|\n", b"\r\n", bytes(raw))
-        fields = _header_fields(message)
-        if fields is None:
-            raise refuse("the header block cannot be read")
-        names = [name for name, _ in fields]
-        if any(name in _NEVER_HEADERS for name in names):
-            raise refuse("the message has a Bcc header")
-        froms = [value for name, value in fields if name == "from"]
-        senders = email.utils.getaddresses([froms[0].decode("utf-8", "replace")]) if len(froms) == 1 else []
-        if len(senders) != 1 or senders[0][1].lower() != self.doris_addr.lower():
-            raise refuse("the message is not from her address alone")
-        target = _norm_mid(message_id) if isinstance(message_id, str) else ""
-        mids = [_norm_mid(value.decode("ascii", "replace")) for name, value in fields if name == "message-id"]
-        if not _MESSAGE_ID.match(target) or mids != [target]:
-            raise refuse("the message does not carry exactly the Message-ID given")
-        if not _parts_ok(message):
-            raise refuse("a part is not text/plain or her own .ics")
-        if (not isinstance(envelope_to, (list, tuple)) or not envelope_to
-                or not all(isinstance(addr, str) and _ADDRESS.match(addr) for addr in envelope_to)):
-            raise refuse("the envelope is not a list of bare addresses")
-        return message, list(envelope_to)
-
+    # -- sends, over JMAP ----------------------------------------------------------------------
     def send(self, raw, envelope_to, message_id, template=None):
-        """Hand one message to her SMTP server: her address as the envelope sender, exactly
-        envelope_to as the recipients, raw as it is (CRLF line ends). One connection, one
-        transaction, never a retry. template is accepted for the interface and not used.
+        """Hand one message to her JMAP account (jmap.JmapSender.send): her address as the envelope
+        sender, exactly envelope_to as the recipients, raw as it is (CRLF line ends). One
+        submission, never a retry. template is accepted for the interface and not used.
 
-        MailError: it did not go. That covers a refusal at any step, a server refusal of the
-        message itself (4xx or 5xx after it), and a connection lost before the message's first
-        byte (a server cannot take a message whose text never went).
-        SendUnknown: the message went and no clear answer came back (lost connection, timeout,
-        an answer that cannot be read). The caller looks in Sent; nothing here sends it again."""
-        step = "smtp send"
-        message, recipients = self._checked(raw, envelope_to, message_id, step)
-        with self._smtp(step) as conn:
-            code, _ = conn.mail(self.doris_addr)
-            if code != 250:
-                raise _failure(MailError, step + " sender", status=code)
-            for rcpt in recipients:
-                code, _ = conn.rcpt(rcpt)
-                if code not in (250, 251):
-                    _quietly(conn.rset)
-                    raise _failure(MailError, step + " recipient", status=code)
-            code, _ = conn.docmd("DATA")
-            if code != 354:
-                _quietly(conn.rset)
-                raise _failure(MailError, step + " data", status=code)
-            try:
-                conn.send(_dot_stuffed(message))
-                code, _ = conn.getreply()
-            except _SMTP_FAILURES as exc:
-                raise _failure(SendUnknown, step + " answer", exc) from None
-            if 200 <= code < 300:
-                return
-            if 400 <= code < 600:
-                raise _failure(MailError, step + " answer", status=code)
-            raise _failure(SendUnknown, step + " answer", detail="the answer cannot be read")
+        MailError: it did not go (a refusal before any connection, any failure before the
+        submission request went in full, a submission the server turned away or did not create).
+        SendUnknown: the submission request went and no readable answer came back. The caller
+        looks in Sent; nothing here sends it again."""
+        self._sender.send(raw, envelope_to, message_id, template)
+
+    @property
+    def last_copy_in_sent(self):
+        """After a send that went: True when her copy reached Sent, False when it may sit in Drafts."""
+        return self._sender.last_copy_in_sent
 
     # -- what the smoke checks -------------------------------------------------------------------
-    def check_smtp_login(self):
-        """Connect and log in to her SMTP server, then quit. Sends nothing. Raises MailError."""
-        with self._smtp("smtp login check"):
-            pass
+    def check_send_login(self):
+        """Read her JMAP session, mailboxes and identity: proves her token, its scopes and her
+        account. Sends and uploads nothing. Raises MailError."""
+        self._sender.check_login()
 
     def inbox_count(self):
         """Log in and count the messages in INBOX (read-only). Raises MailError."""

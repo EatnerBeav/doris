@@ -13,6 +13,7 @@ from unittest import mock
 
 from doris import caps, loop, paths, receipts, templates
 from doris.shapes import Slot
+from tests.unit import demo_sandbox
 
 UTC = dt.timezone.utc
 
@@ -85,13 +86,8 @@ class Counts(unittest.TestCase):
 
 
 def sandbox_run(tmp, say=None, clock_mode="advance"):
-    """The demo day on a fresh copy of sandbox/, stub model, advancing clock; returns its receipt lines."""
-    sandbox = os.path.join(tmp, "sandbox")
-    shutil.copytree(paths.SANDBOX, sandbox, ignore=shutil.ignore_patterns("doris-*.ics", "*.eml.sent", "keywords.json"))
-    outbox = os.path.join(sandbox, "outbox")
-    for name in os.listdir(outbox):
-        if name != ".gitkeep":
-            os.remove(os.path.join(outbox, name))
+    """The demo day on a fresh copy of sandbox/ as committed, stub model, advancing clock; returns its receipt lines."""
+    sandbox = demo_sandbox.copy_committed(os.path.join(tmp, "sandbox"))
     cfg = loop.RunConfig(mode="throwaway", run_name="model-stub-sandbox-test", state_dir=os.path.join(tmp, "state"),
                          sandbox_root=sandbox, owner_addr="whizz@fastmail.com", doris_addr="doris.htm@fastmail.com",
                          model_source="stub", clock_mode=clock_mode, say=say)
@@ -203,6 +199,38 @@ class ALongSandboxRun(unittest.TestCase):
         self.assertEqual(s.handled, 2)
         observed = [l for l in receipts.read_lines(s.receipts_path) if l["kind"] == "observed" and "from_addr" in l["payload"]]
         self.assertEqual([l["payload"]["clock"] for l in observed], ["2026-12-01T16:10:00Z", "2026-12-01T16:20:00Z"])
+
+
+class HerCopies(unittest.TestCase):
+    """Her copy of each mail is named by the first 16 hex digits of its sha256, so its path fits
+    Windows' default limit (test_path_lengths); the observed line keeps all 64."""
+
+    def copies(self):
+        tmp = tempfile.mkdtemp(prefix="doris-loop-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        lines = sandbox_run(tmp)
+        run_dir = os.path.join(tmp, "state", "runs", "model-stub-sandbox-test")
+        out = []
+        for l in lines:
+            if l["kind"] == "observed" and "message_copy" in l["payload"]:
+                with open(os.path.join(run_dir, l["payload"]["message_copy"]), "rb") as fh:
+                    out.append((l["payload"]["message_copy"], l["payload"]["raw_sha256"], fh.read()))
+        self.assertGreater(len(out), 10)
+        return out
+
+    def test_a_copy_is_named_by_16_hex_digits_and_the_receipt_keeps_all_64(self):
+        for name, sha, data in self.copies():
+            self.assertEqual(name, "messages/%s.eml" % sha[:16])
+            self.assertRegex(sha, r"^[0-9a-f]{64}\Z")
+
+    def test_mails_whose_hashes_share_the_digits_each_keep_their_own_copy(self):
+        with mock.patch.object(loop, "COPY_NAME_HEX", 1):       # 16 names for every mail of the demo day
+            got = self.copies()
+        whole = [(name, sha) for name, sha, _ in got if name == "messages/%s.eml" % sha]
+        self.assertTrue(whole, "no two copies shared a digit")
+        for name, sha, data in got:
+            self.assertIn(name, ("messages/%s.eml" % sha[:1], "messages/%s.eml" % sha))
+        self.assertEqual(len({data for _, _, data in got}), len({sha for _, sha, _ in got}))   # one copy each
 
 
 class TheTerminalLines(unittest.TestCase):

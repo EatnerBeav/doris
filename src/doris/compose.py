@@ -6,7 +6,7 @@ the rendered template plus the locked signature, appended here byte for byte (lo
 
 Recipients: a reply goes To the sender only (the bare From address of the message answered).
 The owner's blind copy rides on the envelope (reply_envelope), never in a Bcc header, which a
-raw SMTP hand-off would show the prospect. Owner notices go To the owner only, no copy.
+raw hand-off to the transport would show the prospect. Owner notices go To the owner only, no copy.
 """
 
 import base64

@@ -16,6 +16,7 @@ Times are rendered from UTC by code (templates.md, ruling 10):
 
 import datetime as _dt
 import html
+import json
 import os
 import re
 import unicodedata
@@ -190,6 +191,18 @@ def meeting_link():
 LINK_SHOWN = "[meeting link]"
 _LINK_PATTERNS = {}       # (link, for_bytes) -> compiled pattern
 
+# Characters a reader never sees (holds removes them before it counts a notice's characters, decision
+# 61): Unicode's default-ignorable code points (zero-width, direction and format characters, the soft
+# hyphen, fillers, variation selectors, tags).
+INVISIBLES = ("\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e"
+              "\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3"
+              "\U0001d173-\U0001d17a\U000e0000-\U000e0fff")
+# With the format characters (Cf) INVISIBLES leaves out, every Cf character Unicode 15.1 has.
+_HIDDEN = re.compile("[" + INVISIBLES + "\u0600-\u0605\u06dd\u070f\u0890\u0891\u08e2\ufff9-\ufffb"
+                     "\U000110bd\U000110cd\U00013430-\U0001343f]")
+_TAG = re.compile(r"<[^<>]*>")      # an HTML tag or comment with no "<" or ">" inside: linear, whatever the text
+_ESCAPES = re.compile(r"(?:%[0-9A-Fa-f]{2})+")
+
 
 def _link_pattern(for_bytes):
     """The meeting link (meeting_link(): the run's pinned one) as a pattern, any case: its scheme
@@ -229,9 +242,43 @@ def _link_pattern(for_bytes):
 
 
 def redact_link(text):
-    """text with every form of the meeting link replaced by "[meeting link]"; not a str: as it is."""
+    """text with every form of the meeting link replaced by "[meeting link]". When the link still
+    shows as a reader sees it (has_link: in fullwidth letters, or with a zero-width space or a soft
+    hyphen in it), text is folded as a reader sees it and the link replaced there; when it shows only
+    once HTML entities or %-escapes are undone or HTML tags taken out (https://meet.example/room%2D1),
+    the whole of text is "[meeting link]", since those forms have no edges to cut at. Not a str: as
+    it is."""
     rx = _link_pattern(False) if isinstance(text, str) else None
-    return rx.sub(LINK_SHOWN, text) if rx is not None else text
+    if rx is None:
+        return text
+    out = rx.sub(LINK_SHOWN, text)
+    if not has_link(out):
+        return out
+    out = rx.sub(LINK_SHOWN, _as_seen(out))
+    return LINK_SHOWN if has_link(out) else out
+
+
+def redact_json_text(text):
+    """A model's raw answer (JSON text) with the link replaced where it stands, as redact_link does;
+    where redact_link would fold the text or blank it whole instead (a link only a reader's view or an
+    unescaped form shows), each string in the JSON goes through redact_link (redact_values), so the
+    answer keeps its shape and a replay reads the same answer, with only the string that showed the
+    link changed. Text that is not a JSON object or list is as redact_link leaves it, and one that
+    still shows the link is "[meeting link]"."""
+    rx = _link_pattern(False) if isinstance(text, str) else None
+    if rx is None:
+        return text
+    out = redact_link(text)
+    if out == rx.sub(LINK_SHOWN, text):
+        return out
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        return out
+    if not isinstance(obj, (dict, list)):
+        return out
+    again = json.dumps(redact_values(obj), ensure_ascii=False)
+    return LINK_SHOWN if has_link(again) else again
 
 
 def redact_values(value):
@@ -255,14 +302,44 @@ def redact_link_bytes(data):
     return rx.subn(LINK_SHOWN.encode("ascii"), bytes(data))
 
 
+def _as_seen(text):
+    """text as a reader sees it: compatibility forms folded (NFKC: fullwidth letters and signs to
+    ASCII), invisible and format characters dropped."""
+    if text.isascii():
+        return text
+    return _HIDDEN.sub("", unicodedata.normalize("NFKC", text))
+
+
+def _unquote(text):
+    """urllib.parse.unquote(text) (%-escapes undone as UTF-8, a bad sequence replaced), in one pass over
+    the escapes alone: unquote walks every run of ASCII, seconds on a binary part's bytes."""
+    if "%" not in text:
+        return text
+    return _ESCAPES.sub(lambda m: bytes.fromhex(m.group(0).replace("%", "")).decode("utf-8", "replace"), text)
+
+
+def _link_views(text):
+    """Each way has_link reads text, once: as it is and with HTML entities and %-escapes undone; each
+    of those as a reader sees it (_as_seen), and that with its HTML tags taken out."""
+    unescaped = html.unescape(text)
+    given = []
+    for view in (text, unescaped, _unquote(text), _unquote(unescaped)):
+        seen = _as_seen(view)
+        for v in (view, seen, _TAG.sub("", seen)):
+            if not any(v is w or v == w for w in given):
+                given.append(v)
+                yield v
+
+
 def has_link(text):
-    """True when the meeting link still shows in text: as it is, or once HTML entities or %-escapes
-    are undone. The last check on a kept copy, run on each of its decoded parts."""
+    """True when the meeting link still shows in text: as it is, once HTML entities or %-escapes are
+    undone, or as a reader sees it: written with a zero-width space or a soft hyphen, in fullwidth
+    letters, or split by an empty HTML tag (review of 7e1a9fa, item 3). The last check on a kept copy,
+    run on each of its decoded parts, and on each string redact_link leaves."""
     rx = _link_pattern(False)
     if rx is None or not isinstance(text, str):
         return False
-    unescaped = html.unescape(text)
-    return any(rx.search(v) for v in (text, unescaped, urllib.parse.unquote(text), urllib.parse.unquote(unescaped)))
+    return any(rx.search(v) for v in _link_views(text))
 
 
 # --- slot checks ---------------------------------------------------------------------------------
