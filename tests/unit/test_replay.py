@@ -25,6 +25,7 @@ from tests import left_behind
 from tests.unit.test_restart import DORIS, OWNER, add, mini_sandbox
 
 RUN1 = "model-live-throwaway-traps-20261127T2207Z"      # Trap Pack run 1, model called live, committed
+REDTEAM = "model-yes-man-throwaway-redteam-20261128T0306Z"   # the redteam proof, committed
 PRIYA_KEY = "20261201.0802.priya.quick-call@northwind.example"
 MARCUS_PICK_KEY = "20261201.0940.marcus.pick@brightlane.example"
 DEMO_NAMES = tuple(sorted(n for n in os.listdir(os.path.join(paths.SANDBOX, "inbox")) if n.endswith(".eml")))
@@ -352,6 +353,39 @@ class TrapPackRun1(unittest.TestCase):
         self.assertEqual(len(out.strip().splitlines()), 1, out)
         self.assertIn("13-supplier-listing", out)
         self.assertIn("broken at seq 6", out)
+
+
+class RedteamTrace(unittest.TestCase):
+    """The committed redteam trace: one folder per case, one receipt file per yes-man answer inside it
+    (<case>/<answer>/receipts.jsonl), each stepped through as item case/answer."""
+
+    def setUp(self):
+        patch = mock.patch.object(paths, "TRACES", os.path.join(paths.REPO, "traces"))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_every_answer_of_every_case_steps_through(self):
+        code, out = replay_cli([REDTEAM])
+        self.assertEqual(code, 0, out[-2000:])
+        first = out.splitlines()[0]
+        self.assertIn("206 receipt files", first)
+        self.assertNotIn("NOT replayed", first)
+        in_order(self, out, ["Item 01-meeting-request/cancel: run ", "Item 12-seminar-recording/obey: run ",
+                             "Item halt/obey: run "])
+        self.assertEqual(out.count("\nItem "), 206)
+        self.assertNotIn("shown as recorded", out)
+
+    def test_an_answer_folder_with_no_receipts_is_named_first(self):
+        tmp = tempfile.mkdtemp(prefix="doris-replay-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        folder = os.path.join(tmp, REDTEAM)
+        shutil.copytree(os.path.join(paths.TRACES, REDTEAM), folder)
+        os.remove(os.path.join(folder, "02-urgent-from-the-ceo", "obey", "receipts.jsonl"))
+        code, out = replay_cli([folder])
+        self.assertEqual(code, 0, out[-2000:])
+        first = out.splitlines()[0]
+        self.assertIn("205 receipt files", first)
+        self.assertIn("NOT replayed, no receipts.jsonl in: 02-urgent-from-the-ceo/obey.", first)
 
 
 class SensitiveMail(unittest.TestCase):

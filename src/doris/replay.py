@@ -3,7 +3,8 @@
     python -m doris replay [RUN] [--message ID]
 
 RUN is a receipts file, a run folder, a trace folder holding one run folder per item (a Trap Pack
-trace), or a run ID found under state/sandbox/runs, state/live/runs or traces/. With none, the latest
+trace) or one folder per case holding one run folder per answer (a redteam trace), or a run ID found
+under state/sandbox/runs, state/live/runs or traces/. With none, the latest
 sandbox run, as `verify` takes it.
 
 First the chain check `verify` runs (receipts.verify, finished=True), on every file named: if any
@@ -187,23 +188,42 @@ def find(run):
 
 
 def in_folder(folder):
-    """A run folder (its receipts.jsonl), or a trace folder of item folders (each one's receipts.jsonl);
-    item folders without one are named, never passed over in silence."""
+    """A run folder (its receipts.jsonl), or a trace folder of item folders, each holding its own
+    receipts.jsonl (a Trap Pack trace) or one folder per answer that does (a redteam trace, items
+    labelled case/answer). A folder that holds none is named, never passed over in silence."""
     own = os.path.join(folder, "receipts.jsonl")
     if os.path.isfile(own):
         return [(None, own)], own, []
-    try:
-        names = sorted(n for n in os.listdir(folder) if os.path.isdir(os.path.join(folder, n)))
-    except OSError as exc:
-        raise _Refused("Cannot read the folder %s: %s." % (shown(_display(folder)), type(exc).__name__),
-                       EXIT_USAGE)
-    items = [(n, os.path.join(folder, n, "receipts.jsonl")) for n in names
-             if os.path.isfile(os.path.join(folder, n, "receipts.jsonl"))]
+    items, skipped = [], []
+    for name in _folders(folder):
+        path = os.path.join(folder, name, "receipts.jsonl")
+        if os.path.isfile(path):
+            items.append((name, path))
+            continue
+        inner = _folders(os.path.join(folder, name), quiet=True)
+        answers = [(a, os.path.join(folder, name, a, "receipts.jsonl")) for a in inner]
+        answers = [(a, p) for a, p in answers if os.path.isfile(p)]
+        if not answers:
+            skipped.append(name)
+            continue
+        have = {a for a, _ in answers}
+        items.extend(("%s/%s" % (name, a), p) for a, p in answers)
+        skipped.extend("%s/%s" % (name, a) for a in inner if a not in have)
     if not items:
         raise _Refused("No receipts.jsonl in %s or in a folder inside it." % (shown(_display(folder)),),
                        EXIT_USAGE)
-    have = {n for n, _ in items}
-    return items, folder, [n for n in names if n not in have]
+    return items, folder, skipped
+
+
+def _folders(folder, quiet=False):
+    """The folder's subfolders, sorted; _Refused when it cannot be read (an empty list if quiet)."""
+    try:
+        return sorted(n for n in os.listdir(folder) if os.path.isdir(os.path.join(folder, n)))
+    except OSError as exc:
+        if quiet:
+            return []
+        raise _Refused("Cannot read the folder %s: %s." % (shown(_display(folder)), type(exc).__name__),
+                       EXIT_USAGE)
 
 
 def latest():
