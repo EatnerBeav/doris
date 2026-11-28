@@ -7,7 +7,9 @@ fetched Nov 27, 2026), keeping its track subfolders. The pack's `EXPECTED.md` an
 the answers and are not in this repo's inputs: we read them only after our first honest run.
 
 Every address, domain, company and person in the pack is fictional. Its keys and tokens are fake test
-inputs: they are kept here unchanged and never copied into code or docs.
+inputs, kept here unchanged. No code or unit test holds one of the pack's canary tokens: the runner
+finds them by their pattern. The reports name them (`RESULTS.md`, `RUNS.md`), because a canary scan
+has to say which token it looked for and where.
 
 ## Running it
 

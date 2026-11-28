@@ -1,7 +1,7 @@
 """demo_sandbox.copy_committed, the copy every demo-day test runs on, from a sandbox a judge has used.
 
-A judge who follows sandbox/README.md drops their own .eml into sandbox/inbox and adds a line for it to
-inbox/facts.json; a demo leaves her sends, her booking and a staged event behind. The demo-day tests
+A judge who follows sandbox/README.md drops their own .eml into sandbox/inbox, and may add a line for it
+to inbox/facts.json (it needs none); a demo leaves her sends, her booking and a staged event behind. The demo-day tests
 must still run on the committed fixtures only: the demo's fifteen emails and their facts, the owner's
 calendar, an empty outbox. And the committed fixtures are exactly what git tracks under sandbox/.
 
@@ -9,6 +9,9 @@ All of that is planted in a temporary copy of the sandbox, never in the reposito
 """
 
 import codecs
+import email
+import email.policy
+import email.utils
 import importlib.util
 import json
 import os
@@ -206,6 +209,60 @@ class GitTracksTheCommittedSandboxAndNothingElse(unittest.TestCase):
         self.assertEqual(read(os.path.join(other, ".git", "index")), before)
         self.assertIn("inbox/" + JUDGE_NAME, listed)
         self.assertIn("reads it: inbox/" + JUDGE_NAME, demo_sandbox.sandbox_drift(listed))
+
+
+class TheTemplateEmailAsTheReadmeSays(unittest.TestCase):
+    """sandbox/README.md: copy your-email.eml into inbox/ as 14-yourname.eml, with no line in facts.json,
+    and run the demo. Read by the keyword stand-in, the day handles it with the demo's own: she books the
+    time it asks for and sends its sender alone a confirmation with an .ics. Its Date falls between the
+    demo's last email and the 5:00 PM digest, and its Message-ID is none of the demo's."""
+
+    SENDER = "you@yourcompany.example"
+
+    @classmethod
+    def setUpClass(cls):
+        from doris import loop
+        cls.tmp = tempfile.mkdtemp(prefix="doris-template-")
+        sandbox = demo_sandbox.copy_committed(os.path.join(cls.tmp, "sandbox"))
+        shutil.copyfile(os.path.join(demo_sandbox.SANDBOX, "your-email.eml"),
+                        os.path.join(sandbox, "inbox", "14-yourname.eml"))
+        cls.template = email.message_from_bytes(read(os.path.join(demo_sandbox.SANDBOX, "your-email.eml")),
+                                                policy=email.policy.default)
+        cls.demo_ids = set()
+        for name in NAMES:
+            raw = read(os.path.join(demo_sandbox.SANDBOX, "inbox", name))
+            mid = email.message_from_bytes(raw, policy=email.policy.compat32)["Message-ID"]
+            if mid:
+                cls.demo_ids.add(mid.strip())
+        cfg = loop.RunConfig(mode="throwaway", run_name="model-stub-sandbox-test", state_dir=os.path.join(cls.tmp, "state"),
+                             sandbox_root=sandbox, owner_addr=test_fixtures.OWNER, doris_addr=DORIS, model_source="stub",
+                             clock_mode="advance", digest=True)
+        cls.summary = loop.run(cfg)
+        outbox = os.path.join(sandbox, "outbox")
+        cls.sent = [email.message_from_bytes(read(os.path.join(outbox, n)), policy=email.policy.default)
+                    for n in sorted(os.listdir(outbox)) if n.endswith(".eml")]
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_it_is_written_as_the_readme_asks(self):
+        t = self.template
+        self.assertEqual(str(t["To"]), "Shane Bornstein <whizz@fastmail.com>")
+        self.assertIsNone(t["Cc"])
+        self.assertNotIn(t["Message-ID"].strip(), self.demo_ids)
+        sent = email.utils.parsedate_to_datetime(str(t["Date"]))
+        self.assertGreater(sent, test_fixtures.pacific_utc("15:06"))
+        self.assertLess(sent, test_fixtures.pacific_utc("17:00"))
+
+    def test_the_stand_in_day_books_it_and_confirms_to_its_sender_alone(self):
+        s = self.summary
+        self.assertEqual((s.handled, s.held, s.human_approvals, s.bookings), (14, 2, 0, 3))
+        (reply,) = [m for m in self.sent if self.SENDER in str(m["To"])]
+        self.assertEqual(str(reply["To"]).strip().lower(), self.SENDER)
+        self.assertIsNone(reply["Cc"])
+        self.assertTrue(any(p.get_content_type() == "text/calendar" for p in reply.walk()))
+        self.assertIn("Thu Dec 10", reply.get_body(("plain",)).get_content())
 
 
 if __name__ == "__main__":
