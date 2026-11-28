@@ -79,11 +79,10 @@ def load_dotenv(environ=None, files=None):
         for name in DOTENV_NAMES:
             value = (values.get(name) or "").strip()
             if value and name not in environ and name not in came_from:
-                try:
-                    environ[name] = value
-                except ValueError:           # a NUL in the value: the system refuses it
+                if "\x00" in value:          # POSIX refuses it, Windows cuts the value there: neither is the key
                     raise envfile.EnvFileError("%s: %s holds a character the environment cannot take"
-                                               % (_display(path), name)) from None
+                                               % (_display(path), name))
+                environ[name] = value
                 came_from[name] = path
     return came_from
 
