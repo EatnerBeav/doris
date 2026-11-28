@@ -17,6 +17,8 @@ What it reads from each line (the loop writes these):
 - `called` with payload call == "model", and the `result` whose payload `call_seq` names it
   (payload `cost_usd`).
 - any payload with `human_approval: true` counts as a human approval (there are none in Doris).
+- `error` with payload step == "fetch": one failed inbox read (decision 89: a run until stopped
+  keeps trying, one error line a try).
 """
 
 import datetime as _dt
@@ -75,6 +77,7 @@ def build(receipt_lines, now, verified=None):
     calls = 0
     quarantined, not_addressed = set(), set()
     opted = {}       # sender address as written -> queued requests dropped, in the order they opted out
+    read_failures = 0
 
     def who(line):
         """(address as written, the name a notice shows): a sender's address or display name may carry
@@ -100,6 +103,8 @@ def build(receipt_lines, now, verified=None):
         if kind == "called" and p.get("call") == "model":
             calls += 1
             model_seqs.add(line.get("seq"))
+        if kind == "error" and p.get("step") == "fetch":
+            read_failures += 1
         if kind == "result" and p.get("call_seq") in model_seqs:
             c = p.get("cost_usd")
             if isinstance(c, (int, float)) and not isinstance(c, bool) and c > 0:
@@ -145,6 +150,7 @@ def build(receipt_lines, now, verified=None):
         _add_once(slots["offered_to"], name)
     slots["quarantined"] = len(quarantined)
     slots["not_addressed"] = len(not_addressed)
+    slots["read_failures"] = read_failures
     slots["model_calls"] = calls
     slots["cost_usd"] = round(cost, 6)
     slots["verified"] = verified is True

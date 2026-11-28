@@ -477,6 +477,25 @@ class OwnerTemplatesTest(Base):
             "Model calls 9, cost $0.0312. Receipts verify: yes.",
         ])
 
+    def test_s2_counts_failed_inbox_reads_on_a_line_before_its_last_and_leaves_out_none(self):
+        """Decision 89: a run until stopped keeps trying a failed inbox read, and the digest counts them."""
+        slots = templates.empty_digest(utc(2026, 12, 2, 1, 0))
+        self.assertEqual(slots["read_failures"], 0)
+        slots.update(read_failures=3, held=1, holds=[{"name": "Elena Voss", "reason": "hold.no_model",
+                                                      "at": utc(2026, 12, 1, 21, 10)}], model_calls=2,
+                     cost_usd=0.0048, verified=True)
+        self.assertEqual(templates.render("S2", slots).split("\n"), [
+            "Handled 0, held 1, human approvals 0. Tue Dec 1",
+            "Held for you:",
+            "Elena Voss, the model wasn't available, so I didn't read it, Tue Dec 1, 1:10 PM Pacific",
+            "Failed inbox reads: 3.",
+            "Model calls 2, cost $0.0048. Receipts verify: yes.",
+        ])
+        for bad in (-1, True, 1.5, "3", None, 10 ** 7):
+            slots["read_failures"] = bad
+            with self.assertRaises(TemplateError, msg=repr(bad)):
+                templates.render("S2", slots)
+
     def test_s2_refuses_unknown_slot(self):
         slots = templates.empty_digest(utc(2026, 12, 2, 1, 0))
         slots["note"] = "anything"

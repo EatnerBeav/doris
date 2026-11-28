@@ -1511,31 +1511,63 @@ class LongRunTest(LiveFixture):
         self.assertEqual(fake.slept[:1], [1.0])                      # she waited before reading again
         lines = receipts.read_lines(s.receipts_path)
         (error,) = [l["payload"] for l in lines if l["kind"] == "error"]
-        self.assertEqual((error["step"], error["error"], error["failed_in_a_row"], error["ends_after"]),
-                         ("fetch", "MailError: imap fetch: timeout", 1, caps.MAIL_READ_FAILURES_IN_A_ROW))
+        self.assertEqual((error["step"], error["error"], error["failed_in_a_row"], error["tries_every_s"]),
+                         ("fetch", "MailError: imap fetch: timeout", 1, 600.0))
         self.assertEqual([l["kind"] for l in lines[-2:]], ["halted", "summary"])
         self.assertTrue(s.verify_ok)
         self.assertEqual(self.said[0], "Tue Dec 1, 8:10 AM Pacific  Inbox not read: MailError (error line written). "
-                                       "She tries again at her next cycle (1 failed in a row; the run ends at %d)."
-                         % caps.MAIL_READ_FAILURES_IN_A_ROW)
+                                       "She sends nothing until it reads again, and tries again at her next cycle "
+                                       "(1 failed in a row).")
 
-    def test_reads_failing_in_a_row_end_the_run_with_its_closing_line(self):
-        n = caps.MAIL_READ_FAILURES_IN_A_ROW
-        self.assertGreaterEqual(n, 3)
+    def test_reads_failing_in_a_row_never_end_the_run_and_from_six_she_tries_every_ten_minutes(self):
+        """Review of 7e1a9fa, item 5 (decision 89, replacing part of 85): six failed reads in a row used
+        to end the run for good, so a one-hour outage overnight stopped her. Each try has its one error
+        line; from caps.MAIL_READ_FAILURES_IN_A_ROW in a row she tries every caps.MAIL_READ_RETRY_S
+        (never more often than her cycle), and only a stop or a halt ends the run."""
+        n, every = caps.MAIL_READ_FAILURES_IN_A_ROW, caps.MAIL_READ_RETRY_S
+        self.assertEqual((n, every), (6, 600.0))
         self.go(fresh=True)
-        calls = self.fetches_failing(set(range(1, 1000)))
-        fake = FakeTime(1000.0)
+        fake, tried_at = FakeTime(1000.0), []
+        calls = self.fetches_failing(set(range(1, 1000)), then=lambda k: tried_at.append(fake.now) or (
+            k == n + 3 and supervisor.request_stop("live", "cli", state_dir=self.state)))
         self.use(fake)
-        s = self.go(cycles=None, cycle_s=600.0)                     # ends by itself: no stop comes
-        self.assertEqual((s.read_failed, s.halted), (True, None))
-        self.assertEqual(len(calls), n)
-        self.assertAlmostEqual(sum(fake.slept), 200.0 + 600.0 * (n - 2))    # a whole cycle between two reads
+        s = self.go(cycles=None, cycle_s=60.0)                      # her cycle a minute: the tries slow down
+        self.assertEqual((s.read_failed, s.halted), (False, "cli"))
+        self.assertEqual(len(calls), n + 3)
+        self.assertEqual(tried_at, [1000.0, 1020.0, 1080.0, 1140.0, 1200.0, 1260.0, 1800.0, 2400.0, 3000.0])
         lines = receipts.read_lines(s.receipts_path)
         errors = [l["payload"] for l in lines if l["kind"] == "error"]
-        self.assertEqual([(e["step"], e["failed_in_a_row"]) for e in errors], [("fetch", k) for k in range(1, n + 1)])
-        self.assertEqual(lines[-1]["kind"], "summary")
-        self.assertEqual((lines[-1]["payload"]["read_failed"], lines[-1]["payload"]["errors"]), (True, n))
+        self.assertEqual([(e["step"], e["failed_in_a_row"], e["tries_every_s"]) for e in errors],
+                         [("fetch", k, 60.0 if k < n else every) for k in range(1, n + 4)])
+        self.assertEqual([l["kind"] for l in lines[-2:]], ["halted", "summary"])
+        self.assertEqual((lines[-1]["payload"]["read_failed"], lines[-1]["payload"]["errors"]), (False, n + 3))
         self.assertTrue(s.verify_ok)
+        self.assertEqual(len(self.said), n + 3)
+        self.assertTrue(self.said[n - 2].endswith("tries again at her next cycle (%d failed in a row)." % (n - 1)))
+        self.assertTrue(self.said[n - 1].endswith("tries again every 10 minutes until it does or she is stopped "
+                                                  "(%d failed in a row)." % n), self.said[n - 1])
+        self.assertEqual(self.jmap.delivered, [])
+
+    def test_while_her_inbox_cannot_be_read_she_sends_nothing_and_the_next_digest_counts_the_failed_reads(self):
+        """Item 5: fail closed. The day's digest is due at 5:00 PM Pacific, but a pass whose read failed
+        sends nothing; the first pass that reads again sends it, counting the failed reads."""
+        self.go(fresh=True)
+        self.clock = u(2026, 12, 2, 1, 0)                            # Tue Dec 1, 5:00 PM Pacific: it is due
+        digests_before_try = []
+
+        def then(k):
+            digests_before_try.append(len(self.owner_mail()))
+            if k == 4:
+                supervisor.request_stop("live", "cli", state_dir=self.state)
+        self.fetches_failing({1, 2}, then=then)
+        self.use(FakeTime(1000.0))
+        s = self.go(cycles=None, cycle_s=600.0, digest=True)
+        self.assertEqual(s.halted, "cli")
+        self.assertEqual(digests_before_try, [0, 0, 0, 1])          # none while reads failed; one after a good read
+        (digest_mail,) = self.owner_mail()
+        body = digest_mail.get_body(preferencelist=("plain",)).get_content()
+        self.assertEqual(body.splitlines()[:2], ["Handled 0, held 0, human approvals 0. Tue Dec 1",
+                                                 "Failed inbox reads: 2."])
 
     def test_a_good_read_starts_the_count_again(self):
         n = caps.MAIL_READ_FAILURES_IN_A_ROW
@@ -1836,7 +1868,7 @@ class LiveTraceTest(LiveFixture):
         self.traces = paths.TRACES
         self.receipts_path, self.before_worker = None, None
         self.arrived, self.stopped = [], []
-        fake = FakeTime(1199.0, self.tick)
+        fake = self.fake = FakeTime(1199.0, self.tick)
         for patch in (mock.patch.object(paths, "STATE", os.path.join(self.dir, "state")),
                       mock.patch.object(paths, "REPO", self.repo),
                       mock.patch.object(supervisor, "run_supervised", self.supervised),
@@ -1922,17 +1954,21 @@ class LiveTraceTest(LiveFixture):
         self.assert_no_value_in(folder)
         self.assert_no_value(out)
 
-    def test_a_run_that_ends_on_failed_reads_keeps_its_trace_with_outcome_fail(self):
+    def test_a_run_whose_reads_fail_keeps_trying_and_once_stopped_keeps_its_trace_with_outcome_fail(self):
+        """Decision 89: failed reads never end `run`; she keeps trying, and the trace says fail."""
         self.imap.password = "dummy-other-pass"                       # every login refused: no read goes
+        self.fake.hook = lambda: self.fake.now > 4800.0 and supervisor.request_stop("live", "cli")
         code, out = self.cli("run", "--live", "--fresh", "--env", self.env_path)
-        self.assertEqual(code, 1, out)
+        self.assertEqual(code, supervisor.EXIT_HALTED, out)
         folder = self.trace()
         manifest = json.loads(self.read(folder, "manifest.json").decode("utf-8"))
         self.assertEqual(manifest["outcome"], "fail")
         self.assertRegex(manifest["first_failing_step"], r"^error line at seq \d+ \(fetch\)\Z")
-        self.assertEqual(manifest["counts"]["errors"], caps.MAIL_READ_FAILURES_IN_A_ROW)
-        self.assertEqual(manifest["exit_code"], 1)
-        self.assertIn("Stopped: the inbox could not be read", self.read(folder, "terminal.log").decode("utf-8"))
+        self.assertEqual(manifest["counts"]["errors"], 8)            # 1199, 1200, 1800 ... 4800: one line a try
+        self.assertEqual(manifest["exit_code"], supervisor.EXIT_HALTED)
+        terminal = self.read(folder, "terminal.log").decode("utf-8")
+        self.assertEqual(terminal.count("Inbox not read: MailError"), 8)
+        self.assertNotIn("Stopped: the inbox could not be read", terminal)
         self.assertTrue(out.splitlines()[-1].startswith("Live trace kept in %s: outcome fail (first failing step: "
                                                         "error line at seq " % folder), out)
         self.assert_no_value_in(folder, "dummy-other-pass")

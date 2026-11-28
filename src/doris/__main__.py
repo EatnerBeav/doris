@@ -113,7 +113,7 @@ def run_cmd(argv):
         print(refusal)
         return supervisor.EXIT_REFUSED_HALT
     state = paths.state_dir(mode)
-    every = "every %s until `python -m doris stop`" % _span(RUN_CYCLE_S)
+    every = "every %s until `python -m doris stop`" % loop.wait_words(RUN_CYCLE_S)
     if not args.live:
         source, model_id = sandbox_source()
         name, run_dir = new_run_dir(state, run_name(source, "sandbox"))
@@ -201,17 +201,10 @@ def supervise(mode, state, name, run_dir, config, say=None):
         run_id=name)
 
 
-def _span(seconds):
-    if seconds >= 60 and seconds % 60 == 0:
-        minutes = int(seconds // 60)
-        return "minute" if minutes == 1 else "%d minutes" % minutes
-    return "%g seconds" % seconds
-
-
 def worker(argv):
     """The child the kill switch watches: one run from its config file. Exit 0 done, 1 the run
-    failed (the inbox could not be read: once in a finite run, caps.MAIL_READ_FAILURES_IN_A_ROW
-    cycles running in a run until stopped; or the chain failed its own check), 3 another Doris
+    failed (a finite run's inbox could not be read, or the chain failed its own check; a run until
+    stopped never ends on failed reads: decision 89), 3 another Doris
     holds the ledger, 4 halted (the parent writes that line; when her supervisor is gone, she has
     written it herself). Under run_supervised her stdin is her lifeline to it (supervisor.Lifeline).
     A live worker's lines also go to terminal.log beside its config, for the run's trace."""
@@ -238,10 +231,9 @@ def worker(argv):
                supervisor._resume_command()))
         return supervisor.WORKER_EXIT_HALTED
     if s.read_failed:
-        times = "" if cfg.cycles is not None else " %d times in a row" % caps.MAIL_READ_FAILURES_IN_A_ROW
-        say("Stopped: the inbox could not be read%s, so the run ended there (%d handled, %d held before it). "
+        say("Stopped: the inbox could not be read, so the run ended there (%d handled, %d held before it). "
             "Nothing was read as an empty inbox. Receipts %s: %s."
-            % (times, s.handled, s.held, _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
+            % (s.handled, s.held, _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
         return 1
     cost = "none (stub)" if cfg.model_source == "stub" else "$%.4f%s" % (
         s.cost_usd, " (recorded)" if cfg.model_source == "replayed" else "")

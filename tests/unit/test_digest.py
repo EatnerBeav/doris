@@ -101,6 +101,21 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(templates.render("S2", digest.build([], NOW)),
                          "Handled 0, held 0, human approvals 0. Tue Dec 1\nReceipts verify: no.")
 
+    def test_failed_inbox_reads_are_the_error_lines_of_the_fetch_step(self):
+        """Decision 89: each failed read of a run until stopped is one error line, step fetch; other
+        error lines are no failed read."""
+        r = Receipts()
+        for k in (1, 2):
+            r.add("error", "", {"step": "fetch", "error": "MailError: imap fetch: timeout", "failed_in_a_row": k,
+                                "tries_every_s": 600.0})
+        r.add("error", "", {"step": "digest", "error": "MailError: jmap send: 503", "template": "S2"})
+        r.observed("1", "a@x.example", "A")
+        r.add("error", "1", {"step": "model", "error": "ModelError: timeout"})
+        s = digest.build(r.lines, NOW)
+        self.assertEqual(s["read_failures"], 2)
+        self.assertEqual(templates.render("S2", s).split("\n")[1:], ["Failed inbox reads: 2.", "Receipts verify: no."])
+        self.assertEqual(digest.build(demo_day().lines, NOW)["read_failures"], 0)
+
     def test_human_approvals_are_counted_not_typed(self):
         r = Receipts()
         r.observed("1", "a@x.example", "A")
