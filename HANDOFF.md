@@ -27,6 +27,7 @@ From the kickoff thread (Wolf), Fri Nov 27, 11:55 PM Pacific. That thread is clo
   - A fetch `MailError` always records the step as "fetch".
   - `cp -p` copies keep their old mtime.
   - The fetch receipt needs a "new" count (near-miss 23:10).
+  - From PR #29's review: a hold notice's draft reply is always her offer of meeting times, even for a non-meeting hold (Trap Pack 18, a docs request); the no-model hold a judge's own email gets with no key could name the key to add.
   - wolf_sends:
     - control characters in the subject should exit 2;
     - add the owner-is-not-Doris check;
