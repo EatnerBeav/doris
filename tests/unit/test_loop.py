@@ -175,6 +175,8 @@ class TheSentLooks(unittest.TestCase):
 
 
 class ALongSandboxRun(unittest.TestCase):
+    STEP = 0.0                          # how far her wall clock moves at each reading (see the subclass)
+
     def test_a_later_pass_steps_her_clock_one_cycle_and_reads_the_new_mail(self):
         from tests.unit.test_restart import DORIS, OWNER, mini_sandbox
         tmp = tempfile.mkdtemp(prefix="doris-loop-")
@@ -183,9 +185,14 @@ class ALongSandboxRun(unittest.TestCase):
         with open(os.path.join(paths.SANDBOX, "inbox", "02-marcus-request.eml"), "rb") as fh:
             marcus = fh.read()
         marcus = b"".join(l for l in marcus.splitlines(True) if not l.lower().startswith(b"date:"))
-        dropped = []
+        clock, dropped = [1000.0], []
 
-        def drop_in(seconds):           # a judge drops an email (no Date) in while she waits
+        def now():                      # her wall clock, moved on by her waits only (and STEP a reading)
+            clock[0] += self.STEP
+            return clock[0]
+
+        def drop_in(seconds):           # her wait; a judge drops an email (no Date) in while she waits
+            clock[0] += seconds
             if not dropped:
                 dropped.append(seconds)
                 with open(os.path.join(root, "inbox", "14-judge.eml"), "wb") as fh:
@@ -193,12 +200,21 @@ class ALongSandboxRun(unittest.TestCase):
 
         cfg = loop.RunConfig(mode="throwaway", run_name="model-stub-sandbox-test", state_dir=os.path.join(tmp, "state"),
                              sandbox_root=root, owner_addr=OWNER, doris_addr=DORIS, clock_mode="advance",
-                             cycles=2, cycle_s=0.01)
-        with mock.patch.object(loop, "_sleep", drop_in):
+                             cycles=2, cycle_s=600.0)
+        with mock.patch.object(loop, "_time", now), mock.patch.object(loop, "_sleep", drop_in):
             s = loop.run(cfg)
+        self.assertEqual(len(dropped), 1)
         self.assertEqual(s.handled, 2)
         observed = [l for l in receipts.read_lines(s.receipts_path) if l["kind"] == "observed" and "from_addr" in l["payload"]]
         self.assertEqual([l["payload"]["clock"] for l in observed], ["2026-12-01T16:10:00Z", "2026-12-01T16:20:00Z"])
+
+
+class ALongSandboxRunOnASlowMachine(ALongSandboxRun):
+    """Review of 7e1a9fa, item 6 (a CI flake): the test waited on the real clock for a 10 ms cycle, so
+    on a slow machine her next cycle could pass before her wait first slept, the judge's mail never
+    landed, and 1 was handled, not 2. Here each reading of her clock takes 1/64 s; the old test,
+    its clock stepping so, failed every time."""
+    STEP = 1 / 64
 
 
 class HerCopies(unittest.TestCase):
