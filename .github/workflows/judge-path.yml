@@ -7,10 +7,16 @@ name: judge path
 
 on:
   push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: judge-path-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   readme:
@@ -30,7 +36,7 @@ jobs:
         shell: ${{ matrix.shell }}
     env:
       REPO_URL: https://github.com/${{ github.repository }}
-      SHA: ${{ github.sha }}
+      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Which Python a judge would get
         run: ${{ matrix.py }} --version
@@ -92,6 +98,9 @@ jobs:
         run: |
           grep -q "0 human approvals" first.txt || { echo "first run: no '0 human approvals' line"; exit 1; }
           grep -q "chain verified" first.txt || { echo "first run: no 'chain verified'"; exit 1; }
+          grep -q "A fresh sandbox day" second.txt || { echo "second run: did not start a fresh day"; exit 1; }
+          grep -q "0 human approvals" second.txt || { echo "second run: no '0 human approvals' line"; exit 1; }
+          grep -q "chain verified" second.txt || { echo "second run: no 'chain verified'"; exit 1; }
           { echo "### ${{ matrix.label }}"; echo; echo '```'; tail -n 3 first.txt; echo '```'; echo "Second run:"; echo '```'; tail -n 3 second.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   zip:
@@ -107,7 +116,7 @@ jobs:
       - name: Download and unpack the ZIP (no git, no .git folder)
         shell: bash
         run: |
-          curl -sSfL -o doris.zip "https://github.com/${{ github.repository }}/archive/${{ github.sha }}.zip"
+          curl -sSfL -o doris.zip "https://github.com/${{ github.repository }}/archive/${{ github.event.pull_request.head.sha || github.sha }}.zip"
           if [ "$RUNNER_OS" = "Windows" ]; then pwsh -NoProfile -Command "Expand-Archive doris.zip -DestinationPath ."; else unzip -q doris.zip; fi
           ls -d doris-*
           mv doris-* doris-main
