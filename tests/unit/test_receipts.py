@@ -241,6 +241,26 @@ class Verify(Tmp):
         if word:
             self.assertIn(word, res.reason)
 
+    def test_a_rechained_line_holding_nan_or_an_infinity_names_its_seq(self):
+        # json.loads takes NaN, Infinity and 1e999; canonical() refuses them. A hand re-chained line
+        # holding one is a bad seq, never a ValueError out of verify.
+        os.makedirs(os.path.dirname(self.path))
+        for literal in (b"NaN", b"Infinity", b"-Infinity", b"1e999"):
+            with self.subTest(literal=literal):
+                first, second = build_chain([1, 2]).split(b"\n")[:2]
+                line = json.loads(second.decode("ascii"))
+                del line["hash"]
+                line["payload"]["x"] = json.loads(literal)
+                line["hash"] = hashlib.sha256(line["prev"].encode() + canon(line)).hexdigest()
+                raw = canon(line).replace(b'"x":Infinity', b'"x":' + literal)
+                self.assertIn(b'"x":' + literal, raw)
+                self.put(first + b"\n" + raw + b"\n")
+                try:
+                    res = receipts.verify(self.path)
+                except ValueError as exc:
+                    self.fail("verify raised %r" % (exc,))
+                self.assertEqual((res.ok, res.lines, res.first_bad_seq), (False, 1, 2), res)
+
     def test_untouched_file_passes(self):
         self.five_lines()
         self.assertEqual(tuple(receipts.verify(self.path)[:3]), (True, 5, None))
