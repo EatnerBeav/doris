@@ -17,8 +17,11 @@ each message in the order she first touched it:
     Checked   the gate before an effect: each check and its verdict
     Called    a tool, and what it got back           Verified  a read-back (calendar or Sent)
     Closed    the closing line (Held for a hold), its why
+    Follow-up an entry in her ledger filed, due or closed: the one nudge on an offer nobody answered,
+              or the check that a booking is still on the calendar
 
-Sensitive mail shows as skipped by design. The run's own lines close it: the start, the inbox reads,
+One of her bookings found gone from the calendar is an item of its own, said to be her calendar
+check and not a mail. Sensitive mail shows as skipped by design. The run's own lines close it: the start, the inbox reads,
 the digest, a halt (its cause, the call in flight, the dropped queue) and the summary. Each step is
 worded only from what its own lines hold; what a line does not record is said to be not recorded.
 
@@ -41,6 +44,7 @@ import re
 import sys
 
 from . import netguard, paths, receipts, templates
+from .why import FOLLOW_UP_WORDS, gone_notice
 
 EXIT_OK, EXIT_BROKEN, EXIT_USAGE = 0, 1, 2
 SHOWN = 200                                   # characters of one value shown, at most
@@ -330,7 +334,8 @@ def render(lines, path, label=None, message=None):
     for n in picked:
         subject, group = blocks[n]
         out.append("")
-        out.append("Message %d of %d: %s" % (n + 1, len(blocks), _title(subject, group)))
+        own = _gone(group) is not None or _own_check(subject)
+        out.append("%s %d of %d: %s" % ("Item" if own else "Message", n + 1, len(blocks), _title(subject, group)))
         out.extend(_steps(group, t))
     shown_run = run_lines if message is None else [l for l in run_lines if l.get("kind") == "halted"]
     if shown_run:
@@ -450,11 +455,37 @@ def _flagger(source):
                   "yes-man": "the yes-man stand-in"}, source, "the reader")
 
 
+def _gone(group):
+    """The payload of the line that opens an item of her own calendar check (one of her bookings found
+    gone, ruling 17), or None for a mail's block."""
+    seen = next((l for l in group if l.get("kind") == "observed"), None)
+    p = _payload(seen) if seen is not None else {}
+    return p if p.get("step") == "booking_check" else None
+
+
+BOOKING_KEY = "booking:"                      # ledger.GONE_KEY: the subject of her own calendar check's lines
+
+
+def _own_check(subject):
+    """A subject her own calendar check wrote (ruling 17): one of her bookings, never a mail."""
+    return isinstance(subject, str) and subject.startswith(BOOKING_KEY)
+
+
+def _with(p):
+    return _who(p) if p.get("from_addr") else "a sender not recorded"
+
+
 def _title(subject, group):
     seen = next((l for l in group if l.get("kind") == "observed"), None)
+    if seen is None and _own_check(subject):      # her check wrote an error line for it and never called it gone
+        return "her calendar check, no mail: her booking %s could not be checked, and it is not called gone" % (
+            shown(subject[len(BOOKING_KEY):]),)
     if seen is None:
         return "Message-ID %s" % (shown(subject),)
     p = _payload(seen)
+    if _gone(group) is not None:
+        return "her calendar check, no mail: her booking %s with %s is gone from the calendar" % (
+            shown(p.get("booking_id")), _with(p))
     if _sensitive(subject, p):
         return "sensitive mail (its Message-ID kept only as a hash)"
     if not p.get("from_addr"):
@@ -475,8 +506,9 @@ def _norm_id(value):
 
 def _steps(group, t, run_level=False):
     """One row per step of this message (or of the run itself), in receipt order."""
-    out, state, reads_done = [], {"reread_due": False}, False
+    out, state, reads_done, there_done = [], {"reread_due": False}, False, False
     reads = [l for l in group if l.get("kind") == "called" and _payload(l).get("call") == "mail_fetch"]
+    there = [l for l in group if run_level and _still_there(l, t)]
     for line in group:
         kind, p = line.get("kind"), _payload(line)
         if kind == "result" and _is_int(p.get("call_seq")) and p.get("call_seq") in t.results:
@@ -487,6 +519,11 @@ def _steps(group, t, run_level=False):
             if not reads_done:
                 out.append(_row("Read", _inbox_reads(reads, t), _seqs([l.get("seq") for l in reads])))
                 reads_done = True
+            continue
+        if any(line is l for l in there):                 # her once-a-cycle reads that found the booking: one row
+            if not there_done:
+                out.append(_row("Verified", _bookings_there(there), _seqs([l.get("seq") for l in there])))
+                there_done = True
             continue
         try:
             out.extend(_step(line, t, state))
@@ -501,6 +538,26 @@ def _steps(group, t, run_level=False):
     return out
 
 
+def _still_there(line, t):
+    """A read of her once-a-cycle calendar check (ruling 17) that found the booking on the calendar."""
+    p = _payload(line)
+    if line.get("kind") != "called" or p.get("call") != "calendar_get" or "booking_check" not in p:
+        return False
+    r = t.result(line.get("seq")) if _is_int(line.get("seq")) else None
+    return r is not None and r.get("ok") is True and r.get("found") is True
+
+
+def _bookings_there(reads):
+    """Every read of her once-a-cycle check that found its booking, as one row: how many, and of which."""
+    counts = {}
+    for line in reads:
+        target = shown(_payload(line).get("target"))
+        counts[target] = counts.get(target, 0) + 1
+    each = ", ".join("%s %s" % (bid, _tally(n, "time", "times")) for bid, n in counts.items())
+    return ("her bookings are still on the calendar, her check once a cycle: %s, each found its booking there "
+            "(%s). An edit is not checked." % (_tally(len(reads), "read", "reads"), each))
+
+
 def _label_for(kind):
     return {"observed": "Saw", "classified": "Classed", "decided": "Decided", "checked": "Checked",
             "called": "Called", "result": "Got back", "held": "Held", "halted": "Halted", "error": "Error",
@@ -512,10 +569,14 @@ def _step(line, t, state):
     if kind == "observed":
         if p.get("step") == "start":
             return [_row("Started", _started(p), _seqs([seq]))]
+        if p.get("step") == "booking_check":
+            return [_row("Saw", _saw_gone(p), _seqs([seq]))]
         return [_row("Saw", _saw(line.get("subject"), p), _seqs([seq]))]
     if kind == "classified":
         return [_row("Classed", _classed(p), _seqs([seq]))]
     if kind == "decided" and "outcome" not in p:
+        if _pick(_FOLLOW_UP, p.get("action"), None) is not None:
+            return [_row("Follow-up", _FOLLOW_UP[p["action"]](p) + " " + _because(line.get("why")), _seqs([seq]))]
         return [_row("Decided", _decided(p, line.get("why")), _seqs([seq]))]
     if kind in ("decided", "held"):
         return [_row("Held" if kind == "held" else "Closed", _closed(p, line.get("why")), _seqs([seq]))]
@@ -621,6 +682,21 @@ def _saw(subject, p):
     return text + "."
 
 
+def _saw_gone(p):
+    """Her own calendar check found one of her bookings gone (ruling 17). No mail was read for it."""
+    slot = p.get("slot") if isinstance(p.get("slot"), dict) else {}
+    text = "her booking %s (%s, with %s) is gone from the calendar: " % (
+        shown(p.get("booking_id")), _span(slot.get("start"), slot.get("end")), _with(p))
+    if p.get("recovered") is True:
+        text += "her ledger marked it gone before a restart, and she finishes the hold here"
+    else:
+        text += "missing on %s a short wait apart" % (_tally(p.get("reads"), "read", "reads"),)
+        text += (", so it is taken as removed by the owner" if p.get("owner_deleted") is True else
+                 " (owner_deleted: %s)" % (shown(p.get("owner_deleted")),))
+    return text + (". It was booked for Message-ID %s. No mail was read for this: it is her own check of the "
+                   "calendar." % (shown(p.get("message")),))
+
+
 def _count(n, word):
     return _tally(n, word, word + "s")
 
@@ -673,6 +749,70 @@ def _decided(p, why):
     return text
 
 
+# --- the follow-up: an entry in her ledger, filed, due or closed ------------------------------------
+def _entry(p):
+    """A follow-up as its line names it: 'entry 2 in her ledger (the one nudge, due Thu Dec 3, 8:10 AM Pacific)'."""
+    fu = p.get("follow_up") if isinstance(p.get("follow_up"), dict) else {}
+    kind = fu.get("kind")
+    if kind == "nudge":
+        what = "the one nudge, due %s" % (when(fu.get("due")),)
+    elif kind == "booking_check":
+        what = "the check that booking %s is still on the calendar, every cycle until it starts %s" % (
+            shown(fu.get("booking_id")), when(fu.get("due")))
+    else:
+        what = "kind %s, due %s" % (shown(kind), when(fu.get("due")))
+    return "entry %s in her ledger (%s)" % (shown(fu.get("id")), what)
+
+
+def _about(p):
+    """Who a run-level follow-up line is about: the address the offer went to, or the booking is with."""
+    return " for %s" % (shown(p.get("sender")),) if p.get("sender") else ""
+
+
+def _rule(p):
+    """The line's rule word in plain words (why.FOLLOW_UP_WORDS), or as recorded when it is not listed."""
+    return _pick(FOLLOW_UP_WORDS, p.get("rule"), None) or shown(p.get("rule"))
+
+
+def _starts(spans):
+    if not isinstance(spans, list):
+        return "times as recorded: %s" % (shown(spans),)
+    return "; ".join(when(s.get("start")) if isinstance(s, dict) else shown(s) for s in spans) or "none"
+
+
+def _filed(p):
+    fu = p.get("follow_up") if isinstance(p.get("follow_up"), dict) else {}
+    text = "filed: %s" % (_entry(p),) if p.get("new") is not False else (
+        "already filed before a restart, the same %s" % (_entry(p),))
+    if fu.get("kind") == "nudge" and "expires" in fu:
+        text += "; the offer expires %s" % (when(fu.get("expires")),)
+    return text + "."
+
+
+def _settled(p):
+    text = "closed%s: %s" % (_about(p), _entry(p))
+    if "rule" in p:
+        text += ": %s" % (_rule(p),)
+    if p.get("check"):
+        text += " (check %s)" % (shown(p.get("check")),)
+    return text + "."
+
+
+def _nudge(p):
+    kept, dropped = p.get("kept"), p.get("dropped")
+    return ("due%s: %s. The nudge (%s) goes on thread %s with %s of the offer's times still available (%s); "
+            "dropped: %s." % (_about(p), _entry(p), shown(p.get("template")), shown(p.get("thread")),
+                              shown(len(kept)) if isinstance(kept, list) else "a number not recorded",
+                              _starts(kept), _starts(dropped)))
+
+
+def _waits(p):
+    return "due%s, and the nudge waits (%s): %s." % (_about(p), _rule(p), _entry(p))
+
+
+_FOLLOW_UP = {"file_follow_up": _filed, "close_follow_up": _settled, "nudge": _nudge, "nudge_waits": _waits}
+
+
 def _closed(p, why):
     outcome, template = p.get("outcome"), p.get("template")
     text = shown(outcome)
@@ -680,6 +820,15 @@ def _closed(p, why):
         text += ", %s sent" % (shown(template),)
     text += ". " + _because(why)
     notes = []
+    if isinstance(p.get("follow_up"), dict):
+        notes.append("Follow-up filed: %s." % (_entry(p),))
+    if p.get("step") == "booking_check":
+        mid = shown(p.get("notice_message_id"))
+        notes.append("Hold notice to the owner: %s." % ({
+            "sent": "sent (Message-ID %s)" % (mid,),
+            "handed_over": "handed to the mail server (Message-ID %s); her copy was not seen in Sent" % (mid,),
+            "unknown": "it may have gone (Message-ID %s); it is not confirmed in Sent and never sent again" % (mid,),
+            "none": "not sent, so the digest lists the hold"}.get(gone_notice(p), "not recorded whether it went"),))
     if p.get("retried"):
         notes.append("A failed call was retried (the steps above show which).")
     if p.get("recovered"):
@@ -744,6 +893,9 @@ def _call_words(p, state):
         state["reread_due"] = False
         return "Called", "calendar delete, booking %s%s" % (shown(target), attempt)
     if call == "calendar_get":
+        if "booking_check" in p:                          # ruling 17: is her booking still on the calendar
+            again = " (read again, a short wait after it was missing)" if p.get("booking_check") == 2 else ""
+            return "Called", "her calendar check: is booking %s still there%s%s" % (shown(target), again, attempt)
         return "Verified", "read back booking %s%s" % (shown(target), attempt)
     if call == "send":
         to = _pick({"sender": "the sender", "owner": "the owner"}, p.get("to"), shown(p.get("to")))
@@ -780,6 +932,10 @@ def _result_words(p, r, in_flight, state=None):
     if call == "calendar_delete":
         return shown(r.get("state")) if r.get("state") else "removed"
     if call == "calendar_get":
+        if "booking_check" in p:
+            return ("still there (%s, %s); an edit is not checked" % (_span(r.get("start"), r.get("end")),
+                                                                      shown(r.get("status")))
+                    if r.get("found") is True else "missing" if r.get("found") is False else _found(r))
         return _read_back(r)
     if call == "send":
         return _sent(r)
@@ -796,7 +952,8 @@ def _outcome(r, in_flight):
     if r.get("ok") is True:
         return "ok"
     if r.get("ok") is False:
-        return "failed%s" % (": %s" % (shown(r.get("error")),) if r.get("error") else "")
+        error = r.get("error")                # "failed" alone says nothing more: the word is not said twice
+        return "failed%s" % (": %s" % (shown(error),) if error and error != "failed" else "")
     return "outcome not recorded" + (" (ok: %s)" % (shown(r.get("ok")),) if "ok" in r else "")
 
 

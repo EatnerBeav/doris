@@ -47,11 +47,20 @@ Every send and every calendar write is one of five fixed action kinds (`shapes.A
 
 | Action | What it is | Who it can reach |
 |---|---|---|
-| `send_reply` | An approved template (T1, T2, T3, T4, T9, T10, T12, T13, T18) | The sender of the message she is answering, on their thread, with one blind copy to the owner's address from config |
+| `send_reply` | An approved template (T1, T2, T3, T4, T9, T10, T12, T13, T18) | The sender of the message she is answering, on their thread, with one blind copy to the owner's address from config. The nudge (T9) answers no message: it goes only to the address her open offer on that thread went to |
 | `send_hold_notice` | S1: the reason, the sender's own words (defanged, codes blanked) and a draft | The owner only |
 | `send_digest` | S2: the day's counts, from receipts | The owner only |
 | `calendar_create` | Her event, create-only, under her own booking ID | The owner's calendar. No organizer, no attendees, so the calendar server mails nobody |
 | `calendar_delete` | Removes her own event by booking ID | The owner's calendar, her own `doris-` events only |
+
+### The follow-up
+
+Every offer and every booking leaves a dated entry in her ledger (`ledger.Ledger.file_followup`, table `followups`). Each is named in its own `decided` receipt line (`follow_up`: the entry, its date, and the offer's expiry), on the message's closing line, in the terminal and in the digest ("Follow-ups filed: ...").
+
+- **An offer's entry is its one nudge**, due two business days after the offer went out (`loop.nudge_due`: Mon to Fri, her holidays off). Each cycle she looks at every open entry (`loop._Run.follow_ups`). It closes with no nudge as soon as there is nobody to nudge: the offer was answered, closed or expired, the thread is held, they opted out, or they wrote anything since the offer. Once due, the nudge (T9) goes once, through the gate like every send, listing only the offer's own times that are still available (`loop._Run.nudge`). Never a second on a thread (G7), never a new time (G9), and no nudge at all when none of the offer's times is left. What the nudge lists counts only from the moment the mail server may have taken it (`ledger.Ledger._offer`): a nudge the gate refused, or one a stop cut short, leaves the offer as it first went out. If a kill came during the send, so her ledger cannot say whether the nudge went, and the nudge left a time out, a number or a bare yes books nothing: they get the times again (T12), and a reply to that books.
+- **A booking's entry is her calendar check** (ruling 17). Each cycle, after the stop scan and before any new message, she reads every future booking by its booking ID (`loop._Run.check_bookings`). Missing on two reads a short wait apart, it is marked gone in her ledger, the owner gets a hold notice ("you removed this booking from your calendar; I haven't told them") and the prospect gets nothing. A read that fails is never "missing": it is said once a run (an `error` line, step `booking_check`), she goes on to the next booking, and two failed reads in a row end the check until her next cycle (`caps.RULING17_UNREAD_IN_A_ROW`). A booking she is taking off herself, for the sender's own cancel or move, is written `cancelling` in her ledger before her delete goes, and the check never reads it: a kill part way through her own cancel is never called the owner's doing. Edits are not checked.
+
+Tests: `tests/unit/test_followups.py` (`test_owner_deleted_holds` is ruling 17's).
 
 Her other calls are listed in `receipts.CALLS`: fetch mail, look in Sent, query the calendar, read one event back, the model call, and filing a message. There is no tool for the web, a shell, a payment, deleting or moving mail, editing an event, or writing to anyone an email names.
 
@@ -136,7 +145,9 @@ Settings that are not secrets: `DORIS_OWNER_ADDRESS` (where hold notices, the di
 - The per-run caps (100 sends to prospects, 40 calendar writes, $5.00 of model spend; `caps.py`) count over the whole of one run, and a `run` is one run however many days it lasts. A send or a booking past a cap is held, not sent; reaching the spend cap halts her until `resume`. The hourly caps count the hour just past.
 - Zones she reads: Pacific, Mountain, Central and Eastern (by name or abbreviation, daylight time included), UTC or GMT, and a numeric offset written after UTC or GMT, such as UTC+1 or GMT-8 (`zones.py`, `parser.py`); a bare offset such as -08:00 after a time is no zone. Any other zone, such as UK, London, CET or IST, is no zone to her: that email never books directly, and its offer shows Pacific times with UTC beside them.
 - The days she never offers or books are on a fixed list in `caps.HOLIDAYS`, given below under ruling 3.
-- Not built yet: the one nudge on an unanswered offer (T9), and the once-a-cycle check that her future bookings are still on the calendar (ruling 17; today it runs only when a booking is resumed after a restart).
+- The nudge never offers a new time. It lists only the offer's own times that are still available and more than a day away, so an offer of times in the next three days often has none left when the nudge is due two business days later: then no nudge goes, and the offer stays open until it expires.
+- After a nudge that dropped a time, the numbers are the nudge's. A number in a reply written after the nudge is read on the nudge's list, even when that reply answers the first offer email, so "number 2" can book a different time than it named there. Her confirmation states the time she booked, and one reply moves or cancels it.
+- The calendar check sees a booking that is gone, not one that was edited: a moved or shortened event is not noticed.
 - The Trap Pack's known limits, and what each run got wrong, are in `tests/trap-pack/RUNS.md`.
 
 ## Repo layout
@@ -180,7 +191,7 @@ Comments, tests and these pages cite rules by number: "ruling 8", "locked call 9
 14. **A pick plus a question** books the pick, and the question becomes a digest line. Money, legal or a complaint in the sender's own text (not a footer or a quote) holds the whole email.
 15. **People.** An assistant booking for a boss gets the booking. A pick from a new address, or a Reply-To unlike From, is held.
 16. **A readable email with an impossible time** (February 30, 25:00) gets an offer.
-17. **A booking gone from the calendar.** If one of her future bookings is no longer on the calendar, she sends the owner a hold notice and nothing to the prospect. Edits to an event are not checked. (See Limits above for what is built.)
+17. **A booking gone from the calendar.** If one of her future bookings is no longer on the calendar, she sends the owner a hold notice and nothing to the prospect. Edits to an event are not checked. (She reads them once a cycle: see "The follow-up" above.)
 18. **Who she answers.** If the owner is in To with only the sender, she may reply; else if Doris is in To, on her own thread, with only the sender, she may reply. Anything else (Cc, Bcc, a group, a first email sent straight to her) is filed or held, never answered (screen 8, G6).
 
 ### The other numbers

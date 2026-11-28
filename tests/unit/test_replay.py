@@ -159,9 +159,13 @@ class DemoDay(unittest.TestCase):
             "  Checked   the gate before send_reply", "passed:", "[seq 20]",
             "  Called    send T1 to the sender, BCC the owner", "-> handed over", "[seq 21-22]",
             "  Verified  looked in Sent for T1", "-> found", "[seq 23-24]",
-            "  Called    file it under doris-book -> ok", "[seq 25-26]",
+            "  Follow-up filed: entry 1 in her ledger (the check that booking doris-",
+            "is still on the calendar, every cycle until it starts Wed Dec 2, 11:00 AM Pacific). "
+            "Why (followup.booking_filed): Follow-up filed in her ledger:", "[seq 25]",
+            "  Called    file it under doris-book -> ok", "[seq 26-27]",
             "  Closed    book, T1 sent. Why (policy.book_clear_time): One clear time, parser and model "
-            "agree, and it is available: book.", "[seq 27]"])
+            "agree, and it is available: book. Follow-up filed: entry 1 in her ledger (the check that booking doris-",
+            "[seq 28]"])
         self.assertNotIn("The run\n", out)
 
     def test_the_calendar_timeout_and_its_retry_are_both_shown(self):

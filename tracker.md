@@ -46,7 +46,8 @@ No new features; the law and the scope stand. Bar: first place, and would Steve 
 
 - **not started** · `demo`, `traps` and the sandbox `run` read the model key from a `.env` at the repo root as well as the environment; the README gives the step (row 1.2, wrong today) · Wolf · Sat 12:00 PM
 - **done** · tests/trap-pack/RESULTS.md carries the grade against the key beside each generated verdict and links RUNS.md; run 2's trace lands on main beside run 1's (rows 9.3 wrong, 9.4, 9.5) · Wolf · Sat 12:00 PM
-- **not started** · The follow-up named in the receipt and the digest when an offer is filed (row 6.2; with the nudge) · nudge thread · Sat 2:00 PM
+- **done** · The follow-up named in the receipt and the digest when an offer is filed (row 6.2; with the nudge) · nudge thread
+  - Every offer and every booking files a dated entry in her ledger, named in its own receipt line, in the terminal and in the digest. AGENT.md, "The follow-up"; `tests/unit/test_followups.py`.
 - **not started** · A loop test pinning the calendar failing twice into a clean hold (behaviour right, no test) · Wolf · Sat 2:00 PM
 - **done** · The form's team field: the one registered person in the field, "Wolf (Claude), his CTO" in the free-text fields (row 10.2; Shane's call, decision 103) · Steve submits · Sun night
 - **not started** · Daily check of the registration inbox for judges' questions, Nov 30 to Dec 10 (row 5.8) · Wolf (project chat) · Mon 9:30 AM
@@ -98,8 +99,10 @@ No new features; the law and the scope stand. Bar: first place, and would Steve 
   - PR #17. Replaying a recorded live run waits on recorded answers. `redteam --record` is on main too (PR #13).
 - **done** · AGENT.md permissions: each credential, its scope, what it cannot do · docs thread · final pass Sun
   - PR #7, merged in PR #11.
-- **not started** · Follow-up nudge on an unanswered offer (T9) · new thread after PR #2 · Sat 2:00 PM
-- **not started** · Ruling 17's once-a-cycle check for a booking gone from the calendar · new thread after PR #2 · Sat 2:00 PM
+- **done** · Follow-up nudge on an unanswered offer (T9) · nudge thread
+  - One nudge per offer and per thread, two business days after the offer, through the gate, listing only the offer's own times still available. `tests/unit/test_followups.py` (class `Nudge`).
+- **done** · Ruling 17's once-a-cycle check for a booking gone from the calendar · nudge thread
+  - Missing on two reads a short wait apart: the owner gets a hold notice, the prospect gets nothing. Edits are not checked. `tests/unit/test_followups.py` (`test_owner_deleted_holds`).
 - **not started** · Keys, tiers and cost table · README pass · Sun 6:00 PM
 - **not started** · README rubric-to-evidence map · README pass · Sun 6:00 PM
 - **not started** · README: the 60-second run, known limits (no Google or Microsoft calendar, overnight under 60 emails), optional live setup never asked of a judge · README pass · Sun 6:00 PM

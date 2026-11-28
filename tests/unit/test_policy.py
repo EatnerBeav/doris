@@ -212,6 +212,56 @@ class APickBeforeHerNewestOffer(WhyIsListed):
         self.assertEqual((p.action, p.template, p.slot, p.offer_id), ("resend", "T12", None, None))
         self.assertWhy(p, "policy.pick_before_offer")
 
+    def test_a_numbered_pick_or_a_yes_from_before_her_nudge_gets_the_offer_again(self):
+        # the nudge lists the offer's times again and numbers them anew when one was dropped: "2" written
+        # before it went means the old list's second time, which is not the second one now
+        nudged_at = NOW + dt.timedelta(days=2)
+        two = dict(offer([slot(24), slot(48)]), nudged=nudged_at)
+        between = nudged_at - dt.timedelta(minutes=5)          # after the offer, before the nudge
+        pick = PickResult(kind="matched_slot", slot_index=1, by="number")
+        self.assertResent(policy.decide(facts("pick", branch="2", thread=self.on_thread(two), pick=pick,
+                                              arrived=between)))
+        one = dict(offer([slot(24)]), nudged=nudged_at)
+        self.assertResent(policy.decide(facts("yes", branch="2", thread=self.on_thread(one), arrived=between)))
+        # after the nudge went out, the same pick and the same yes book
+        after = nudged_at + dt.timedelta(hours=1)
+        p = policy.decide(facts("pick", branch="2", thread=self.on_thread(two), pick=pick, arrived=after))
+        self.assertEqual((p.action, p.slot), ("book", slot(48)))
+        p = policy.decide(facts("yes", branch="2", thread=self.on_thread(one), arrived=after))
+        self.assertEqual((p.action, p.slot), ("book", slot(24)))
+        # and a pick that names its time is read by its time, nudge or no nudge
+        named = PickResult(kind="matched_slot", slot_index=1, by="time")
+        p = policy.decide(facts("pick", branch="2", thread=self.on_thread(two), pick=named, arrived=between))
+        self.assertEqual((p.action, p.slot), ("book", slot(48)))
+
+    def test_while_her_nudge_may_or_may_not_have_gone_no_number_and_no_yes_books(self):
+        """Fable review of PR #42, finding 2: the nudge's send was cut off or its result is unknown, so
+        the sender holds the offer's list or the nudge's, and a number or a bare yes could mean
+        either. They get the open times again (T12); a time they write out still books."""
+        nudged_at = NOW + dt.timedelta(days=2)
+        after = nudged_at + dt.timedelta(hours=1)               # even one that reached her after the nudge's time
+        two = dict(offer([slot(24), slot(48)]), nudged=nudged_at, nudge="in_doubt")
+        one = dict(offer([slot(24)]), nudged=nudged_at, nudge="in_doubt")
+        number = PickResult(kind="matched_slot", slot_index=1, by="number")
+        for p in (policy.decide(facts("pick", branch="2", thread=self.on_thread(two), pick=number, arrived=after)),
+                  policy.decide(facts("yes", branch="2", thread=self.on_thread(one), arrived=after))):
+            self.assertEqual((p.action, p.template, p.slot, p.offer_id, p.pick_kind),
+                             ("resend", "T12", None, None, "ambiguous"))
+            self.assertWhy(p, "policy.pick_resend")
+        named = PickResult(kind="matched_slot", slot_index=1, by="time")
+        p = policy.decide(facts("pick", branch="2", thread=self.on_thread(two), pick=named, arrived=after))
+        self.assertEqual((p.action, p.slot), ("book", slot(48)))
+        # a nudge the mail server took is not in doubt: the same number and the same yes book
+        for o, kind, kw, want in ((two, "pick", {"pick": number}, slot(48)), (one, "yes", {}, slot(24))):
+            sent = dict(o, nudge="sent")
+            p = policy.decide(facts(kind, branch="2", thread=self.on_thread(sent), arrived=after, **kw))
+            self.assertEqual((p.action, p.slot), ("book", want))
+
+    def test_an_offer_never_nudged_is_timed_by_its_send_alone(self):
+        t = self.on_thread(dict(offer(self.three()), nudged=None))
+        pick = PickResult(kind="matched_slot", slot_index=0, by="number")
+        self.assertEqual(policy.decide(facts("pick", branch="2", thread=t, pick=pick)).action, "book")
+
     def test_a_numbered_pick_that_reached_her_before_the_offer_went_out_gets_it_again(self):
         t = self.on_thread(offer(self.three()))
         for by in ("number", None):          # a pick that does not say how it named the slot is read by number
@@ -341,6 +391,27 @@ class Holds(WhyIsListed):
     def test_a_held_thread_stays_held_and_sends_no_new_notice(self):
         p = policy.decide(facts(thread=thread(held=True)))
         self.assertEqual((p.action, p.hold_code), ("thread_held", "hold.thread_held"))
+
+    def test_a_cancel_or_move_for_a_booking_found_gone_is_named_on_the_held_thread(self):
+        # ruling 17: the thread is already the owner's (its hold notice went when she found the booking
+        # gone), so nothing is sent and no second notice goes; the digest says which booking they meant
+        gone = thread(own_thread=True, held=True, gone_booking=True, written_to=frozenset([SENDER]))
+        for cls in ("cancel", "move"):
+            p = policy.decide(facts(cls, branch="2", thread=gone))
+            self.assertEqual((p.action, p.outcome, p.hold_code), ("thread_held", "hold:not_in_ledger",
+                                                                  "hold.not_in_ledger"), cls)
+            self.assertWhy(p, "hold.not_in_ledger")
+            self.assertIsNone(p.template)
+
+    def test_anything_else_on_that_held_thread_is_only_a_held_thread(self):
+        gone = thread(own_thread=True, held=True, gone_booking=True, written_to=frozenset([SENDER]))
+        for cls in ("meeting_request", "pick", "yes", "decline", "fyi", "money", "unsure"):
+            p = policy.decide(facts(cls, branch="2", thread=gone))
+            self.assertEqual((p.action, p.hold_code), ("thread_held", "hold.thread_held"), cls)
+        down = policy.decide(facts("cancel", branch="2", thread=gone, answer=answer("cancel", ok=False)))
+        self.assertEqual(down.hold_code, "hold.thread_held")        # no model answer: nothing is read into it
+        other = thread(own_thread=True, held=True, written_to=frozenset([SENDER]))
+        self.assertEqual(policy.decide(facts("cancel", branch="2", thread=other)).hold_code, "hold.thread_held")
 
 
 class CodeHoldsBeatTheModel(WhyIsListed):

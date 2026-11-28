@@ -53,7 +53,9 @@ BOOKING_PREFIX = "doris-"                               # her booking IDs (the c
 ICS_NEVER = frozenset({"ATTENDEE", "ORGANIZER"})        # locked call 3: so the calendar server mails nobody
 GONE_STATES = frozenset({"cancelled", "gone", "removed"})            # her event is no longer there (G14)
 CONFIRMABLE_STATES = frozenset({"written", "confirmed"})             # written and read back (G15)
-WRITTEN_STATES = CONFIRMABLE_STATES | GONE_STATES                     # the gate let it be written (G6)
+# The gate let it be written (G6). cancelling is her own cancel or move part way: her ledger gives that
+# state only to a booking that was written or confirmed, and her event may still be there (G14 passes it).
+WRITTEN_STATES = CONFIRMABLE_STATES | GONE_STATES | frozenset({"cancelling"})
 SENSITIVE_CHECKS = frozenset({"sender-domain", "subject-phrase", "one-time-code", "card-number",
                               "bank-routing", "bank-account", "ssn", "reset-or-login-alert"})
 UTC = _dt.timezone.utc
@@ -145,6 +147,24 @@ def _offer_length(action):
     return length
 
 
+def _is_nudge(action):
+    """The follow-up nudge: T9 to a prospect. It answers no new message (templates.md, T9), so who it
+    goes to and which times it lists come from her ledger alone, never from a message."""
+    return action.kind == "send_reply" and action.template == NUDGE
+
+
+def _thread_offers(action, ctx):
+    """The open offers on the action's thread, from the ledger now (not used, not closed, not
+    expired): each with the bare address it went to. Anything else is off contract: the check cannot run."""
+    answer = _need(ctx, "open_offers")(action.thread_key)
+    if not isinstance(answer, (list, tuple)):
+        raise _OffContract("open_offers")
+    for offer in answer:
+        if not isinstance(offer, dict) or not isinstance(offer.get("sender"), str):
+            raise _OffContract("open_offers")
+    return list(answer)
+
+
 def _now(ctx):
     now = _need(ctx, "now")
     if not _aware(now):
@@ -214,7 +234,8 @@ def _g3_under_budget(action, ctx):
 def _g4_model_there(action, ctx):
     """G4. The model is there: anything that used the model has its parsed answer. While the
     model is down (its last call failed after the one retry) nothing goes to a prospect, nudges
-    included. Hold notices and the digest still reach the owner (locked call 12)."""
+    included (a nudge used no model, so it needs no answer, only the model up). Hold notices and the
+    digest still reach the owner (locked call 12)."""
     if not _yes_no(_need(ctx, "model_ok")(), "model_ok"):
         return _fail(model="down")
     if action.template == NUDGE:
@@ -304,6 +325,8 @@ def _g6_right_recipient(action, ctx):
         if action.recipient_source != "owner" or to != [owner] or bcc:
             return _fail(rule="owner", recipient_source=str(action.recipient_source))
         return _pass(recipient_source="owner")
+    if _is_nudge(action):
+        return _g6_nudge(action, ctx, owner, to, bcc)
     msg = _need(ctx, "message")
     facts = _need(ctx, "screen_facts")
     own_thread = _yes_no(facts["own_thread"], "own_thread")
@@ -348,18 +371,42 @@ def _g6_right_recipient(action, ctx):
     return _pass(recipient_source="sender", **detail)
 
 
+def _g6_nudge(action, ctx, owner, to, bcc):
+    """G6 for the nudge (T9). It answers no message, so there is none in hand to take an address
+    from, and one in hand is refused: a nudge never rides on a message. Its one To address is a bare
+    address an open offer on this thread went to, read from her ledger now (she wrote to them there
+    and the offer still stands; used, closed or expired, there is nobody to nudge), never the owner's
+    and never hers; the one BCC is the owner's address from config; and the thread is not held for
+    the owner."""
+    detail = {"nudge": True, "to": to[0] if len(to) == 1 else "not_one_address"}
+    if _field(ctx, "message") is not None or action.recipient_source != "sender":
+        return _fail(rule="nudge", **detail)
+    if len(to) != 1 or not _BARE_ADDRESS.fullmatch(to[0]):
+        return _fail(rule="sender", **detail)
+    if to[0] == owner or bcc != [owner]:
+        return _fail(rule="owner", **detail)
+    if _yes_no(_need(ctx, "thread_held")(action.thread_key), "thread_held"):
+        return _fail(rule="thread_held", **detail)
+    if to[0] not in {_address(o["sender"]) for o in _thread_offers(action, ctx)}:
+        return _fail(rule="offer_closed", **detail)
+    return _pass(recipient_source="sender", offer="open", **detail)
+
+
 SEND_CAPS = (("sends_hour", caps.SENDS_PER_HOUR), ("sends_run", caps.SENDS_PER_RUN),
              ("sends_thread_day", caps.SENDS_PER_THREAD_PER_DAY), ("sends_thread_ever", caps.SENDS_PER_THREAD_EVER))
 
 
 def _g7_under_caps(action, ctx):
-    """G7. Under caps: per hour, per run, per thread per day, per thread total, and two offers per
-    thread, ever (ruling 6, locked call 9). Counts are what is already done, so this one must fit."""
+    """G7. Under caps: per hour, per run, per thread per day, per thread total, two offers per
+    thread, ever (ruling 6, locked call 9), and one nudge per thread, ever. Counts are what is already
+    done, so this one must fit."""
     counts = _need(ctx, "counts")(action.thread_key)
     if action.kind == "send_reply":
         word, limits = "send", list(SEND_CAPS)
         if action.template in NEW_OFFER_TEMPLATES:
             limits.append(("offers_thread", caps.OFFERS_PER_THREAD_EVER))
+        if _is_nudge(action):               # once per offer and once per thread, never a second (templates.md, T9)
+            limits.insert(0, ("nudges_thread", caps.NUDGES_PER_THREAD_EVER))
     elif action.kind == "send_hold_notice":
         word, limits = "hold_notice", [("hold_notices_hour", caps.HOLD_NOTICES_PER_HOUR)]
     else:
@@ -370,7 +417,7 @@ def _g7_under_caps(action, ctx):
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             raise _OffContract("counts." + name)
         if count >= limit:
-            return _fail(rule=word, cap=name, count=count, limit=limit)
+            return _fail(rule="nudge" if name == "nudges_thread" else word, cap=name, count=count, limit=limit)
         seen[name] = count
     return _pass(**seen)
 
@@ -411,11 +458,17 @@ def _g8_approved_template(action, ctx):
 # --- G9 to G13: what goes on the calendar ------------------------------------------------------
 def _open_offer_slots(action, ctx):
     """The slots of the open offers on the action's thread that went to the sender of the message
-    being answered (an offer is one sender's: same sender, same thread), from the ledger, as (start,
+    being answered (an offer is one sender's: same sender, same thread), or for a nudge, which answers
+    no message, to the one address it goes to; from the ledger, as (start,
     end) pairs. The offer the action's own send carries is not one of them: the loop leaves it out, so
     a restart that sends it again reads it as a new offer. Anything but a collection of Slots with
     aware times is off contract: the check cannot run."""
-    sender = _address(_need(ctx, "message").from_addr)
+    if _is_nudge(action):                   # no message in hand: the one address the nudge goes to (G6 checks it)
+        if len(action.to) != 1:
+            raise _Missing("recipient")
+        sender = _address(action.to[0])
+    else:
+        sender = _address(_need(ctx, "message").from_addr)
     answer = _need(ctx, "open_offer_slots")(action.thread_key, sender)
     if not isinstance(answer, (set, frozenset, list, tuple)):
         raise _OffContract("open_offer_slots")
@@ -448,7 +501,8 @@ def _g9_bookable_interval(action, ctx):
     a start an open offer to them on the thread already holds. A slot she offers on
     her own starts on the hour or half hour. A pick (any booking not marked direct) books only a slot
     an open offer to its sender on its thread holds, exactly as offered, and keeps the grid it was
-    offered on. Every offered slot is checked, not just the first. The receipt says written for a
+    offered on. A nudge (T9) lists only slots an open offer to its one recipient on its thread still
+    holds, exactly as offered. Every offered slot is checked, not just the first. The receipt says written for a
     direct booking only: a pick is checked on its offer's grid, but it is no time the sender wrote."""
     slots = _helper("slots")
     now = _now(ctx)
@@ -463,7 +517,14 @@ def _g9_bookable_interval(action, ctx):
         if not _times_ok(offered):
             raise _Missing("offered_times")
         length = _dt.timedelta(minutes=_offer_length(action))
-        written = _written_starts(ctx, _open_offer_slots(action, ctx))
+        open_pairs = _open_offer_slots(action, ctx)
+        if _is_nudge(action):
+            # a nudge only lists again times an open offer to them on this thread still holds, each
+            # exactly as offered: never a new time (templates.md, T9)
+            for start in offered:
+                if (start, start + length) not in open_pairs:
+                    return _fail(rule="not_offered", start=_iso(start), written=False)
+        written = _written_starts(ctx, open_pairs)
         to_check = [(Slot(start, start + length), start in written, start in written) for start in offered]
     for slot, as_written, said in to_check:
         ok, rule = slots.bookable(slot, now, as_written)
@@ -622,7 +683,8 @@ def _g16_nothing_opened_nobody_new(action, ctx):
     """G16. Nothing opened, nobody new (the hard rule): every attachment of this message is listed
     "not inspected", with no exception; the action is one of the fixed kinds, so it goes to her
     mail server or her calendar server and nowhere else; and every recipient is the sender or the
-    owner, never an address or a number taken from a body. A calendar write has no recipients."""
+    owner (for a nudge, which answers no message, the address her open offer on the thread went to),
+    never an address or a number taken from a body. A calendar write has no recipients."""
     if action.kind not in ACTION_KINDS:
         return _fail(kind="not_a_fixed_kind")
     host = "mail" if action.kind in SENDS else "calendar"
@@ -640,6 +702,10 @@ def _g16_nothing_opened_nobody_new(action, ctx):
         allowed.add(_address(_need(ctx, "owner_addr")))
         if msg is not None:
             allowed.add(_address(msg.from_addr))
+        elif _is_nudge(action):
+            # the nudge answers no message: its one prospect is whoever an open offer of hers on this
+            # thread went to (her ledger), never an address from any body
+            allowed.update(_address(o["sender"]) for o in _thread_offers(action, ctx))
     recipients = [_address(a) for a in list(action.to) + list(action.bcc)]
     if action.recipient_source not in ("sender", "owner") or any(r not in allowed for r in recipients):
         return _fail(nobody_new=False, **detail)
