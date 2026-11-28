@@ -461,6 +461,15 @@ def _seqs(seqs):
 # --- the steps, in words -------------------------------------------------------------------------
 def _started(p):
     text = "%s." % (when(p.get("clock")),)
+    if "fresh_start" in p:                    # a live run: a new ledger, or the one already there
+        fresh = p.get("fresh_start")
+        text += (" This run started a new live ledger (--fresh)." if fresh is True else
+                 " It went on from the live ledger already there." if fresh is False else
+                 " Fresh start: %s." % (shown(fresh),))
+    if "mail_since" in p:
+        since = p.get("mail_since")
+        text += (" Mail read from: not recorded." if since is None else
+                 " Mail received before %s is never read (the ledger's fresh start)." % (when(since),))
     if p.get("interrupted_runs"):
         text += " Runs left unfinished before it: %s." % (shown(p.get("interrupted_runs")),)
     return text

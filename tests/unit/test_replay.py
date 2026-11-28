@@ -26,6 +26,7 @@ from tests.unit.test_restart import DORIS, OWNER, add, mini_sandbox
 
 RUN1 = "model-live-throwaway-traps-20261127T2207Z"      # Trap Pack run 1, model called live, committed
 REDTEAM = "model-yes-man-throwaway-redteam-20261128T0306Z"   # the redteam proof, committed
+SMOKE = "live-smoke-20261128T055002Z"                        # a live smoke, committed with its manifest
 PRIYA_KEY = "20261201.0802.priya.quick-call@northwind.example"
 MARCUS_PICK_KEY = "20261201.0940.marcus.pick@brightlane.example"
 DEMO_NAMES = tuple(sorted(n for n in os.listdir(os.path.join(paths.SANDBOX, "inbox")) if n.endswith(".eml")))
@@ -817,6 +818,23 @@ class AfterPR11Review(unittest.TestCase):
                                                                                        "cd" * 32), out)
         self.assertNotIn("Message-ID key-sha256", out)
         self.assertNotIn("Message-ID sha256", out)
+
+    def test_the_started_row_shows_the_live_start(self):
+        live = dict(START[2], mode="live", model_source="live", model="claude-x", simulated=False, fresh_start=True,
+                    mail_since="2026-12-01T15:00:00Z")
+        code, out = self.replay_rows([("observed", "", live, None), END])
+        self.assertEqual(code, 0, out)
+        self.assertIn("  Started   Tue Dec 1, 8:00 AM Pacific. This run started a new live ledger (--fresh). Mail "
+                      "received before Tue Dec 1, 7:00 AM Pacific is never read (the ledger's fresh start). [seq 1]", out)
+        code, out = self.replay_rows([("observed", "", dict(live, fresh_start=False, mail_since=None), None), END])
+        self.assertIn("  Started   Tue Dec 1, 8:00 AM Pacific. It went on from the live ledger already there. Mail "
+                      "read from: not recorded. [seq 1]", out)
+
+    def test_the_committed_live_smoke_shows_its_start(self):
+        code, out = replay_cli([os.path.join(paths.REPO, "traces", SMOKE)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("  Started   Fri Nov 27, 9:50 PM Pacific. It went on from the live ledger already there. Mail "
+                      "received before Fri Nov 27, 8:50 PM Pacific is never read (the ledger's fresh start). [seq 1]", out)
 
 
 class FindingTheRun(unittest.TestCase):
