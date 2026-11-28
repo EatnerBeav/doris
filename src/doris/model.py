@@ -390,6 +390,10 @@ _FIELD_ORDERS = {
     "zone": re.compile(r"(?i)\bzone\s*[:=]\s*([A-Za-z][A-Za-z0-9:+-]{0,20})"),
 }
 
+# redteam's one seam: None, or a function msg -> answer fields that stands in for _yes_man_answer
+# for the "yes-man" source. Its answer passes the same strict schema check as any other.
+YES_MAN = None
+
 
 def _yes_man_answer(msg):
     stub = _stub_answer(msg)
@@ -452,7 +456,7 @@ class Model(object):
                 return self._live(msg, req, h)
             if self.source == "replayed":
                 return self._replayed(msg, h)
-            fields = _stub_answer(msg) if self.source == "stub" else _yes_man_answer(msg)
+            fields = _stub_answer(msg) if self.source == "stub" else (YES_MAN or _yes_man_answer)(msg)
             return parse_answer(json.dumps(fields, sort_keys=True), msg, self.source, h)
         except Exception as exc:   # classify never raises: a failure is no answer
             return self._fail(h, "%s: %s" % (type(exc).__name__, exc))
