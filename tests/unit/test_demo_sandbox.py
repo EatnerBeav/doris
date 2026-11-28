@@ -17,8 +17,9 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.unit import demo_sandbox
-from tests.unit.test_fixtures import NAMES
+from doris.adapters import sandbox as sandbox_adapter
+from tests.unit import demo_sandbox, test_fixtures
+from tests.unit.test_fixtures import DORIS, NAMES
 
 # A made-up sender and text, written the way sandbox/README.md asks: to the owner alone, its own
 # Message-ID, a Date between the demo's last email (3:06 PM Pacific) and the 5:00 PM digest.
@@ -80,7 +81,7 @@ class ACopyOfASandboxAJudgeHasUsed(unittest.TestCase):
     def test_the_inbox_holds_the_demos_fifteen_emails_and_their_facts_only(self):
         self.assertIn(JUDGE_NAME, os.listdir(os.path.join(self.used, "inbox")))
         inbox = os.path.join(self.copy, "inbox")
-        self.assertEqual(sorted(n for n in os.listdir(inbox) if n.endswith(".eml")), NAMES)
+        self.assertEqual(demo_sandbox.mail_names(inbox), NAMES)
         with open(os.path.join(inbox, "facts.json"), encoding="utf-8") as fh:
             self.assertEqual(sorted(json.load(fh)), NAMES)
 
@@ -88,6 +89,37 @@ class ACopyOfASandboxAJudgeHasUsed(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(os.path.join(self.copy, "calendar"))),
                          demo_sandbox.owner_ics_files(os.path.join(demo_sandbox.SANDBOX, "calendar")))
         self.assertEqual(os.listdir(os.path.join(self.copy, "outbox")), [".gitkeep"])
+
+
+class TheTestsListFilesAsTheSandboxAdapterDoes(unittest.TestCase):
+    """A judge's 14-Robin.EML is mail to Doris (the adapter takes .eml in any case, files only), so it is
+    mail to the tests; the same for an owner's event saved as .ICS. Checked against the adapter's own
+    listing of the same folders, so the two cannot drift apart."""
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp(prefix="doris-names-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.root = demo_sandbox.copy_committed(os.path.join(tmp, "sandbox"))
+        self.inbox, self.calendar = os.path.join(self.root, "inbox"), os.path.join(self.root, "calendar")
+        for name in ("14-Robin.EML", "15-sam.Eml", "16-notes.txt"):
+            write(os.path.join(self.inbox, name), JUDGE_EML)
+        os.mkdir(os.path.join(self.inbox, "17-saved.eml"))
+        for name in ("Owner-Lunch.ICS", "doris-000000000000000000000000.ics", "staged-lands-between-1.ics",
+                     "notes.txt"):
+            write(os.path.join(self.calendar, name), b"BEGIN:VCALENDAR\r\n")
+        os.mkdir(os.path.join(self.calendar, "archive.ics"))
+
+    def test_mail(self):
+        read = [item.server_id for item in sandbox_adapter.SandboxMail(self.root, DORIS).fetch_new()]
+        self.assertEqual(read, NAMES + ["14-Robin.EML", "15-sam.Eml"])
+        self.assertEqual(test_fixtures.judges_emails(self.inbox), read[len(NAMES):])
+        self.assertEqual(demo_sandbox.mail_names(self.inbox), read)
+
+    def test_calendar(self):
+        listed = sandbox_adapter.SandboxCalendar(self.root)._names()     # the files query() reads
+        self.assertIn("Owner-Lunch.ICS", listed)
+        self.assertEqual(demo_sandbox.owner_ics_files(self.calendar),
+                         [n for n in listed if not demo_sandbox.is_run_event(n)])
 
 
 class ACopyOfASandboxWhoseFactsDoNotParse(unittest.TestCase):

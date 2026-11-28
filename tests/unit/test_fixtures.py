@@ -201,8 +201,9 @@ def read_facts(inbox=INBOX):
 
 
 def judges_emails(inbox=INBOX):
-    """A judge's own .eml files in inbox/ (sandbox/README.md): every one but the demo's fifteen."""
-    return sorted(f for f in os.listdir(inbox) if f.endswith(".eml") and f not in NAMES)
+    """A judge's own .eml files in inbox/ (sandbox/README.md): every one but the demo's fifteen, named
+    in any case, as the sandbox adapter reads mail (demo_sandbox.mail_names)."""
+    return [f for f in demo_sandbox.mail_names(inbox) if f not in NAMES]
 
 
 def pacific_utc(hhmm):
@@ -214,7 +215,7 @@ def pacific_utc(hhmm):
 class InboxTest(unittest.TestCase):
 
     def test_the_fifteen_demo_emails_come_first_in_arrival_order(self):
-        names = sorted(f for f in os.listdir(INBOX) if f.endswith(".eml"))
+        names = demo_sandbox.mail_names(INBOX)
         self.assertEqual(names[:15], NAMES)
         # A judge's own email may follow, but must not sort in among the demo's.
         for extra in names[15:]:
@@ -393,7 +394,7 @@ class FactsTest(unittest.TestCase):
         self.facts = read_facts()
 
     def test_every_key_names_a_real_file_and_every_demo_email_has_facts(self):
-        on_disk = set(f for f in os.listdir(INBOX) if f.endswith(".eml"))
+        on_disk = set(demo_sandbox.mail_names(INBOX))
         self.assertLessEqual(set(self.facts), on_disk)
         self.assertLessEqual(set(NAMES), set(self.facts))
 
@@ -533,11 +534,11 @@ class GeneratorTestWithAJudgesMail(RebuildCheck, unittest.TestCase):
         with open(os.path.join(self.inbox, "facts.json"), encoding="utf-8") as fh:
             self.facts = json.load(fh)
 
-    def judge_adds_their_email(self):
-        with open(os.path.join(self.inbox, self.JUDGE), "wb") as fh:
+    def judge_adds_their_email(self, name=JUDGE):
+        with open(os.path.join(self.inbox, name), "wb") as fh:
             fh.write(b"From: Robin Vale <robin@judges-own.example>\r\nTo: whizz@fastmail.com\r\n"
                      b"Subject: A walk-through\r\n\r\nCould Shane show our team how this works?\r\n")
-        self.facts[self.JUDGE] = {"forwarded": "yes"}
+        self.facts[name] = {"forwarded": "yes"}
 
     def write_facts(self, **layout):
         with open(os.path.join(self.inbox, "facts.json"), "w", encoding="utf-8") as fh:
@@ -549,6 +550,13 @@ class GeneratorTestWithAJudgesMail(RebuildCheck, unittest.TestCase):
     def test_a_line_for_a_judges_own_email_passes(self):
         self.judge_adds_their_email()
         self.write_facts(indent=2)
+        self.assert_the_generator_rebuilds(self.sandbox)
+
+    def test_a_judges_email_named_in_capitals_passes(self):
+        # Windows and some mail apps save "14-Robin.EML"; the sandbox adapter reads it as mail.
+        self.judge_adds_their_email("14-Robin.EML")
+        self.write_facts(indent=2)
+        self.assertEqual(judges_emails(self.inbox), ["14-Robin.EML"])
         self.assert_the_generator_rebuilds(self.sandbox)
 
     def test_a_changed_demo_fact_fails_with_a_judges_email_there(self):

@@ -54,13 +54,27 @@ def committed_files():
     return tuple(sorted(set(_built()) | set(HAND_WRITTEN)))
 
 
+def _files_named(folder, extension):
+    """The files in folder whose name ends in extension in any case, sorted: the sandbox adapter's
+    rule for its inbox (.eml) and calendar (.ics) (doris/adapters/sandbox.py, SandboxMail._inbox and
+    SandboxCalendar._names; test_demo_sandbox checks the two agree)."""
+    return sorted(n for n in os.listdir(folder)
+                  if n.lower().endswith(extension) and os.path.isfile(os.path.join(folder, n)))
+
+
+def mail_names(inbox):
+    """The mail in an inbox/ folder, in the order Doris reads it: a judge's 14-Robin.EML is mail as
+    much as 14-robin.eml."""
+    return _files_named(inbox, ".eml")
+
+
 def is_run_event(name):
     return any(fnmatch.fnmatchcase(name, pattern) for pattern in RUN_CALENDAR)
 
 
 def owner_ics_files(calendar):
     """The owner's committed events in a calendar/ folder: every .ics a run did not write."""
-    return sorted(f for f in os.listdir(calendar) if f.endswith(".ics") and not is_run_event(f))
+    return [f for f in _files_named(calendar, ".ics") if not is_run_event(f)]
 
 
 def copy_committed(dest, source=SANDBOX):
