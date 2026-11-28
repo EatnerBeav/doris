@@ -182,6 +182,19 @@ class InboxReadFails(Restart):
         self.assertIn("inbox could not be read", out.getvalue())
         self.assertNotIn("Done:", out.getvalue())
 
+    def test_under_the_stub_the_last_line_counts_stand_in_calls_not_model_calls(self):
+        config = os.path.join(self.tmp, "config.json")
+        with open(config, "w", encoding="utf-8") as fh:
+            json.dump({"mode": "throwaway", "run_name": "run-worker", "state_dir": self.state,
+                       "sandbox_root": self.root, "owner_addr": OWNER, "doris_addr": DORIS,
+                       "model_source": "stub", "clock_mode": "advance", "retry_wait_s": 0}, fh)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cli.worker([config])
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn(" 1 bookings. Stand-in calls 1, cost none (stub). Receipts ", out.getvalue())
+        self.assertNotIn("Model calls", out.getvalue())
+
     def test_a_run_until_stopped_reads_again_each_cycle_and_never_ends_on_failed_reads(self):
         """Review finding 4: one failed read no longer ends `run`; decision 89: nor do any number in a row.
         From caps.MAIL_READ_FAILURES_IN_A_ROW she tries every caps.MAIL_READ_RETRY_S until a stop."""

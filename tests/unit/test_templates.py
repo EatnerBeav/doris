@@ -503,5 +503,17 @@ class OwnerTemplatesTest(Base):
             templates.render("S2", slots)
 
 
+class PlainNames(unittest.TestCase):
+    def test_every_approved_template_has_a_plain_name_and_no_other(self):
+        self.assertEqual(set(templates.PLAIN_NAMES), set(templates.APPROVED))
+        for name in templates.PLAIN_NAMES.values():
+            self.assertRegex(name, r"^[a-z][a-z ,]+$")
+
+    def test_the_booking_confirmation_and_the_cancellation(self):
+        self.assertEqual(templates.plain_name("T1"), "booking confirmation")
+        self.assertEqual(templates.plain_name("T10"), "cancellation confirmed")
+        self.assertEqual(templates.plain_name("T99"), "")
+
+
 if __name__ == "__main__":
     unittest.main()

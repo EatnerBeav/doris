@@ -1863,7 +1863,10 @@ class _Run:
             who = "(sensitive mail, unread)"
         else:
             who = holds._name_line(e.msg.from_name or "") or e.msg.from_addr
-        sent = " %s sent." % template if template != "-" else ""
+        sent = ""
+        if template != "-":
+            name = templates.plain_name(template)
+            sent = " %s sent%s." % (template, " (%s)" % name if name else "")
         cost = ""
         if e.cost is not None and self.cfg.model_source != "stub":
             cost = " Model cost $%.4f%s." % (e.cost, " (recorded)" if self.cfg.model_source == "replayed" else "")
@@ -1872,8 +1875,10 @@ class _Run:
         if fault:
             done = "retried once" if e.retried else "recovered" if e.recovered else "no effect"
             staged = " Staged fault %s: %s." % (fault, done)
-        return "%s  %s: %s.%s %s%s%s" % (templates.fmt_pacific(self.now()), who, outcome, sent, why_["text"], staged,
-                                         cost)
+        text = why_["text"]
+        if self.cfg.model_source == "stub":     # no model ran: the terminal says stand-in, as replay does
+            text = stand_in_words(text)         # (the receipt keeps the listed why, word for word)
+        return "%s  %s: %s.%s %s%s%s" % (templates.fmt_pacific(self.now()), who, outcome, sent, text, staged, cost)
 
     # --- the digest ----------------------------------------------------------------------------
     def end_of_run_digest(self):
@@ -1984,6 +1989,15 @@ class _Run:
         for adapter in (self.calendar, self.mail):
             if hasattr(adapter, "disarm"):
                 adapter.disarm()
+
+
+def stand_in_words(text):
+    """A why's text for the terminal of a run the built-in stand-in (stub) read: where the listed
+    text says the model read or agreed, it says the stand-in. Spend and cap wording is left as it is."""
+    for said, shown in (("parser and model agree", "parser and stand-in agree"), ("The model", "The stand-in"),
+                        ("the model", "the stand-in")):
+        text = text.replace(said, shown)
+    return text
 
 
 def run(cfg):

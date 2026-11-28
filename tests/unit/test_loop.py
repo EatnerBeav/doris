@@ -331,6 +331,25 @@ class TheTerminalLines(unittest.TestCase):
                          "answer her next call for 1.5 s. She waits, then retries once after 2 s.")
         self.assertEqual(len([l for l in self.said if "(simulated): the calendar will not answer" in l]), 1)
 
+    def test_a_sent_template_is_named_in_plain_words_after_its_code(self):
+        (priya,) = [l for l in self.said if "Priya Raman: book" in l]
+        self.assertIn("Priya Raman: book. T1 sent (booking confirmation). ", priya)
+        (move,) = [l for l in self.said if "Priya Raman: move" in l]
+        self.assertIn(" T18 sent (%s). " % templates.PLAIN_NAMES["T18"], move)
+
+    def test_under_the_stub_no_line_says_a_model_read_or_agreed(self):
+        (priya,) = [l for l in self.said if "Priya Raman: book" in l]
+        self.assertTrue(priya.endswith("One clear time, parser and stand-in agree, and it is available: book."), priya)
+        self.assertEqual([l for l in self.said if "model" in l.lower()], [])
+
+    def test_the_receipts_keep_the_why_as_listed(self):
+        tmp = tempfile.mkdtemp(prefix="doris-loop-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        book = [l for l in sandbox_run(tmp) if (l.get("why") or {}).get("code") == "policy.book_clear_time"]
+        self.assertTrue(book)
+        self.assertEqual({l["why"]["text"] for l in book},
+                         {"One clear time, parser and model agree, and it is available: book."})
+
     def test_the_stub_shows_no_model_cost(self):
         self.assertFalse([l for l in self.said if "Model cost" in l])
 

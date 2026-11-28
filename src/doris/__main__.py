@@ -354,8 +354,9 @@ def worker(argv):
     cost = "none (stub)" if cfg.model_source == "stub" else "$%.4f%s" % (
         s.cost_usd, " (recorded)" if cfg.model_source == "replayed" else "")
     say("Done: %d handled, %d held, %d human approvals. %d sent to prospects, %d hold notices, %d bookings. "
-        "Model calls %d, cost %s. Receipts %s: %s."
-        % (s.handled, s.held, s.human_approvals, s.sends, s.hold_notices, s.bookings, s.model_calls, cost,
+        "%s calls %d, cost %s. Receipts %s: %s."
+        % (s.handled, s.held, s.human_approvals, s.sends, s.hold_notices, s.bookings,
+           "Stand-in" if cfg.model_source == "stub" else "Model", s.model_calls, cost,
            _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
     return 0 if s.verify_ok else 1
 
