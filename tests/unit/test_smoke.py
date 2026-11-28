@@ -964,6 +964,23 @@ class EndToEndTest(SmokeFixture):
         self.assertEqual(self.result("smoke"), "FAILED")
         self.assertEqual(self.manifest()["first_failing_step"], FILE)
 
+    def test_on_an_empty_inbox_the_file_step_never_touches_a_test_request_that_was_not_marked(self):
+        """L3: the file step ran on the test request even when its mark as the smoke's own had failed.
+        It runs only on a marked request; otherwise it is named as not run, with why."""
+        self.empty_inbox()
+        real, filed = live.LiveMail.file, []
+
+        def file(mail, server_id, keyword):
+            filed.append(keyword)
+            if keyword == live.SMOKE_TEST_KEYWORD:
+                raise MailError("imap file: the server did not keep the keyword")
+            return real(mail, server_id, keyword)
+        with mock.patch.object(live.LiveMail, "file", file):
+            self.assertEqual(self.run_e2e(), 1)
+        self.assertEqual(filed, [live.SMOKE_TEST_KEYWORD])                  # the smoke keyword never added
+        self.assertEqual(self.result(FILE), "not run (the test request is not marked as the smoke's own)")
+        self.assertNotIn("UID STORE", self.imap.verbs())
+
     def test_on_an_empty_inbox_with_no_end_to_end_test_after_all_the_file_step_is_named_as_not_run(self):
         self.empty_inbox()
         self.end_to_end()

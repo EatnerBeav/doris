@@ -593,7 +593,8 @@ def _confirmed(ledger_path, mid):
 
 def _end_to_end(e2e, mail, out, file_request=False):
     """wolf's request to the owner; found in her INBOX (the owner's forward) and marked as the smoke's
-    own; with file_request (the fetch step found no message to file), the file step on it; her loop on
+    own; with file_request (the fetch step found no message to file), the file step on it once it is
+    marked (named as not run when it is not); her loop on
     it; her reply confirmed in her Sent and found in wolf's mailbox. One line a step; once a step
     fails, the steps that need it are named in one line as not run (her loop needs no file step)."""
     now = _dt.datetime.now(UTC)
@@ -626,8 +627,10 @@ def _end_to_end(e2e, mail, out, file_request=False):
     def file_it():
         mail.file(found[-1], FILE_KEYWORD)
         return "the test request"
-    if file_request:
+    if file_request and marked:
         _step(out, FILE_STEP, file_it)
+    elif file_request:                 # only a request marked as the smoke's own is the smoke's to file
+        _not_run(out, FILE_STEP, "the test request is not marked as the smoke's own")
     if not marked:
         return _not_run(out, "her loop on the test request and the steps after it",
                         "the request is not marked as the smoke's own, so no loop may read it")
