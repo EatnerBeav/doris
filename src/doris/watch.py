@@ -1052,7 +1052,7 @@ class _Handler(BaseHTTPRequestHandler):
 # ------------------------------------------------------------------------------------------
 def main(argv) -> int:
     ap = argparse.ArgumentParser(
-        prog="python -m doris watch",
+        prog="python3 -m doris watch",
         description="The live page: every step of the newest run, why, and its cost so far, with one Stop "
                     "button. Served on 127.0.0.1 only.")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT, help="the port on 127.0.0.1 (default %d)" % DEFAULT_PORT)

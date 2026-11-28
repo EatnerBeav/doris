@@ -58,7 +58,7 @@ class _Refused(Exception):
 # --- the command -------------------------------------------------------------------------------
 def main(argv) -> int:
     ap = argparse.ArgumentParser(
-        prog="python -m doris replay",
+        prog="python3 -m doris replay",
         description="Step through a finished run from its receipts alone, after verify's chain check. "
                     "Reads nothing else and writes nothing.")
     ap.add_argument("run", nargs="?", help="a receipts file, a run or trace folder, or a run ID "

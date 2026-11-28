@@ -1,11 +1,12 @@
-"""python -m doris <command>: the one way in.
+"""python3 -m doris <command>: the one way in.
 
     demo     the sandbox day under the kill switch: no install, no key
     run      the long run under the kill switch: a pass over the inbox every ten minutes until
-             `python -m doris stop`, and the day's digest to the owner at her first pass from
+             `python3 -m doris stop`, and the day's digest to the owner at her first pass from
              5:00 PM Pacific; the sandbox by default (no key), or with --live her own
              mailbox and the owner's calendar from the env file (--env PATH, default
-             /root/doris-secrets/.env; --fresh starts the live ledger, once)
+             /root/doris-secrets/.env, on our server; never asked of a judge; --fresh
+             starts the live ledger, once)
     traps    the Trap Pack, one file at a time on fresh throwaway state
     verify   recompute a run's receipt chain (the latest sandbox run by default)
     stop     halt Doris now, in the sandbox and live; she stays halted until resume
@@ -79,7 +80,7 @@ def first_line(source, model_id):
 
 # --- demo and run --------------------------------------------------------------------------------
 def demo(argv):
-    argparse.ArgumentParser(prog="python -m doris demo",
+    argparse.ArgumentParser(prog="python3 -m doris demo",
                             description="The sandbox day under the kill switch.").parse_args(argv)
     refusal = supervisor._halt_refusal("sandbox")
     if refusal:
@@ -200,15 +201,16 @@ def _put_back(moved, kept):
 
 def run_cmd(argv):
     ap = argparse.ArgumentParser(
-        prog="python -m doris run",
+        prog="python3 -m doris run",
         description="The long run under the kill switch: a pass over the inbox every ten minutes until "
-                    "`python -m doris stop`, and the day's digest to the owner from 5:00 PM Pacific. "
+                    "`python3 -m doris stop`, and the day's digest to the owner from 5:00 PM Pacific. "
                     "The sandbox by default; --live for her own mailbox.")
     ap.add_argument("--live", action="store_true",
                     help="her own mailbox and the owner's shared calendar, every setting from the env file")
     ap.add_argument("--fresh", action="store_true",
                     help="live: start the live ledger (once); she reads only mail that arrives after it")
-    ap.add_argument("--env", metavar="PATH", help="live: the env file (default %s)" % paths.LIVE_ENV)
+    ap.add_argument("--env", metavar="PATH",
+                    help="live: the env file (default %s, on our server; never asked of a judge)" % paths.LIVE_ENV)
     args = ap.parse_args(argv)
     if not args.live and (args.fresh or args.env is not None):
         print("Not started: --fresh and --env are for a live run, so they need --live.")
@@ -360,7 +362,7 @@ def worker(argv):
 
 # --- stop and resume ----------------------------------------------------------------------------
 def stop(argv):
-    argparse.ArgumentParser(prog="python -m doris stop",
+    argparse.ArgumentParser(prog="python3 -m doris stop",
                             description="Halt Doris now, in the sandbox and live.").parse_args(argv)
     for mode in STOP_MODES:
         supervisor.request_stop(mode, "cli")
@@ -370,7 +372,7 @@ def stop(argv):
 
 
 def resume(argv):
-    argparse.ArgumentParser(prog="python -m doris resume",
+    argparse.ArgumentParser(prog="python3 -m doris resume",
                             description="Clear a halt. Only the command line can.").parse_args(argv)
     code, said = 0, []
     for mode in STOP_MODES:
@@ -395,7 +397,7 @@ def latest_receipts(mode="sandbox"):
 
 
 def verify(argv):
-    ap = argparse.ArgumentParser(prog="python -m doris verify", description="Recompute a run's receipt chain.")
+    ap = argparse.ArgumentParser(prog="python3 -m doris verify", description="Recompute a run's receipt chain.")
     ap.add_argument("path", nargs="?", help="a receipts file (default: the latest sandbox run)")
     args = ap.parse_args(argv)
     path = args.path or latest_receipts()

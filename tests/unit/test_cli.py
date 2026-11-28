@@ -498,6 +498,34 @@ class Smoke(unittest.TestCase):
         self.assertNotIn("run (live)", out)
 
 
+class Help(unittest.TestCase):
+    """The help reads as the README does: python3 -m doris. The env file's default is our server's own
+    path, and the help says so: no judge is ever asked for it."""
+
+    def usage(self, command):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out), self.assertRaises(SystemExit) as ctx:
+            cli.main([command, "-h"])
+        self.assertEqual(ctx.exception.code, 0)
+        return " ".join(out.getvalue().split())
+
+    def test_every_commands_usage_line_says_python3(self):
+        for command in ("demo", "run", "traps", "verify", "stop", "resume", "smoke", "replay", "watch", "redteam"):
+            self.assertTrue(self.usage(command).startswith("usage: python3 -m doris %s " % command), command)
+
+    def test_the_top_help_says_python3_everywhere(self):
+        code, out = run_cli(["--help"])
+        self.assertTrue(out.startswith("python3 -m doris <command>"), out)
+        self.assertNotIn("python -m doris", out)
+
+    def test_the_env_default_is_named_as_our_servers_never_a_judges(self):
+        wanted = "(default %s, on our server; never asked of a judge)" % paths.LIVE_ENV
+        self.assertIn(wanted, self.usage("run"))
+        self.assertIn(wanted, self.usage("smoke"))
+        self.assertIn("default %s, on our server; never asked of a judge" % paths.LIVE_ENV,
+                      " ".join(run_cli(["--help"])[1].split()))
+
+
 class TheAuditMonitoringAndRedteamCommands(unittest.TestCase):
     """replay (PR #8), watch (PR #9) and redteam (PR #10) are each one line in COMMANDS that hands its
     arguments to the module's own main and returns its exit code; none says "not built yet"."""
