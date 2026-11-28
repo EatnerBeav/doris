@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 
 import secret_scan
 
@@ -12,6 +13,7 @@ FAKE_ANTHROPIC = "sk-" + "ant-" + "api03-" + "Zq7" * 12
 FAKE_GITHUB = "gh" + "p_" + "aB3dE5" * 6
 FAKE_AWS = "AK" + "IA" + "QWERTYUIOP234567"
 FAKE_PASSWORD = "q8w7e6r5" + "t4y3u2i1"
+FAKE_TOKEN = "fmu1-" + "a7Kq2Zr9" * 4
 
 
 class SecretScanTest(unittest.TestCase):
@@ -43,6 +45,46 @@ class SecretScanTest(unittest.TestCase):
                 fh.write("# comment\nDORIS_MODEL=claude-model-x\nDORIS_IMAP_HOST=imap.example.com\n"
                          "DORIS_EMAIL=doris@example.com\nDORIS_APP_" + "PASSWORD='" + FAKE_PASSWORD + "'\nSHORT=abc\n")
             self.assertEqual(secret_scan.read_env_values([path]), [FAKE_PASSWORD])
+
+    def scan_files(self, env_text, files):
+        """main() over these files, with only this .env read (never the machine's own) and no terms."""
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.path.join(tmp, "env")
+            with open(env, "w", encoding="utf-8") as fh:
+                fh.write(env_text)
+            paths = []
+            for name, text in files:
+                paths.append(os.path.join(tmp, name))
+                with open(paths[-1], "w", encoding="utf-8") as fh:
+                    fh.write(text)
+            out = io.StringIO()
+            with mock.patch.object(secret_scan, "DEFAULT_ENV_FILES", ()), redirect_stdout(out), \
+                    mock.patch.dict(os.environ, {"DORIS_ENV_FILE": env, "DORIS_SCAN_TERMS": os.path.join(tmp, "none")}):
+                code = secret_scan.main(paths)
+            return code, out.getvalue(), secret_scan.read_env_values([env])
+
+    def test_a_plain_address_is_a_setting_under_any_name(self):
+        """Smoke run 2's trace was blocked: a stray OWNER_CALENDAR (read by no code) held the owner's
+        address, and wolf's address, in the receipts by design, holds it. An address is a setting."""
+        owner = "kestrel@mailhost.example"
+        code, out, values = self.scan_files(
+            "OWNER_CALENDAR=%s\nSTRAY_NOTE='Kestrel.Owner+cal@Mail-Host.example'\nDORIS_EMAIL=doris@mailhost.example\n"
+            % owner, [("receipts.jsonl", '{"kind":"observed","payload":{"from_addr":"wolf.%s"}}\n' % owner)])
+        self.assertEqual((code, values), (0, []), out)
+        self.assertIn("clean (0 .env value(s)", out)
+
+    def test_a_value_that_is_not_a_plain_address_still_blocks_under_any_name(self):
+        url = "imaps://kestrel:" + FAKE_PASSWORD + "@imap.mailhost.example"
+        env = "OWNER_CALENDAR=%s\nSTRAY_KEY=%s\nDORIS_IMAP_URL=%s\nNOTE=%s@mailhost.example\n" % (
+            FAKE_TOKEN, FAKE_PASSWORD + "x", url, FAKE_PASSWORD + " x")
+        lines = ["token " + FAKE_TOKEN, "pass " + FAKE_PASSWORD + "x", "url " + url,
+                 "note " + FAKE_PASSWORD + " x@mailhost.example"]
+        code, out, values = self.scan_files(env, [("trace-%d.txt" % i, line + "\n") for i, line in enumerate(lines)])
+        self.assertEqual(values, [FAKE_TOKEN, FAKE_PASSWORD + "x", url, FAKE_PASSWORD + " x@mailhost.example"])
+        self.assertEqual(code, 1, out)
+        self.assertEqual(out.count(" env_value"), 4, out)
+        for value in values:
+            self.assertNotIn(value, out)
 
     def test_forbidden_file_names(self):
         self.assertEqual(secret_scan.scan_blob("sub/.env", b"", [], []), [("sub/.env", 0, "forbidden_file")])
