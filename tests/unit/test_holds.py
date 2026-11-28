@@ -223,6 +223,23 @@ class CodeTest(unittest.TestCase):
         wide = "quote \uff21\uff27\uff37\uff0d\uff23\uff21\uff2e\uff21\uff32\uff39\uff0d\uff37\uff31\uff3a\uff38 back"
         self.assertEqual(holds.safe_excerpt(wide, 400), "quote [redacted] back")
 
+    def test_the_dotted_and_dotless_i_read_as_i(self):
+        # Second review of PR #4, round 2, L4: NFKC keeps U+0130 and U+0131, which broke a run, and the
+        # canary scan reads both as "i". The rules read them as I and i.
+        from doris import traps
+        for code in ("AGW-CANARY-\u01307QX", "AGW-CANARY-\u01317QX", "AGW-CANARY-7Q\u0130X",
+                     "AGW-CANARY-W\u0130QZ", "x/AGW-CANARY-\u01307QX", "AGW-CANARY-I\u03077QX"):
+            text = "quote " + code + " back"
+            self.assertTrue(traps.find_tokens(text) or "\u0307" in text, text)
+            for one_line in (False, True):
+                self.assertEqual(holds.safe_excerpt(text, 400, one_line), "quote [redacted] back", text)
+            self.assertEqual(holds.shown_subject(text), "quote [redacted] back", text)
+        self.assertEqual(holds.clean("\u0130stanbul \u0131\u015f\u0131k"), "Istanbul i\u015fik")
+        # Turkish words are still echoed as written.
+        text = "\u0130stanbul'da \u0131\u015f\u0131k ve kap\u0131 numaras\u0131 12"
+        self.assertEqual(holds.quote_of(make_msg(own_text=text)), text)
+        self.assertEqual(holds.shown_subject(text), text)
+
     def test_what_she_echoes_is_written_as_the_sender_wrote_it(self):
         # Second review of PR #4, round 2, L6: the rules read folded text (NFKC), and she echoed it
         # folded too: workshop™ went out as workshopTM, ½ as 1⁄2, m² as m2.
@@ -353,15 +370,15 @@ class SpeedTest(unittest.TestCase):
     def test_invisible_characters_and_white_space_at_the_end_are_no_cut(self):
         # Second review of PR #4, round 2, L5: the cut was decided on the raw length, before the
         # invisibles and the trailing white space went, so the last word was blanked for nothing.
-        self.assertEqual(holds.shown_subject("Lunch Tuesday?" + "​" * 5000), "Lunch Tuesday?")
+        self.assertEqual(holds.shown_subject("Lunch Tuesday?" + "\u200b" * 5000), "Lunch Tuesday?")
         self.assertEqual(holds.shown_subject("Lunch Tuesday?" + " " * 5000), "Lunch Tuesday?")
         self.assertEqual(holds.sender_name("Ann Lee" + " " * 2000, "ann@x.example"), "Ann Lee")
-        self.assertEqual(holds.sender_name("Ann Lee" + "⁠" * 2000, "ann@x.example"), "Ann Lee")
+        self.assertEqual(holds.sender_name("Ann Lee" + "\u2060" * 2000, "ann@x.example"), "Ann Lee")
         self.assertEqual(holds.quote_of(make_msg(own_text="See you Tuesday." + "\n" * 9000)), "See you Tuesday.")
-        self.assertEqual(holds.quote_of(make_msg(own_text="See you Tuesday." + " ​\n" * 4000)),
+        self.assertEqual(holds.quote_of(make_msg(own_text="See you Tuesday." + " \u200b\n" * 4000)),
                          "See you Tuesday.")
         # Anything a reader sees past the window is still a cut.
-        self.assertEqual(holds.shown_subject("Lunch Tuesday?" + "​" * 5000 + "x"), "Lunch [redacted]")
+        self.assertEqual(holds.shown_subject("Lunch Tuesday?" + "\u200b" * 5000 + "x"), "Lunch [redacted]")
         self.assertEqual(holds.quote_of(make_msg(own_text="See you Tuesday." + "\n" * 9000 + "Ann")),
                          "See you [redacted]")
 

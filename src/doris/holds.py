@@ -80,14 +80,19 @@ def _plain(text):
     return _CONTROL.sub("", text)
 
 
+# The dotted capital I and the dotless small i, which NFKC keeps and a case-blind match reads as "i"
+# (second review of PR #4, round 2, L4).
+_I = {0x130: "I", 0x131: "i"}
+
+
 def _fold(text):
     """Plain text as the rules read it: compatibility forms folded (NFKC: fullwidth letters to ASCII,
     the long s to s, the Kelvin sign to K, so the rules read what a person reads; second Fable review
-    of PR #4, M2). She echoes the text as the sender wrote it, unfolded, unless a code in it is
-    blanked (second review of PR #4, round 2, L6)."""
+    of PR #4, M2), and the dotted I and dotless i read as I and i. She echoes the text as the sender
+    wrote it, unfolded, unless a code in it is blanked (second review of PR #4, round 2, L6)."""
     if text.isascii():
         return text
-    return _INVISIBLE.sub("", unicodedata.normalize("NFKC", text))
+    return _INVISIBLE.sub("", unicodedata.normalize("NFKC", text).translate(_I))
 
 
 def clean(text):
