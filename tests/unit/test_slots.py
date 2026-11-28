@@ -340,6 +340,20 @@ class FindSlotsRulesTest(unittest.TestCase):
         block = timed(u(2026, 12, 2, 17, 30), u(2027, 1, 5, 0, 0))
         self.assertEqual(starts(slots.find_slots([block], TUE_9AM, 30)), [u(2026, 12, 2, 17, 0)])
 
+    def test_a_derived_time_follows_the_senders_own_on_her_grid_and_never_leads(self):
+        # A D5 cross-pair (Fable review 2 of PR #3, finding A) is no time the sender wrote: it is offered right
+        # after their own times, only on the hour or half hour, and only once one of their own is offered.
+        wed_3 = u(2026, 12, 9, 23, 0)              # Wed Dec 9, 3:00 PM Pacific: the sender wrote it
+        mon_3 = u(2026, 12, 7, 23, 0)              # Mon Dec 7, 3:00 PM Pacific: D5 moved it to "Monday"
+        mon_315 = u(2026, 12, 7, 23, 15)           # the same move of a 3:15 PM: off her grid
+        found = slots.find_slots([], TUE_9AM, 30, first=[wed_3], derived=[mon_315, mon_3])
+        self.assertEqual(starts(found), [wed_3, mon_3, u(2026, 12, 2, 17, 0)])
+        busy = timed(wed_3, wed_3 + dt.timedelta(hours=1))
+        found = slots.find_slots([busy], TUE_9AM, 30, first=[wed_3], derived=[mon_3])
+        self.assertEqual(starts(found), [u(2026, 12, 2, 17, 0), u(2026, 12, 3, 17, 0), u(2026, 12, 4, 17, 0)])
+        self.assertEqual(starts(slots.find_slots([], TUE_9AM, 30, derived=[mon_3])),
+                         [u(2026, 12, 2, 17, 0), u(2026, 12, 3, 17, 0), u(2026, 12, 4, 17, 0)])
+
     def test_no_free_slot_in_30_days_gives_none(self):
         block = timed(u(2026, 12, 1, 0, 0), u(2027, 1, 5, 0, 0))
         self.assertEqual(slots.find_slots([block], TUE_9AM, 30), [])

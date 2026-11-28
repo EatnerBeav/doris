@@ -26,6 +26,7 @@ from .shapes import UTC
 
 OFFER_CODES = frozenset({
     "policy.offer_no_clear_time", "policy.offer_conflict", "policy.offer_one_slot", "policy.pick_resend",
+    "policy.pick_before_offer",
     "policy.stale_pick_reoffer", "policy.decline_second_offer", "policy.move_cancel_offer",
     "policy.collision_reoffer",
 })
@@ -34,6 +35,9 @@ CLOSE_CODES = frozenset({
     "policy.no_thanks_close", "policy.cancel_own",
 })
 STOP_CODES = frozenset({"screen.stop", "policy.suppress_opt_out"})
+# A hold whose sender was never recorded is listed by this, never by its message key (a Message-ID
+# is the sender's text and may carry a code: Fable review of PR #4, finding 2).
+UNKNOWN_SENDER = "(sender unknown)"
 
 
 def _code(line):
@@ -70,13 +74,16 @@ def build(receipt_lines, now, verified=None):
     cost = 0.0
     calls = 0
     quarantined, not_addressed = set(), set()
+    opted = {}       # sender address as written -> queued requests dropped, in the order they opted out
 
     def who(line):
+        """(address as written, the name a notice shows): a sender's address or display name may carry
+        a code, so what is shown goes through holds.sender_name (Fable review of PR #4, finding 2)."""
         p = _payload(line)
         addr, name = senders.get(line.get("subject"), ("", ""))
         addr = p.get("from_addr") or addr or ""
-        name = holds._name_line(p.get("from_name") or name or "") or addr
-        return addr, name
+        name = p.get("from_name") or name or ""
+        return addr, (holds.sender_name(name, addr) if (name or addr) else "")
 
     for line in receipt_lines:
         if not isinstance(line, dict):
@@ -103,7 +110,7 @@ def build(receipt_lines, now, verified=None):
             if subject not in held:
                 held.append(subject)
                 if code and code.startswith("hold.") and code not in templates.NO_NOTICE:
-                    slots["holds"].append({"name": name or subject, "reason": code, "at": _ts(line, now)})
+                    slots["holds"].append({"name": name or UNKNOWN_SENDER, "reason": code, "at": _ts(line, now)})
             offers.pop(thread, None)
         if code in OFFER_CODES:
             offers.pop(thread, None)
@@ -114,12 +121,7 @@ def build(receipt_lines, now, verified=None):
             dropped = p.get("dropped", 0)
             k = len(dropped) if isinstance(dropped, (list, tuple)) else dropped
             k = k if isinstance(k, int) and not isinstance(k, bool) and k > 0 else 0
-            for i, (a, n) in enumerate(slots["opted_out"]):
-                if a == addr:
-                    slots["opted_out"][i] = (a, n + k)
-                    break
-            else:
-                slots["opted_out"].append((addr, k))
+            opted[addr] = opted.get(addr, 0) + k
             for t in [t for t, (a, _) in offers.items() if a == addr]:
                 offers.pop(t)
         if code == "policy.file_injection":
@@ -129,12 +131,13 @@ def build(receipt_lines, now, verified=None):
         if code == "screen.not_addressed" and subject:
             not_addressed.add(subject)
         if code == "screen.sensitive_skip":
-            _add_once(slots["sensitive"], addr)
+            _add_once(slots["sensitive"], holds.shown_address(addr))
         if code == "policy.pick_plus_question" and isinstance(p.get("question"), str):
             q = holds._name_line(p["question"], 200)
             if q and name:
                 slots["also_asked"].append((name, q))
 
+    slots["opted_out"] = [(holds.shown_address(a), k) for a, k in opted.items()]
     slots["held"] = len(held)
     slots["handled"] = len([k for k in observed if k not in held])
     slots["offered_to"] = []

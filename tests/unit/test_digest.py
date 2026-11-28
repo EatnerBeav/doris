@@ -131,6 +131,83 @@ class BuildTest(unittest.TestCase):
         r.add("decided", "1", {}, "policy.file_injection")
         self.assertEqual(digest.build(r.lines, NOW)["suspicious"], ["Ken visit evil[.]example"])
 
+    def test_a_code_in_a_sender_address_or_message_key_never_reaches_the_digest(self):
+        # Fable review of PR #4, finding 2: the address fallback, and a hold with no name showed its key.
+        from doris import traps
+        bad = "agw-canary-7qxz@quill.example.com"
+        r = Receipts()
+        r.observed("<AGW-CANARY-8VVM@x.example>", bad, "")
+        r.add("held", "<AGW-CANARY-8VVM@x.example>", {}, "hold.no_model", ts="2026-12-01T21:10:00Z")
+        r.add("held", "<AGW-CANARY-K4JJ@x.example>", {}, "hold.no_model", ts="2026-12-01T21:20:00Z")
+        r.observed("2", bad, "")
+        r.add("decided", "2", {}, "policy.file_injection")
+        r.observed("3", bad, "")
+        r.add("decided", "3", {"dropped": 0}, "screen.stop", n=0)
+        r.observed("4", bad, "")
+        r.add("decided", "4", {}, "screen.sensitive_skip")
+        r.observed("5", bad, "")
+        r.add("decided", "5", {"question": "Can you send it?"}, "policy.pick_plus_question")
+        r.observed("6", bad, "", "t-6")
+        r.add("decided", "6", {"thread": "t-6"}, "policy.offer_no_clear_time", cond="B5")
+        s = digest.build(r.lines, NOW, verified=True)
+        shown = "[redacted]@quill.example.com"
+        self.assertEqual([h["name"] for h in s["holds"]], [shown, "(sender unknown)"])
+        self.assertEqual((s["suspicious"], s["opted_out"], s["sensitive"], s["offered_to"]),
+                         ([shown], [(shown, 0)], [shown], [shown]))
+        self.assertEqual(s["also_asked"], [(shown, "Can you send it?")])
+        body = templates.render("S2", s)
+        self.assertEqual(traps.find_tokens(body), [])
+
+    def test_a_code_in_capitals_reaches_no_line_of_the_digest(self):
+        # Second Fable review of PR #4, H1: the name, the address and the "Also asked" line.
+        from doris import traps
+        from tests.unit.test_holds import CAPS_TOKENS
+        for token in CAPS_TOKENS:
+            addr = "billing+%s@evil.example" % token
+            for name in ("", "Ann ref=" + token):
+                r = Receipts()
+                r.observed("1", addr, name)
+                r.add("held", "1", {}, "hold.no_model", ts="2026-12-01T21:10:00Z")
+                r.observed("2", addr, name)
+                r.add("decided", "2", {"dropped": 1}, "screen.stop", n=1)
+                r.observed("3", addr, name)
+                r.add("decided", "3", {}, "screen.sensitive_skip")
+                r.observed("4", addr, name)
+                r.add("decided", "4", {"question": "Also is x/%s still ok?" % token}, "policy.pick_plus_question")
+                r.observed("5", addr, name)
+                r.add("decided", "5", {}, "policy.file_injection")
+                r.observed("6", addr, name, "t-6")
+                r.add("decided", "6", {"thread": "t-6"}, "policy.offer_no_clear_time", cond="B5")
+                body = templates.render("S2", digest.build(r.lines, NOW, verified=True))
+                self.assertIn("Also asked: ", body)
+                self.assertEqual(traps.find_tokens(body), [], body)
+
+    def test_every_address_the_reader_takes_reaches_the_digest(self):
+        # Second Fable review of PR #4, M1: one such sender lost the whole digest.
+        from tests.unit.test_holds import ODD_ADDRESSES, read_from
+        for addr in ODD_ADDRESSES:
+            got = read_from(addr)
+            for name in ("", "Ann Lee"):
+                r = Receipts()
+                r.observed("1", "ok@fine.example", "Ok Fine")
+                r.add("held", "1", {}, "hold.no_model", ts="2026-12-01T21:10:00Z")
+                r.observed("2", got, name)
+                r.add("held", "2", {}, "hold.no_model", ts="2026-12-01T21:20:00Z")
+                r.observed("3", got, name)
+                r.add("decided", "3", {"dropped": 1}, "screen.stop", n=1)
+                r.observed("4", got, name)
+                r.add("decided", "4", {}, "screen.sensitive_skip")
+                r.observed("5", got, name)
+                r.add("decided", "5", {"question": "Is parking free?"}, "policy.pick_plus_question")
+                r.observed("6", got, name)
+                r.add("decided", "6", {}, "policy.file_injection")
+                r.observed("7", got, name, "t-7")
+                r.add("decided", "7", {"thread": "t-7"}, "policy.offer_no_clear_time", cond="B5")
+                body = templates.render("S2", digest.build(r.lines, NOW, verified=True))
+                self.assertIn("Opted out: [redacted] (1 queued request dropped)", body, addr)
+                self.assertIn("Sensitive mail skipped: [redacted]", body, addr)
+                self.assertIn("Ok Fine, ", body)
+
     def test_held_thread_counted_but_sends_no_line(self):
         r = Receipts()
         r.observed("1", "a@x.example", "A")

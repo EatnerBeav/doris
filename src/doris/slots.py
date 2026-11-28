@@ -172,11 +172,13 @@ def _start_of(candidate, what):
 def find_slots(events: Sequence[Event], now: _dt.datetime, length_min: int, count: int = 3,
                exclude_starts: Iterable = (), first: Iterable = (), steer_day: Optional[_dt.date] = None,
                steer_window: Optional[Tuple[_dt.time, _dt.time]] = None,
-               steer_zone: Optional[str] = PACIFIC) -> List[Slot]:
+               steer_zone: Optional[str] = PACIFIC, derived: Iterable = ()) -> List[Slot]:
     """Up to `count` slots of `length_min` minutes, each bookable and not busy, in offer order:
 
     1. the sender's own candidates (`first`: instants or Slots), in the order given, when
-       available; a written time may sit on any quarter hour;
+       available; a written time may sit on any quarter hour; then, only once one of those
+       is offered, the `derived` candidates (D5 moving a time onto a weekday written apart
+       from it), on the hour or half hour only: no time the sender wrote, so never first;
     2. with `steer_day`, slots on that day (inside `steer_window` when one is given);
     3. then the earliest available slots on the hour or half hour, at most one per Pacific day
        where possible (inside `steer_window` first), in time order.
@@ -212,6 +214,14 @@ def find_slots(events: Sequence[Event], now: _dt.datetime, length_min: int, coun
         slot = Slot(start, start + length)
         if start not in taken and available(events, slot, now, written=True)[0]:
             take(slot)
+    if chosen:
+        for candidate in derived:
+            if len(chosen) >= count:
+                break
+            start = _start_of(candidate, "candidate start")
+            slot = Slot(start, start + length)
+            if start not in taken and available(events, slot, now, written=False)[0]:
+                take(slot)
 
     if len(chosen) >= count:
         return chosen

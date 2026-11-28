@@ -338,6 +338,7 @@ class _Entry:
         self.cost = None
         self.action_id = None
         self.closed = False          # its closing line is written: one per message, never two
+        self.offers_superseded = 0   # the sender's earlier open offers its own offer closed
 
     def settled_by(self):
         for r in self.results:
@@ -1005,7 +1006,7 @@ class _Run:
                             others_on_thread=int(s8.get("others_on_thread", 0) or 0), thread=thread, answer=answer,
                             parse=parse, model_agrees=agrees, pick=pick, money_code=policy.money_check(msg.own_text),
                             reply_to_mismatch=any(not screens.same_address(r, msg.from_addr) for r in msg.reply_to),
-                            **own)
+                            arrived=e.item.received_utc, **own)
 
     def own_effects(self, e):
         """What a message read again after a kill or a stop already did (ruling 8, A3), for policy to
@@ -1040,16 +1041,19 @@ class _Run:
         return {}
 
     def own_booking(self, e):
-        """This message's own booking, written down and not settled: its slot, the offer it came from
-        (a booking from no offer is a direct one) and its length."""
+        """This message's own booking, written down and not settled: its slot, whether it was direct
+        (kept with the booking; one recorded before the ledger kept it is direct when no offer on the
+        thread ever held its slot), the offer it came from and its length."""
         own = ledger_mod.norm_id(e.key)
         mine = [b for b in self.ledger.bookings_for_thread(e.thread)
                 if ledger_mod.norm_id(b["message_key"]) == own and b["state"] in RESUMABLE_BOOKING_STATES]
         if not mine:
             return None
-        slot = mine[-1]["slot"]
-        offer_id = self.ledger.offer_holding(e.thread, slot)
-        return {"slot": slot, "direct": offer_id is None, "offer_id": offer_id,
+        slot, direct = mine[-1]["slot"], mine[-1]["direct"]
+        offer_id = None if direct is True else self.ledger.offer_holding(e.thread, slot)
+        if direct is None:
+            direct = offer_id is None
+        return {"slot": slot, "direct": direct, "offer_id": offer_id,
                 "length_min": int((slot.end_utc - slot.start_utc).total_seconds() // 60)}
 
     def thread_state(self, e, s8):
@@ -1057,10 +1061,12 @@ class _Run:
         part way, and the next run reads it again). A booking this message made itself is not "a
         live booking on the thread" (book() picks that one up), and an offer its own reply already
         carries does not count against the thread; a booking its own cancel or move already took off
-        the calendar still stands for it, so the reply goes on."""
+        the calendar still stands for it, so the reply goes on. Only the offers that went to this
+        message's sender are open to it (same sender, same thread); the thread's count is every offer."""
         tk, now = e.thread, self.now()
         mine = set(o["id"] for o in self.own_offers(e))
-        offers = [o for o in self.ledger.open_offers(tk, now) if o["id"] not in mine]
+        on_thread = [o for o in self.ledger.open_offers(tk, now) if o["id"] not in mine]
+        offers = [o for o in on_thread if o["sender"] == e.msg.from_addr.strip().lower()]
         own = ledger_mod.norm_id(e.key)
         booked = self.ledger.bookings_for_thread(tk)
         live = next((b for b in booked if b["state"] in ledger_mod.LIVE_BOOKING_STATES
@@ -1073,7 +1079,7 @@ class _Run:
             offer_count=self.ledger.offer_count(tk) - len(mine), open_offers=offers, live_booking=live,
             gone_booking=gone and live is None,
             written_to=frozenset(a.lower() for a in self.ledger.addresses_written_on_thread(tk)),
-            offer_to=offers[-1]["sender"] if offers else None)
+            offer_to=on_thread[-1]["sender"] if on_thread else None)
 
     def own_offers(self, e):
         """Offer records this message's own reply already carries on its thread (written down before
@@ -1111,7 +1117,8 @@ class _Run:
             return self.move(e, f, plan)
         if a == "hold":
             return self.hold(e, plan.hold_code, plan.why, f)
-        if a == "replied":                      # its reply went out before a kill: nothing more to do
+        if a == "replied":                      # its reply went out before a kill: nothing more to send
+            self.supersede(e, plan.template)    # the kill may have come before its offer closed the earlier one
             return self.close(e, "decided", plan.outcome, plan.why, template=plan.template)
         if a == "thread_held":
             return self.close(e, "held", plan.outcome, plan.why)
@@ -1182,9 +1189,30 @@ class _Run:
         if b is not None and b["state"] == "intent":
             self.ledger.set_booking_state(bid, "blocked")
 
+    def open_offers_to(self, thread_key, sender, e=None):
+        """The thread's open offers that went to this address, oldest first. An offer is one sender's
+        (ruling 6: same sender, same thread), so another sender's is nothing to pick from or resend.
+        With e, the offer e's own reply carries (written down before a kill) is left out: it is not one
+        already open to them (Fable review 2 of PR #3, finding E)."""
+        addr = sender.strip().lower()
+        mine = set(o["id"] for o in self.own_offers(e)) if e is not None else set()
+        return [o for o in self.ledger.open_offers(thread_key, self.now()) if o["sender"] == addr
+                and o["id"] not in mine]
+
+    def open_offer_slots(self, thread_key, sender, e=None):
+        """Every slot of the open offers to this sender on the thread, as G9 reads them."""
+        return [s for o in self.open_offers_to(thread_key, sender, e) for s in o["slots"]]
+
     def book_fresh(self, e, f, plan, bid):
         now, slot, msg = self.now(), plan.slot, e.msg
-        ok, rule = slots.bookable(slot, now, written=plan.direct)
+        # a pick books only a slot an open offer to its sender holds, the gate's own test (G9): one whose
+        # offer expired or closed while she was down gets fresh times before any booking is made (Fable
+        # review of PR #3, finding 6). Past that, the slot is a time the sender wrote or one she offered
+        # them, so a quarter hour stays bookable.
+        if plan.direct is not True and slot not in self.open_offer_slots(e.thread, msg.from_addr, e):
+            self.drop_booking(bid)
+            return self.act(e, f, policy.on_unavailable(plan, "not_offered", f.thread))
+        ok, rule = slots.bookable(slot, now, written=True)
         if not ok:
             self.drop_booking(bid)
             return self.act(e, f, policy.on_unavailable(plan, rule, f.thread))
@@ -1196,7 +1224,8 @@ class _Run:
         if busy:
             self.drop_booking(bid)
             return self.act(e, f, policy.on_unavailable(plan, "overlap", f.thread))
-        self.ledger.record_booking(bid, e.key, e.thread, msg.from_addr, slot, now, run_id=self.run_id)
+        self.ledger.record_booking(bid, e.key, e.thread, msg.from_addr, slot, now, run_id=self.run_id,
+                                   direct=plan.direct is True)
         event = ics.build_event(bid, slot, self.link(), "CONFIRMED", 0, now, None)
         action = Action(kind="calendar_create", message_key=e.key, thread_key=e.thread,
                         recipient_source="sender", booking_id=bid, span=slot, direct=plan.direct, ics=event,
@@ -1285,13 +1314,14 @@ class _Run:
         p = f.parse
         return slots.find_slots(events, now, plan.length_min, count=caps.SLOTS_PER_OFFER, exclude_starts=exclude,
                                 first=plan.first, steer_day=p.steer_day, steer_window=p.steer_window,
-                                steer_zone=p.zone or slots.PACIFIC)
+                                steer_zone=p.zone or slots.PACIFIC, derived=plan.derived)
 
     def resend(self, e, f, plan):
-        """T12: the same open offer again, in both zones; no new offer record."""
+        """T12: the same open offer again, in both zones; no new offer record. T12 states no length,
+        so G9 checks each time at the open offer's own (Fable review of PR #3, finding 5)."""
         offered = [s for o in f.thread.open_offers for s in o["slots"]][:caps.SLOTS_PER_OFFER]
         tslots = {"slots": [s.start_utc for s in offered], "zone": f.parse.zone}
-        if self.reply(e, f, "T12", tslots, offered=offered):
+        if self.reply(e, f, "T12", tslots, offered=offered, length=f.thread.open_offers[0]["length_min"]):
             self.close(e, "decided", plan.outcome, plan.why, template="T12")
 
     def cancel(self, e, f, plan):
@@ -1453,6 +1483,7 @@ class _Run:
             spend_usd=lambda: led.spend(self.run_id), silenced=led.is_silenced,
             counts=lambda thread_key: self.counts(thread_key, action),
             fresh_read=lambda slot: self.read(e, slot.start_utc, slot.end_utc), booking=led.booking,
+            open_offer_slots=lambda thread_key, sender: self.open_offer_slots(thread_key, sender, e),
             live_booking_for_thread=led.live_booking_for_thread,
             readback_clean=lambda bid: bid in self.clean_readbacks, model_ok=lambda: not self.model_down,
             meeting_link=self.link())
@@ -1541,22 +1572,37 @@ class _Run:
 
         def write_offer_down():
             # written down before the send (A3), once per send: a restart that sends again under the
-            # same Message-ID gives the same offer record its fresh times; the thread's count is unchanged
+            # same Message-ID gives the same offer record its fresh times and the time it goes out
+            # (a pick that came before then cannot be answering it); the thread's count is unchanged
             if template not in NEW_OFFER_TEMPLATES or not offered:
                 return
-            prior = self.ledger.offer_for_send(mid)
+            prior, sent = self.ledger.offer_for_send(mid), self.now()
             if prior is None:
                 self.ledger.create_offer(e.thread, msg.from_addr, list(offered), length or caps.DEFAULT_LENGTH_MIN,
-                                         now, now + caps.OFFER_EXPIRY, message_id=mid)
-            elif prior["slots"] != list(offered):
-                self.ledger.set_offer_slots(prior["id"], list(offered), now, now + caps.OFFER_EXPIRY)
+                                         sent, sent + caps.OFFER_EXPIRY, message_id=mid)
+            else:
+                self.ledger.set_offer_slots(prior["id"], list(offered), sent, sent + caps.OFFER_EXPIRY)
 
         if not self.deliver(e, mid, "send_reply", template, msg.from_addr, raw, body,
                             compose.reply_envelope(msg, self.cfg.owner_addr), tslots, before_send=write_offer_down):
             self.hold(e, "hold.send_unconfirmed", why_mod.why("hold.send_unconfirmed"), f)
             return False
+        self.supersede(e, template)
         self.summary.sends += 1
         return True
+
+    def supersede(self, e, template):
+        """An offer this message's reply carries, found in Sent, closes the sender's earlier open offers
+        on the thread ("superseded"), so "the first one" means the newest offer's first (Fable review of
+        PR #3, finding 4). Not at write-down: a kill before the send is confirmed leaves the offer the
+        message answered open for the restart, which plans the same reply again. The thread's count
+        keeps every offer, so a third set of times is still a hold."""
+        if template not in NEW_OFFER_TEMPLATES:
+            return
+        newest = self.ledger.offer_for_send(compose.new_message_id(self.cfg.doris_addr, e.key, template, 1))
+        if newest is not None:
+            e.offers_superseded += self.ledger.close_offers(e.thread, "superseded", sender=newest["sender"],
+                                                            before=newest["id"])
 
     def deliver(self, e, mid, kind, template, to_addr, raw, body, envelope, tslots, before_send=None):
         """Recorded before it is sent; sent once; found in Sent after (one more look); never resent blind.
@@ -1696,6 +1742,8 @@ class _Run:
         payload = {"outcome": outcome, "template": template, "injection_seen": e.injection_seen,
                    "retried": e.retried, "recovered": e.recovered, "screen": r.screen if r is not None else None,
                    "wrapped": e.facts.get("wrapped"), "thread": e.subject if e.sensitive else e.thread}
+        if e.offers_superseded:
+            payload["offers_superseded"] = e.offers_superseded
         payload.update(extra)
         self.write(kind, payload, subject=e.subject, why=why_)
         e.closed = True

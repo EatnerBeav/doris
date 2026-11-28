@@ -295,11 +295,17 @@ def _times(v, lo, hi):
     return [_aware(t, "slot") for t in v]
 
 
+def line_ok(v, limit=200):
+    """True when v can stand as one line of header text (a name) of at most `limit` characters."""
+    return (isinstance(v, str) and bool(v.strip()) and len(v) <= limit
+            and not any(ord(c) < 32 or ord(c) == 127 for c in v))
+
+
 def _line(v, what, limit=200):
     """One line of header text (a name): no line breaks, no control characters."""
     if not isinstance(v, str) or not v.strip() or len(v) > limit:
         raise TemplateError("%s must be a short non-empty string" % (what,))
-    if any(ord(c) < 32 or ord(c) == 127 for c in v):
+    if not line_ok(v, limit):
         raise TemplateError("%s may not carry control characters or line breaks" % (what,))
     return v
 
@@ -310,16 +316,27 @@ def _addr(v, what="address"):
     return v
 
 
-# An address shown to the owner in a hold notice: body text, never a header. One address on one
-# line, like _ADDR, but it takes letters outside ASCII, so a sender whose address has one is still
-# named in the notice (Fable re-review F). No control or format characters (a bidi override).
+# An address shown to the owner in a notice: body text, never a header. One address on one line,
+# like _ADDR, but it takes letters outside ASCII, so a sender whose address has one is still named
+# in the notice (Fable re-review F), and a code in it may be blanked to REDACTED (holds.shown_address).
+# No control or format characters (a bidi override).
 _SHOWN_ADDR = re.compile(r'^[^\s<>()\[\]\\,;:"@]+@[^\s<>()\[\]\\,;:"@]+\.[^\s<>()\[\]\\,;:"@.]+$')
 
+# What a notice shows in place of a code, key or token from the mail (decision 77), and in place of
+# a whole value it cannot show safely (an address too long, or one the line can't carry).
+REDACTED = "[redacted]"
 
-def _shown_addr(v):
-    if (not isinstance(v, str) or len(v) > 254 or not _SHOWN_ADDR.match(v)
-            or any(unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") for c in v)):
-        raise TemplateError("address must be one email address on one line")
+
+def shown_address_ok(v):
+    """True when v can stand as the address a notice shows: one address on one line, or REDACTED."""
+    return isinstance(v, str) and (v == REDACTED or (
+        len(v) <= 254 and bool(_SHOWN_ADDR.match(v.replace(REDACTED, "redacted")))
+        and not any(unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") for c in v)))
+
+
+def _shown_addr(v, what="address"):
+    if not shown_address_ok(v):
+        raise TemplateError("%s must be one email address on one line" % (what,))
     return v
 
 
@@ -515,7 +532,7 @@ def _s2(s):
         if not isinstance(pair, (list, tuple)) or len(pair) != 2:
             raise TemplateError("opted_out holds (address, dropped) pairs")
         k = _int(pair[1], 0, 10 ** 6, "dropped")
-        opted.append(_addr(pair[0]) + (" (%d queued request dropped)" % k if k else ""))
+        opted.append(_shown_addr(pair[0]) + (" (%d queued request dropped)" % k if k else ""))
     if opted:
         lines.append("Opted out: " + ", ".join(opted))
     bits = []
@@ -530,7 +547,7 @@ def _s2(s):
     k = _int(s["not_addressed"], 0, 10 ** 6, "not_addressed")
     if k:
         lines.append("Not addressed to you alone, no reply: %d" % k)
-    sensitive = _names(s["sensitive"], "sensitive", lambda v, w: _addr(v, w))
+    sensitive = _names(s["sensitive"], "sensitive", _shown_addr)
     if sensitive:
         lines.append("Sensitive mail skipped: " + ", ".join(sensitive))
     c = _int(s["model_calls"], 0, 10 ** 6, "model_calls")

@@ -3,6 +3,7 @@ import email
 import email.policy
 import hashlib
 import os
+import time
 import unittest
 from unittest import mock
 
@@ -132,6 +133,40 @@ class ReplyTest(Base):
         m = email.message_from_bytes(raw, policy=email.policy.default)
         self.assertEqual(m["Subject"], "RE: Friday? Bcc: x@evil.example")
         self.assertIsNone(m["Bcc"])
+
+    def test_a_code_in_the_subject_is_not_echoed(self):
+        # Fable review of PR #4, finding 1: the reply's Subject carried the sender's canary back.
+        from doris import traps
+        self.inbound = make_msg(subject="Sync AGW-CANARY-­7QXZ next week?")
+        raw, _ = self.reply()
+        m = email.message_from_bytes(raw, policy=email.policy.default)
+        self.assertEqual(m["Subject"], "Re: Sync [redacted] next week?")
+        self.assertEqual(traps.find_tokens(raw.decode("latin-1")), [])
+
+    def test_a_code_in_capitals_beside_lowercase_is_not_echoed(self):
+        # Second Fable review of PR #4, H1: "ref=", "x/" or a URL around the code kept it.
+        from doris import traps
+        self.inbound = make_msg(subject="Sync ref=AGW-CANARY-WQZX, see https://a.example/AGW-CANARY-418F?")
+        raw, _ = self.reply()
+        m = email.message_from_bytes(raw, policy=email.policy.default)
+        self.assertEqual(m["Subject"], "Re: Sync [redacted], see https://a.[redacted]?")
+        self.assertEqual(traps.find_tokens(raw.decode("latin-1")), [])
+
+    def test_a_long_subject_is_read_only_so_far(self):
+        # Second Fable review of PR #4, H2: a Subject of "The key is", 12,000 spaces and "!" took 3.6 s.
+        self.inbound = make_msg(subject="The key is" + " " * 30000 + "!")
+        start = time.monotonic()
+        raw, _ = self.reply()
+        self.assertLess(time.monotonic() - start, 2.0)
+        m = email.message_from_bytes(raw, policy=email.policy.default)
+        self.assertEqual(m["Subject"], "Re: The key [redacted]")
+
+    def test_the_subject_is_echoed_as_the_sender_wrote_it(self):
+        # Second review of PR #4, round 2, L6: the reply echoed the folded subject (workshopTM, 1⁄2).
+        self.inbound = make_msg(subject="Workshop™ ½ day, １２月３日")
+        raw, _ = self.reply()
+        m = email.message_from_bytes(raw, policy=email.policy.default)
+        self.assertEqual(m["Subject"], "Re: Workshop™ ½ day, １２月３日")
 
     def test_non_ascii_subject_encoded(self):
         self.inbound = make_msg(subject="Café chat")

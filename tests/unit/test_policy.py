@@ -43,8 +43,10 @@ def thread(**kw):
 
 
 def facts(cls="meeting_request", **kw):
+    # arrived: the message reached her an hour after every offer here went out (offer() sends at NOW)
     base = dict(sender=SENDER, branch="1", others_on_thread=0, thread=thread(), answer=answer(cls),
-                parse=parse(), model_agrees=False, pick=None, money_code=None, reply_to_mismatch=False)
+                parse=parse(), model_agrees=False, pick=None, money_code=None, reply_to_mismatch=False,
+                arrived=NOW + dt.timedelta(hours=1))
     base.update(kw)
     return policy.Facts(**base)
 
@@ -86,6 +88,19 @@ class MeetingRequest(WhyIsListed):
     def test_parser_readings_go_first_in_the_offer(self):
         p = policy.decide(facts(parse=parse("offer", failed="B7", instant=WED_11)))
         self.assertEqual(p.first, (WED_11,))
+
+    def test_a_derived_reading_is_never_one_of_the_senders_own_times(self):
+        # D5's cross-pair (Fable review 2 of PR #3, finding A): it follows the sender's own times, never
+        # among them, in an offer and in a move's fresh times
+        mon = WED_11 + dt.timedelta(days=5)
+        readings = [Reading(start_utc=WED_11, date=None, zone="Pacific", kept=True, rule="H1"),
+                    Reading(start_utc=mon, date=None, zone="Pacific", kept=True, rule="H1", derived=True)]
+        p = parse("offer", failed="B2")
+        p.readings = readings
+        offer_ = policy.decide(facts(parse=p))
+        self.assertEqual((offer_.offer_family, offer_.first, offer_.derived), ("T2", (WED_11,), (mon,)))
+        move = policy.decide(facts("move", parse=p, thread=thread(live_booking=booking())))
+        self.assertEqual((move.offer_family, move.first, move.derived), ("T18", (WED_11,), (mon,)))
 
     def test_longer_than_an_hour_holds(self):
         for rule in ("over_60", "open_ended"):
@@ -178,6 +193,63 @@ class Picks(WhyIsListed):
         p = policy.decide(facts("no_thanks", branch="2", thread=t))
         self.assertEqual((p.action, p.template), ("close", None))
         self.assertWhy(p, "policy.no_thanks_close")
+
+
+class APickBeforeHerNewestOffer(WhyIsListed):
+    """A numbered pick or a yes names a slot only by its place in an offer: one that reached her before her
+    newest offer to the sender went out cannot be answering it, so it gets that offer again (T12), never a
+    booking (Fable review 2 of PR #3, finding B). A pick that names the time is read by its time."""
+    BEFORE = NOW - dt.timedelta(minutes=6)
+
+    def three(self):
+        return [slot(0), slot(24), slot(48)]
+
+    def on_thread(self, *offers):
+        return thread(own_thread=True, offer_count=len(offers), open_offers=list(offers),
+                      written_to=frozenset([SENDER]), offer_to=SENDER)
+
+    def assertResent(self, p):
+        self.assertEqual((p.action, p.template, p.slot, p.offer_id), ("resend", "T12", None, None))
+        self.assertWhy(p, "policy.pick_before_offer")
+
+    def test_a_numbered_pick_that_reached_her_before_the_offer_went_out_gets_it_again(self):
+        t = self.on_thread(offer(self.three()))
+        for by in ("number", None):          # a pick that does not say how it named the slot is read by number
+            with self.subTest(by=by):
+                self.assertResent(policy.decide(facts("pick", branch="2", thread=t, arrived=self.BEFORE,
+                                                      pick=PickResult("matched_slot", 0, by))))
+        self.assertResent(policy.decide(facts("meeting_request", branch="2", thread=t, arrived=NOW,
+                                              pick=PickResult("matched_slot", 0, "number"))))
+        p = policy.decide(facts("pick", branch="2", thread=t, pick=PickResult("matched_slot", 0, "number")))
+        self.assertEqual((p.action, p.slot), ("book", slot(0)))
+
+    def test_its_arrival_or_the_offers_send_time_unknown_is_never_a_booking(self):
+        t = self.on_thread(offer(self.three()))
+        self.assertResent(policy.decide(facts("pick", branch="2", thread=t, arrived=None,
+                                              pick=PickResult("matched_slot", 0, "number"))))
+        unsent = dict(offer(self.three()), created=None)
+        self.assertResent(policy.decide(facts("pick", branch="2", thread=self.on_thread(unsent),
+                                              pick=PickResult("matched_slot", 0, "number"))))
+
+    def test_it_is_read_against_the_newest_offer(self):
+        older = offer([slot(0)], oid=1)
+        newer = dict(offer([slot(24), slot(48)], oid=2), created=NOW + dt.timedelta(minutes=70))
+        between = NOW + dt.timedelta(minutes=30)
+        self.assertResent(policy.decide(facts("pick", branch="2", thread=self.on_thread(older, newer), arrived=between,
+                                              pick=PickResult("matched_slot", 1, "number"))))
+
+    def test_a_pick_that_names_the_time_still_books(self):
+        t = self.on_thread(offer(self.three()))
+        p = policy.decide(facts("pick", branch="2", thread=t, arrived=self.BEFORE,
+                                pick=PickResult("matched_slot", 1, "time")))
+        self.assertEqual((p.action, p.slot, p.offer_id), ("book", slot(24), 1))
+
+    def test_a_yes_that_reached_her_before_the_offer_went_out_gets_it_again(self):
+        t = self.on_thread(offer([slot(0)]))
+        self.assertResent(policy.decide(facts("yes", branch="2", thread=t, arrived=self.BEFORE)))
+        self.assertResent(policy.decide(facts("yes", branch="2", thread=t, arrived=None)))
+        p = policy.decide(facts("yes", branch="2", thread=t))
+        self.assertEqual((p.action, p.slot), ("book", slot(0)))
 
 
 class CancelAndMove(WhyIsListed):
@@ -312,6 +384,25 @@ class CodeHoldsBeatTheModel(WhyIsListed):
         # others_on_thread counts neither the owner nor Doris (ruling 18); 0 here means she answers
         p = policy.decide(facts(parse=parse("book", instant=WED_11), model_agrees=True))
         self.assertEqual(p.action, "book")
+
+    def test_a_sender_on_a_thread_whose_open_offer_went_to_someone_else_is_held_before_any_offer(self):
+        # Fable review 2 of PR #3, finding C: Bob names Lena's request, which holds her open offer, and has
+        # none of his own: he is held (he would otherwise get an offer of his own on her thread)
+        lena = "lena@harborline.example"
+        t = thread(own_thread=False, offer_count=1, written_to=frozenset([lena]), offer_to=lena)
+        for cls, pick in (("pick", PickResult("matched_slot", 0, "number")), ("meeting_request", None),
+                          ("yes", None), ("decline", None), ("move", None)):
+            with self.subTest(cls=cls):
+                p = policy.decide(facts(cls, branch="1", thread=t, pick=pick,
+                                        parse=parse("book", instant=WED_11), model_agrees=True))
+                self.assertEqual((p.action, p.hold_code), ("hold", "hold.new_address"))
+        self.assertEqual(policy.decide(facts("fyi", branch="1", thread=t)).action, "file")
+        # his own open offer on the thread, or no open offer to anyone there: the table goes on as before
+        mine = thread(own_thread=False, offer_count=2, open_offers=[offer([slot(0)])], written_to=frozenset([lena]),
+                      offer_to=SENDER)
+        self.assertEqual(policy.decide(facts("yes", branch="1", thread=mine)).action, "book")
+        lapsed = thread(own_thread=False, offer_count=1, written_to=frozenset([lena]), offer_to=None)
+        self.assertEqual(policy.decide(facts(branch="1", thread=lapsed)).offer_family, "T2")
 
 
 class Resume(WhyIsListed):

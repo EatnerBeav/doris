@@ -81,6 +81,28 @@ class OpenAndSchema(Base):
         with self.assertRaises(LedgerError):
             Ledger(self.path)
 
+    def test_a_version_2_ledger_gains_the_direct_column_and_keeps_its_bookings(self):
+        self.db.start_run(RUN, "sandbox", T0)
+        self.db.record_booking("doris-1", K1, TH, PRIYA, slot(2, 18), T0, direct=True)
+        self.db.close()
+        cols = [r[1] for r in self.raw("PRAGMA table_info(bookings)") if r[1] != "direct"]
+        self.raw("CREATE TABLE b2 AS SELECT %s FROM bookings" % ", ".join(cols))
+        self.raw("DROP TABLE bookings")
+        self.raw("ALTER TABLE b2 RENAME TO bookings")
+        self.raw("UPDATE schema_version SET version = 2")
+        self.db = Ledger(self.path)
+        self.assertEqual(self.raw("SELECT version FROM schema_version"), [(ledger_mod.SCHEMA_VERSION,)])
+        b = self.db.booking("doris-1")
+        self.assertEqual((b["state"], b["slot"]), ("intent", slot(2, 18)))
+        self.assertIsNone(b["direct"])          # recorded before the ledger kept it: unknown, never guessed here
+        self.db.record_booking("doris-2", K1, TH, PRIYA, slot(3, 18), T0, run_id=RUN, direct=False)
+        self.assertIs(self.db.booking("doris-2")["direct"], False)
+
+    def test_a_version_1_ledger_is_still_refused(self):
+        self.raw("UPDATE schema_version SET version = 1")
+        with self.assertRaises(LedgerError):
+            Ledger(self.path)
+
     def test_create_false_refuses_a_missing_ledger(self):
         missing = os.path.join(self._tmp.name, "live", "ledger.sqlite")
         with self.assertRaises(FileNotFoundError):
@@ -151,7 +173,7 @@ class CommitsBeforeReturn(Base):
         self.assertEqual(other.offer_count(TH), 1)
         db.use_offer(oid)
         self.assertEqual(other.open_offers(TH, T0), [])
-        db.record_booking("doris-1", K1, TH, PRIYA, slot(2, 18), T0)
+        db.record_booking("doris-1", K1, TH, PRIYA, slot(2, 18), T0, direct=False)
         self.assertEqual(other.booking("doris-1")["state"], "intent")
         db.set_booking_state("doris-1", "written")
         self.assertEqual(other.booking("doris-1")["state"], "written")
@@ -174,7 +196,7 @@ class CommitsBeforeReturn(Base):
                 seen["state"] = (self.other().booking(booking_id) or {}).get("state")
 
         self.db.start_run(RUN, "sandbox", T0)
-        self.db.record_booking("doris-2", K1, TH, PRIYA, slot(2, 18), T0)
+        self.db.record_booking("doris-2", K1, TH, PRIYA, slot(2, 18), T0, direct=False)
         FakeCalendar().create_only("doris-2", b"BEGIN:VCALENDAR")
         self.assertEqual(seen["state"], "intent")
 
@@ -458,6 +480,33 @@ class Offers(Base):
         self.assertEqual(self.db.close_offers("t2@x.example", "stop"), 1)
         self.assertEqual([o["id"] for o in self.db.open_offers(TH, T0)], [a, b])
 
+    def test_a_newer_offer_to_the_sender_closes_their_older_ones_only(self):
+        # a re-offer supersedes the sender's earlier offer: never itself, and the thread still counts both
+        # (Fable review of PR #3, finding 4)
+        first = self.offer(slots=[slot(2, 18)])
+        second = self.offer(slots=[slot(3, 18)])
+        self.assertEqual(self.db.close_offers(TH, "superseded", sender=" Priya@Northwind.example ", before=second), 1)
+        self.assertEqual([o["id"] for o in self.db.open_offers(TH, T0)], [second])
+        self.assertEqual(self.db.close_offers(TH, "superseded", sender=PRIYA, before=second), 0)
+        self.assertEqual(self.db.offer_count(TH), 2)
+        self.assertEqual(self.raw("SELECT id, closed_reason FROM offers ORDER BY id"),
+                         [(first, "superseded"), (second, None)])
+        for bad in (True, str(second), 1.0):
+            with self.assertRaises(ValueError):
+                self.db.close_offers(TH, "superseded", sender=PRIYA, before=bad)
+
+    def test_closing_one_senders_offers_leaves_another_senders_open(self):
+        # an offer is one sender's (same sender, same thread)
+        mine = self.offer(slots=[slot(2, 18)])
+        theirs = self.db.create_offer(TH, "sam@contoso.example", [slot(3, 18)], 30, T0, T0 + dt.timedelta(days=7))
+        self.assertEqual(self.db.close_offers(TH, "superseded", sender="lee@x.example"), 0)
+        self.assertEqual(self.db.close_offers(TH, "superseded", sender=PRIYA), 1)
+        self.assertEqual([o["id"] for o in self.db.open_offers(TH, T0)], [theirs])
+        self.assertEqual(self.raw("SELECT id, closed_reason FROM offers ORDER BY id"),
+                         [(mine, "superseded"), (theirs, None)])
+        with self.assertRaises(ValueError):
+            self.db.close_offers(TH, "superseded", sender=" ")
+
     def test_offered_starts_cover_every_offer_ever(self):
         first = self.offer(slots=[slot(2, 18), slot(3, 19)])
         self.db.use_offer(first)
@@ -510,6 +559,7 @@ class Bookings(Base):
         self.db.start_run(RUN, "sandbox", T0)
 
     def book(self, bid="doris-1", s=None, thread=TH, **kw):
+        kw.setdefault("direct", False)
         return self.db.record_booking(bid, K1, thread, PRIYA, s or slot(2, 18), T0, **kw)
 
     def test_recorded_as_intent_with_its_slot(self):
@@ -520,12 +570,26 @@ class Bookings(Base):
         self.assertEqual(b["slot"], slot(2, 18))
         self.assertIsNone(self.db.booking("doris-9"))
 
+    def test_a_booking_keeps_whether_it_was_direct(self):
+        # a restart reads it back instead of guessing from the offers (Fable review of PR #3, finding 2)
+        self.book("doris-1", direct=True)
+        self.book("doris-2", s=slot(3, 18), direct=False)
+        self.assertIs(self.db.booking("doris-1")["direct"], True)
+        self.assertIs(self.db.booking("doris-2")["direct"], False)
+        self.assertEqual([b["direct"] for b in self.db.bookings_for_thread(TH)], [True, False])
+
+    def test_direct_is_true_or_false(self):
+        for bad in (None, 1, "yes"):
+            with self.assertRaises(ValueError):
+                self.book("doris-1", direct=bad)
+        self.assertIsNone(self.db.booking("doris-1"))
+
     def test_a_booking_needs_a_run(self):
         fresh = Ledger(os.path.join(self._tmp.name, "other.sqlite"))
         self.extra.append(fresh)
         with self.assertRaises(ValueError):
-            fresh.record_booking("doris-1", K1, TH, PRIYA, slot(2, 18), T0)
-        fresh.record_booking("doris-1", K1, TH, PRIYA, slot(2, 18), T0, run_id="run-x")
+            fresh.record_booking("doris-1", K1, TH, PRIYA, slot(2, 18), T0, direct=False)
+        fresh.record_booking("doris-1", K1, TH, PRIYA, slot(2, 18), T0, run_id="run-x", direct=False)
         self.assertEqual(fresh.count_calendar_writes("run-x"), 1)
 
     def test_states_are_checked(self):
@@ -737,7 +801,7 @@ class TimesAsIsoUtc(Base):
         db.silence(PRIYA, "stop", K1, local)
         db.create_offer(TH, PRIYA, [Slot(slot(2, 18).start_utc.astimezone(pacific), slot(2, 18).end_utc)], 30,
                         local, local + H)
-        db.record_booking("doris-1", K1, TH, PRIYA, slot(2, 18), local)
+        db.record_booking("doris-1", K1, TH, PRIYA, slot(2, 18), local, direct=False)
         db.record_hold(TH, K1, "hold.money", None, local)
         db.record_sensitive_skip(K2, PRIYA, "cd" * 32, "ssn", local)
         db.end_run(RUN, local)

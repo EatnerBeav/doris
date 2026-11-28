@@ -51,7 +51,7 @@ class ThreadState:
     own_thread: bool = False            # its reply headers name a Message-ID in her Sent ledger
     held: bool = False                  # a held thread stays Shane's: nothing more is sent on it
     offer_count: int = 0                # offer records on this thread, ever (two at most)
-    open_offers: List[dict] = field(default_factory=list)   # not used, closed or expired: id, slots, length_min
+    open_offers: List[dict] = field(default_factory=list)   # to this sender; not used, closed, expired: id, slots...
     live_booking: Optional[dict] = None  # her standing booking on this thread: booking_id, slot, sender
     gone_booking: bool = False          # a booking here was marked gone (ruling 17)
     written_to: FrozenSet[str] = frozenset()   # addresses she has sent to on this thread
@@ -76,6 +76,7 @@ class Facts:
     own_reply: Optional[str] = None     # the template of its reply already in Sent
     own_reply_unknown: Optional[str] = None   # the template of its reply Sent could not be asked about
     own_booking: Optional[dict] = None  # its booking written down: slot, direct, offer_id, length_min
+    arrived: Optional[_dt.datetime] = None   # when it reached her, as the mail server handed it over
 
 
 @dataclass
@@ -91,6 +92,7 @@ class Plan:
     offer_family: Optional[str] = None  # T2 | T3 | T4 | T18
     exclude_offered: bool = False       # times already offered on the thread never come back
     first: Tuple = ()                   # the sender's own bookable times, offered first
+    derived: Tuple = ()                 # D5's times on a weekday written apart from them: on her grid, after
     asked: Optional[_dt.datetime] = None  # T4's [asked time]
     length_min: int = 30
     side_question: Optional[str] = None  # ruling 14: code-copied text for the digest's "Also asked" line
@@ -107,10 +109,20 @@ def _length(parse):
 
 
 def _own_readings(parse):
-    """The sender's own placed readings that the parser kept, in order, for offering first."""
+    """The sender's own placed readings that the parser kept, in order, for offering first. A derived
+    reading (D5 moving a time onto a weekday written apart from it) is never the sender's own."""
     if parse is None:
         return ()
-    return tuple(r.start_utc for r in parse.readings if r.kept and r.start_utc is not None)
+    return tuple(r.start_utc for r in parse.readings
+                 if r.kept and r.start_utc is not None and not getattr(r, "derived", False))
+
+
+def _derived_readings(parse):
+    """D5's derived readings the parser kept: offered after the sender's own, on her own grid."""
+    if parse is None:
+        return ()
+    return tuple(r.start_utc for r in parse.readings
+                 if r.kept and r.start_utc is not None and getattr(r, "derived", False))
 
 
 def _offer(parse, model_agrees, cond=None):
@@ -121,7 +133,8 @@ def _offer(parse, model_agrees, cond=None):
         else:
             cond = (parse.failed_condition if parse is not None else None) or "B7"
     return Plan(action="offer", outcome="offer", why=_why("policy.offer_no_clear_time", cond=cond),
-                offer_family="T2", first=_own_readings(parse), length_min=_length(parse))
+                offer_family="T2", first=_own_readings(parse), derived=_derived_readings(parse),
+                length_min=_length(parse))
 
 
 def _new_request(f):
@@ -154,6 +167,27 @@ def _all_open_slots(thread):
     return out
 
 
+def _after_newest_offer(f):
+    """True when the message reached her after her newest open offer to the sender went out (its send
+    time, set again whenever a restart sends it). Either time unknown is False: fail closed."""
+    sent = [o.get("created") for o in f.thread.open_offers]
+    if not sent or not all(_aware(s) for s in sent) or not _aware(f.arrived):
+        return False
+    return f.arrived > max(sent)
+
+
+def _aware(t):
+    return isinstance(t, _dt.datetime) and t.tzinfo is not None and t.utcoffset() is not None
+
+
+def _before_offer(kind):
+    """Fable review 2 of PR #3, finding B: a pick by number or a yes names a slot only by its place in an
+    offer, so one that reached her before her newest offer went out cannot be answering that offer. It
+    gets the open offer again (T12, no new offer record), never a booking."""
+    return Plan(action="resend", outcome="offer", why=_why("policy.pick_before_offer"), template="T12",
+                pick_kind=kind)
+
+
 def _pick(f):
     t = f.thread
     if not t.open_offers:
@@ -163,6 +197,8 @@ def _pick(f):
     pk = f.pick
     if pk is not None and pk.kind == "matched_slot" and pk.slot_index is not None:
         offer = _offer_holding(t, pk.slot_index)
+        if offer is not None and getattr(pk, "by", None) != "time" and not _after_newest_offer(f):
+            return _before_offer("matched_slot")
         if offer is not None:
             oid, s, length = offer
             code = "policy.pick_plus_question" if f.answer.side_question and f.answer.side_question_text else None
@@ -188,6 +224,8 @@ def _offer_holding(thread, index):
 def _yes(f):
     t = f.thread
     flat = _all_open_slots(t)
+    if len(flat) == 1 and not _after_newest_offer(f):
+        return _before_offer("yes_single")
     if len(flat) == 1:
         oid, s, length = flat[0]
         return Plan(action="book", outcome="book", why=_why("policy.yes_books"), slot=s, offer_id=oid,
@@ -232,8 +270,8 @@ def _move(f):
     # Offering needs no B11 (that is for booking straight away): the parser's kept readings go
     # first, and the loop's slot search keeps them only if they are available.
     return Plan(action="move", outcome="move", why=_why("policy.move_cancel_offer"), offer_family="T18",
-                booking_id=b["booking_id"], first=_own_readings(f.parse), exclude_offered=False,
-                length_min=_length(f.parse))
+                booking_id=b["booking_id"], first=_own_readings(f.parse), derived=_derived_readings(f.parse),
+                exclude_offered=False, length_min=_length(f.parse))
 
 
 # The closing word for a message whose reply already went out (its template says what it did).
@@ -297,8 +335,11 @@ def decide(f):
         return Plan(action="suppress", outcome="suppress", why=_why("policy.suppress_opt_out"))
 
     # Group mail and a new address on her own thread: held if she would act, filed if she would only file.
+    # So is a sender with no offer of their own on a thread whose open offer went to someone else: an offer
+    # or a booking of theirs there would lock that person out of it (Fable review 2 of PR #3, finding C).
     group = f.others_on_thread > 0
-    new_address = t.own_thread and f.sender not in t.written_to
+    new_address = (t.own_thread and f.sender not in t.written_to) or \
+        (not t.open_offers and t.offer_to is not None and t.offer_to != f.sender)
     if group or new_address:
         if cls in FILE_ONLY:
             return _file(cls)
