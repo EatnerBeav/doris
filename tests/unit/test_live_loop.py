@@ -1820,6 +1820,39 @@ class LiveTraceTest(LiveFixture):
                                                         "error line at seq " % folder), out)
         self.assert_no_value_in(folder, "dummy-other-pass")
 
+    def test_no_planted_value_reaches_the_trace_or_any_file_the_run_writes(self):
+        """The brief's (6) and scope D, for run --live: a made-up value for every name wide's env file
+        holds (wolf's and the two nothing reads included). None reaches any file the run writes (her
+        state and the trace alike), what it printed, or a request's body; the trace's own files, the
+        receipts aside, name no address either."""
+        wolf_token, wolf_password, owner_calendar = (SmokeOnlySettingsTest.WOLF_TOKEN, "dummy-wolf-app-pass-5252",
+                                                     "dummy-owner-calendar-5353")
+        self.env_path = self.write_env(WOLF_EMAIL=WOLF, WOLF_JMAP_TOKEN=wolf_token, WOLF_APP_PASSWORD=wolf_password,
+                                       OWNER_CALENDAR=owner_calendar)
+        code, out = self.cli("run", "--live", "--fresh", "--env", self.env_path)
+        self.assertEqual(code, supervisor.EXIT_HALTED, out)
+        planted = [PASSWORD, TOKEN, API_KEY, LINK, wolf_token, wolf_password, owner_calendar, COLLECTION]
+        planted += [base64.b64encode(v.encode()).decode() for v in (PASSWORD, TOKEN, API_KEY, wolf_token)]
+        planted.append(base64.b64encode(("%s:%s" % (DORIS, PASSWORD)).encode()).decode())
+        found = []
+        for folder, _, names in os.walk(self.dir):
+            for name in names:
+                path = os.path.join(folder, name)
+                if path == self.env_path:
+                    continue
+                data = self.read(folder, name)
+                found += [(os.path.relpath(path, self.dir), v) for v in planted if v.encode() in data]
+                if folder == self.trace() and name != "receipts.jsonl":
+                    found += [(os.path.relpath(path, self.dir), v) for v in (DORIS, OWNER, WOLF) if v.encode() in data]
+        found += [("printed", v) for v in planted + [DORIS, OWNER, WOLF] if v in out]
+        for kind, method, path, headers, body in self.jmap.requests:     # the link only in her reply's own bytes
+            found += [(kind, v) for v in planted if v.encode() in body and not (kind == "upload" and v == LINK)]
+        found += [("model", v) for url, headers, body in self.posts for v in planted if v in json.dumps(body)]
+        self.assertEqual(found, [])
+        self.assertEqual(len(os.listdir(self.trace())), 4)
+        self.assertEqual([kind for kind, method, path, headers, body in self.jmap.requests
+                          if LINK.encode() in body], ["upload"])                  # her confirmation carries it
+
     def test_a_start_refused_before_anything_was_contacted_writes_no_trace(self):
         def no_proof():
             self.prove_smoke(None)
