@@ -1,6 +1,6 @@
 # Tracker: every scored item
 
-Updated Fri Nov 27, 6:45 PM Pacific. One line per item the judges score, from the project law (Never cut, commands, Dates) and the Nov 26 brief check. Times are Pacific.
+Updated Fri Nov 27, 6:55 PM Pacific. One line per item the judges score, from the project law (Never cut, commands, Dates) and the Nov 26 brief check. Times are Pacific.
 
 Status words: **done** = in the code on main and tested; **built** = in the code, the proof still to show; **in progress**; **not started**; **blocked** (says on what).
 
@@ -15,7 +15,7 @@ Status words: **done** = in the code on main and tested; **built** = in the code
 | 7 | `stop` / `resume` | Kill switch +1 | done on main; PR #2 adds SIGTERM/SIGHUP, the lifeline and the `sending` state | Kickoff (Wolf) | PR #2 merge, Fri night |
 | 8 | Booking re-check: right before the write, read back after | Reliability, never cut | done: gate G11 plus the re-read after the write (ruling 4) | Kickoff (Wolf) | done |
 | 9 | Signature check | Guardrails, never cut | done: gate G8 compares the signature byte for byte | Kickoff (Wolf) | done |
-| 10 | Fresh-clone run of the one command on three systems | Engineering | in progress. CI now runs `demo` and `traps` from the fresh checkout on all six legs, green (PR #5). Hand runs from a fresh clone of main, Fri 6:05 PM: Linux server, `demo` 14.1 s and `traps` 20/20; Shane's Windows 11 PC, `demo` 13.6 s, but `traps` 1/20 because its run paths pass Windows' 260-character limit (fix and a path-budget test queued on PR #2) | Kickoff (Wolf) | Sat 10:00 AM |
+| 10 | Fresh-clone run of the one command on three systems | Engineering | in progress. CI runs `demo` and `traps` from the fresh checkout on all six legs, on main since PR #5 merged (Fri 6:55 PM). Hand runs from a fresh clone of main, Fri 6:05 PM: Linux server, `demo` 14.1 s and `traps` 20/20; Shane's Windows 11 PC, `demo` 13.6 s, but `traps` 1/20 because its run paths pass Windows' 260-character limit (fix and a path-budget test queued on PR #2) | Kickoff (Wolf) | Sat 10:00 AM |
 | 11 | No-key line | Engineering, honesty | built: the demo's first line says the answers are replayed and no key was found. Wording of what a key costs to check | Kickoff (Wolf) | Sun 12:00 PM |
 | 12 | Live or replayed mark on every trace | Audit trail, honesty | in progress: receipts carry their mode; live runs get a manifest (live, date, commit, measured cost) with tonight's smoke; demo and Trap Pack traces next | Kickoff (Wolf) | Sat 12:00 PM |
 | 13 | Keys, tiers and cost table | Engineering | not started: cost is measured in tonight's smoke and Saturday's runs | README pass (Sunday) | Sun 6:00 PM |
@@ -32,6 +32,6 @@ Status words: **done** = in the code on main and tested; **built** = in the code
 | 24 | `traps` with no key replays a recorded live run's answers (today it falls back to the keyword stub and rewrites the committed RESULTS.md) | Reliability, honesty | not started: the RESULTS.md rewrite fix is queued on PR #2; replay waits on the fresh live Trap Pack run on merged main | Kickoff (Wolf) | Sat 12:00 PM |
 | 25 | `terminal.log` in every trace folder (0 bytes in all 40 committed today) | Audit trail | queued on PR #2 | Kickoff (Wolf) | Sat 10:00 AM |
 
-Open pull requests: #2 `live` (live adapters, live loop, digest, kill-switch hardening; JMAP sending lands here), #5 `demo-then-tests` (tests pass after a judge's demo; review-clean, CI green), #6 this tracker, #7 SAFETY.md and AGENT.md, #8 replay, #9 watch page, #10 yes-man proof (#7 to #10 on base `live`, merged after PR #2).
+Open pull requests: #2 `live` (live adapters, live loop, digest, kill-switch hardening; JMAP sending lands here), #6 this tracker, #7 SAFETY.md and AGENT.md, #8 replay, #9 watch page, #10 yes-man proof (#7 to #10 on base `live`, merged after PR #2).
 
 Known limit, written down: `stop` and a HALT file don't reach `traps`, which runs the loop in its own process; only a STOP file at the repo root halts it, at its next step. Trap Pack run 2 sits on branch `trap-pack-run-2`, unchanged, as it ran.
