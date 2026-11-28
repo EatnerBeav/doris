@@ -5,10 +5,12 @@ The real LiveMail and LiveCalendar talk to test_live's fake IMAP, SMTP and CalDA
 127.0.0.1 (the adapters' default transports swapped for plain connections to them), as in
 test_smoke. No test reads a real env file or reaches a real server.
 """
+import base64
 import contextlib
 import datetime as dt
 import email
 import email.policy
+import hashlib
 import http.client
 import imaplib
 import io
@@ -392,6 +394,110 @@ class LiveRunTest(LiveFixture):
             self.go(model_source="live")
         self.assertEqual(installed, [("127.0.0.1",)] * 2 + [("127.0.0.1", "api.anthropic.com")])
         self.assertIsNone(netguard.active())
+
+
+# ===========================================================================================
+# The meeting link a sender writes reaches no receipt, recorded answer or kept copy (review 2, 3)
+# ===========================================================================================
+def priya_mail(n, body, cte="7bit", subject="Quick call this week?"):
+    """A plain-text mail from Priya; body is bytes already in its transfer encoding (cte)."""
+    return ("From: Priya Raman <%s>\r\nTo: Shane Bornstein <%s>\r\nSubject: %s\r\n"
+            "Date: Tue, 01 Dec 2026 08:02:00 -0800\r\nMessage-ID: <live-link-%d@northwind.example>\r\n"
+            "MIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"utf-8\"\r\nContent-Transfer-Encoding: %s\r\n\r\n"
+            % (PROSPECT, OWNER, subject, n, cte)).encode("ascii") + body
+
+
+def room_in(data):
+    """The made-up room in these bytes in any form: as written, defanged, in capitals, or wrapped by
+    quoted-printable or a line break."""
+    return b"live-loop-room" in re.sub(rb"=\r?\n|\s", b"", data).lower()
+
+
+class MeetingLinkTest(LiveFixture):
+    """The law: the meeting link never goes in a receipt. A sender may write it (a reply quoting her
+    confirmation does); "[meeting link]" stands in its place in every receipt, recorded answer and kept
+    copy, and a copy that would still show it once decoded is not kept."""
+
+    def answer(self, cls, quote=None):
+        def post(url, headers, body, timeout):
+            a = model_answer(cls)
+            fields = json.loads(a["content"][0]["text"])
+            fields.update(side_question=quote is not None, side_question_quote=quote)
+            a["content"][0]["text"] = json.dumps(fields)
+            return 200, json.dumps(a).encode("utf-8")
+        p = mock.patch.object(model_mod, "_urllib_post", post)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def files(self):
+        for folder, _, names in os.walk(self.state):
+            for name in names:
+                with open(os.path.join(folder, name), "rb") as fh:
+                    yield os.path.relpath(os.path.join(folder, name), self.state), fh.read()
+
+    def observed(self, s):
+        return dict((l["subject"], l["payload"]) for l in receipts.read_lines(s.receipts_path)
+                    if l["kind"] == "observed" and "server_id" in l["payload"])
+
+    def test_a_request_that_writes_the_link_books_and_nothing_she_keeps_carries_it(self):
+        self.answer("meeting_request", quote="Is %s the right room?" % LINK)
+        self.go(fresh=True, model_source="live")
+        ask = ("Hi, could Shane do Wednesday, December 2 at 1:00 PM Central for 30 minutes? Is %s the right "
+               "room? Or hxxps://meet[.]example/live-loop-room, or MEET.EXAMPLE/live-loop-room?\r\n\r\nPriya\r\n"
+               % LINK)
+        self.inbox.add(priya_mail(1, ask.encode("ascii")), u(2026, 12, 1, 16, 2))
+        self.clock = u(2026, 12, 1, 16, 10)
+        answers = os.path.join(self.state, "recorded-answers.jsonl")
+        s = self.go(model_source="live", record_path=answers)
+        self.assertEqual((s.handled, s.held, s.sends, s.bookings, s.verify_ok), (1, 0, 1, 1, True))
+        (_, rcpts, data), = self.smtp.delivered
+        self.assertIn(b"Join: " + LINK.encode("ascii"), data)               # the link still goes where it belongs
+        self.assertEqual([name for name, data in self.files() if room_in(data)], [])
+        self.assertNotIn("live-loop-room", "\n".join(self.said))
+        (classified,) = [l["payload"] for l in receipts.read_lines(s.receipts_path) if l["kind"] == "classified"]
+        self.assertEqual(json.loads(classified["raw"])["side_question_quote"], "Is [meeting link] the right room?")
+        with open(answers, encoding="utf-8") as fh:
+            self.assertIn("Is [meeting link] the right room?", json.loads(fh.read())["raw"])
+        (seen,) = self.observed(s).values()
+        self.assertEqual(seen["copy_redacted"], "meeting_link")
+        with open(os.path.join(s.run_dir, seen["message_copy"]), "rb") as fh:
+            self.assertEqual(fh.read().count(b"[meeting link]"), 3)
+
+    def test_a_copy_keeps_its_bytes_loses_the_link_or_is_not_kept_when_only_decoding_shows_it(self):
+        self.answer("fyi")
+        self.go(fresh=True, model_source="live")
+        mails = {
+            1: priya_mail(1, b"Notes from today, nothing else.\r\n"),
+            2: priya_mail(2, b"Notes from today.\r\nJoin: https://meet.example/live-=\r\nloop-room any time.\r\n",
+                          cte="quoted-printable"),
+            3: priya_mail(3, base64.b64encode(("Notes: the room is %s\r\n" % LINK).encode("ascii")) + b"\r\n",
+                          cte="base64"),
+            4: priya_mail(4, b"Notes from today.\r\n", subject="=?utf-8?b?%s?=" % base64.b64encode(
+                ("Room: %s" % LINK).encode("ascii")).decode("ascii")),
+        }
+        for raw in mails.values():
+            self.inbox.add(raw, u(2026, 12, 1, 16, 2))
+        self.clock = u(2026, 12, 1, 16, 10)
+        s = self.go(model_source="live")
+        self.assertTrue(s.verify_ok)
+        seen = self.observed(s)
+        copies = os.path.join(s.run_dir, "messages")
+        plain = seen["live-link-1@northwind.example"]
+        self.assertNotIn("copy_redacted", plain)
+        with open(os.path.join(s.run_dir, plain["message_copy"]), "rb") as fh:
+            self.assertEqual(fh.read(), mails[1])                            # byte for byte, as before
+        split = seen["live-link-2@northwind.example"]
+        self.assertEqual(split["copy_redacted"], "meeting_link")
+        with open(os.path.join(s.run_dir, split["message_copy"]), "rb") as fh:
+            self.assertIn(b"Join: [meeting link] any time.", fh.read())
+        for n in (3, 4):
+            withheld = seen["live-link-%d@northwind.example" % n]
+            self.assertNotIn("message_copy", withheld)
+            self.assertEqual(withheld["copy_withheld"], "meeting_link")
+            self.assertFalse(os.path.exists(os.path.join(copies, hashlib.sha256(mails[n]).hexdigest() + ".eml")))
+        self.assertEqual(sorted(os.listdir(copies)), sorted(hashlib.sha256(mails[n]).hexdigest() + ".eml"
+                                                            for n in (1, 2)))
+        self.assertEqual([name for name, data in self.files() if room_in(data)], [])
 
 
 def sent_lookups(summary):

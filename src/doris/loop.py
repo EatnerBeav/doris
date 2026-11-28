@@ -537,7 +537,10 @@ class _Run:
             time.sleep(self.wait_s)
 
     def write(self, kind, payload, subject="", why=None):
-        return self.receipts.write(kind, payload, subject=subject, why=why)
+        """One receipt line. The law: the meeting link never goes in one, whoever wrote it (a sender's
+        text, the model's answer quoting it): every form of it is "[meeting link]" in every line."""
+        return self.receipts.write(kind, templates.redact_values(payload), subject=templates.redact_link(subject),
+                                   why=templates.redact_values(why) if why is not None else None)
 
     def called(self, call, target, subject="", **detail):
         return self.write("called", dict(detail, call=call, target=target), subject=subject)["seq"]
@@ -546,7 +549,8 @@ class _Run:
         self.write("result", dict(detail, call_seq=seq), subject=subject)
 
     def error(self, e, step, exc, **detail):
-        self.write("error", dict(detail, step=step, error="%s: %s" % (type(exc).__name__, str(exc)[:200])),
+        text = templates.redact_link(str(exc))[:200]       # the link out before the cut, so none is cut in half
+        self.write("error", dict(detail, step=step, error="%s: %s" % (type(exc).__name__, text)),
                    subject=e.subject if e is not None else "")
 
     # --- start, reconcile, drain, finish -------------------------------------------------------
@@ -840,7 +844,7 @@ class _Run:
                                            "inspected": False} for a in msg.attachments]
                 payload["links_seen"], payload["opened"] = msg.links_seen, 0
         if not e.sensitive:
-            payload["message_copy"] = self.keep_copy(e)
+            payload.update(self.keep_copy(e))
         self.write("observed", payload, subject=e.subject)
 
     @staticmethod
@@ -852,12 +856,28 @@ class _Run:
         return out
 
     def keep_copy(self, e):
+        """Her copy of the mail as it came, named by its hash, for whoever reads the receipts; returns
+        the observed line's copy fields. The law keeps the meeting link out of it: every form of the
+        link in its bytes becomes "[meeting link]" (copy_redacted), and a copy that would still show
+        the link once a part or header is decoded (base64, an encoded word) is not kept at all
+        (copy_withheld), nor one the check could not run on. A mail without the link is kept byte
+        for byte."""
+        data, replaced = templates.redact_link_bytes(e.item.raw)
+        try:
+            left = any(templates.has_link(view) for view in mail.decoded_views(data))
+        except Exception:                   # Contract 7: a check that cannot run keeps nothing
+            return {"copy_withheld": "link_check_failed"}
+        if left:
+            return {"copy_withheld": "meeting_link"}
         name = os.path.join("messages", e.raw_sha256 + ".eml")
         path = os.path.join(self.run_dir, name)
         if not os.path.exists(path):
             with open(path, "wb") as fh:
-                fh.write(bytes(e.item.raw))
-        return name.replace(os.sep, "/")
+                fh.write(data)
+        fields = {"message_copy": name.replace(os.sep, "/")}
+        if replaced:
+            fields["copy_redacted"] = "meeting_link"
+        return fields
 
     # --- what the screens settled -------------------------------------------------------------
     def close_screened(self, e):
@@ -910,7 +930,7 @@ class _Run:
         detail = {"ok": a.ok, "source": a.source, "request_sha256": a.request_sha256, "tokens_in": a.tokens_in,
                   "tokens_out": a.tokens_out, "cost_usd": a.cost_usd}
         if not a.ok:
-            detail["error"] = str(getattr(self.model, "last_error", "") or "")[:200]
+            detail["error"] = templates.redact_link(str(getattr(self.model, "last_error", "") or ""))[:200]
         self.result(seq, subject=e.subject, **detail)
         self.summary.model_calls += 1
         self.model_down = not a.ok

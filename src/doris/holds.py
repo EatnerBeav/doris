@@ -53,13 +53,15 @@ def clean(text):
 
 def quote(msg, reason_code):
     """The text that caused the hold (the hidden text for hold.hidden_text, else the sender's
-    own visible text), first 400 characters after invisibles are removed, then defanged."""
+    own visible text), first 400 characters after invisibles are removed and the run's meeting link
+    is "[meeting link]" (so it is never quoted, whole or cut in half: the quote goes in a receipt),
+    then defanged."""
     source = msg.hidden_text if reason_code == "hold.hidden_text" and msg.hidden_text else msg.own_text
-    return defang(clean(source).strip()[:caps.HOLD_QUOTE_CHARS])
+    return defang(templates.redact_link(clean(source)).strip()[:caps.HOLD_QUOTE_CHARS])
 
 
 def _name_line(text, limit=80):
-    one = " ".join(clean(text).split())
+    one = " ".join(templates.redact_link(clean(text)).split())
     return defang(one[:limit]).strip()
 
 

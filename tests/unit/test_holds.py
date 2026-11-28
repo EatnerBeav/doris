@@ -54,6 +54,17 @@ class QuoteTest(unittest.TestCase):
         q = holds.quote(msg, "hold.money")
         self.assertNotIn("a.example", q)
 
+    def test_the_run_link_never_reaches_the_quote_whole_or_cut_at_its_cap(self):
+        room = "https://meet.example/" + "quote-room"
+        before = templates.use_meeting_link(room)
+        self.addCleanup(templates.use_meeting_link, before)
+        q = holds.quote(make_msg(own_text="Is %s right? Or https://other.example/x" % room), "hold.money")
+        self.assertEqual(q, "Is [meeting link] right? Or hxxps://other[.]example/x")
+        cut = holds.quote(make_msg(own_text="a" * 370 + " " + room + " ok"), "hold.money")   # it straddles 400
+        self.assertEqual(cut, "a" * 370 + " [meeting link] ok")
+        hidden = make_msg(own_text="Fine.", hidden_text="hxxps://meet[.]example/quote-room")
+        self.assertEqual(holds.quote(hidden, "hold.hidden_text"), "[meeting link]")
+
 
 class NoticeSlotsTest(unittest.TestCase):
     def setUp(self):

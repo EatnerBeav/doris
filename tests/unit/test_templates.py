@@ -43,6 +43,57 @@ class RunLinkTest(Base):
         self.assertEqual(templates.meeting_link(), LINK)
 
 
+class RedactLinkTest(Base):
+    """The run's meeting link never reaches a receipt, a recorded answer or a kept copy, in any form a
+    sender or defanging writes it: "[meeting link]" stands in its place (the law; review 2, finding 3)."""
+
+    ROOM = "https://meet.example/" + "redact-room"
+
+    def setUp(self):
+        super().setUp()
+        before = templates.use_meeting_link(self.ROOM)
+        self.addCleanup(templates.use_meeting_link, before)
+
+    def test_every_form_of_the_link_is_replaced_and_nothing_else(self):
+        cases = [
+            ("Join: %s today" % self.ROOM, "Join: [meeting link] today"),
+            ("HTTPS://MEET.EXAMPLE/redact-room", "[meeting link]"),
+            ("http://meet.example/redact-room/", "[meeting link]"),
+            ("hxxps://meet[.]example/redact-room", "[meeting link]"),
+            ("meet.example/redact-room?pwd=1", "[meeting link]?pwd=1"),
+            ("{\"q\": \"https:\\/\\/meet.example\\/redact-room\"}", "{\"q\": \"[meeting link]\"}"),
+            ("%s and %s." % (self.ROOM, self.ROOM), "[meeting link] and [meeting link]."),
+            ("https://meet.example/other-room", "https://meet.example/other-room"),
+            ("meet.example alone, and redact-room alone", "meet.example alone, and redact-room alone"),
+        ]
+        for text, want in cases:
+            with self.subTest(text=text):
+                self.assertEqual(templates.redact_link(text), want)
+        self.assertEqual(templates.redact_link(None), None)
+
+    def test_a_receipt_payload_is_walked_and_keeps_its_shape(self):
+        payload = {"a": [self.ROOM, ("x", self.ROOM)], "b": 3, "c": None, "d": WED_1130,
+                   "e": {"f": "hxxps://meet[.]example/redact-room"}}
+        self.assertEqual(templates.redact_values(payload),
+                         {"a": ["[meeting link]", ["x", "[meeting link]"]], "b": 3, "c": None, "d": WED_1130,
+                          "e": {"f": "[meeting link]"}})
+
+    def test_the_bytes_of_a_kept_copy_lose_the_link_even_split_by_quoted_printable(self):
+        data = (b"Subject: Re: the room\r\n\r\nJoin: https://meet.example/redact-=\r\nroom now\r\n"
+                b"<a href=3D\"HTTPS://meet.example/redact-room\">here</a>\r\n")
+        self.assertEqual(templates.redact_link_bytes(data),
+                         (b"Subject: Re: the room\r\n\r\nJoin: [meeting link] now\r\n"
+                          b"<a href=3D\"[meeting link]\">here</a>\r\n", 2))
+        self.assertEqual(templates.redact_link_bytes(b"no room here"), (b"no room here", 0))
+
+    def test_the_check_finds_the_link_however_a_decoded_part_still_spells_it(self):
+        for text in ("see https://meet.example/redact-room", "https%3A%2F%2Fmeet.example%2Fredact-room",
+                     "href=\"https://meet.example/redact-&#114;oom\"", "https://meet.example/redact-\n  room"):
+            with self.subTest(text=text):
+                self.assertTrue(templates.has_link(text))
+        self.assertFalse(templates.has_link("https://meet.example/other-room and [meeting link]"))
+
+
 class FormatTest(Base):
     def test_fmt_slot_shane_first_with_their_zone(self):
         self.assertEqual(templates.fmt_slot(utc(2026, 12, 2, 19, 0), "Eastern"),

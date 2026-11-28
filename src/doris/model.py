@@ -27,7 +27,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import caps
+from . import caps, templates
 from .shapes import CLASSES, ModelAnswer, ModelError
 
 SOURCES = ("live", "replayed", "stub", "yes-man")
@@ -177,13 +177,16 @@ def _valid(obj):
 
 def _copied_question(quote, own_text):
     """Ruling 14, decision 63: the side question only when the model's quote occurs verbatim in the
-    sender's own text; code copies that slice (200 characters at most) and defangs it."""
+    sender's own text; code copies that slice (200 characters at most) and defangs it. The run's
+    meeting link is "[meeting link]" on both sides first, so the question never carries it (whole or
+    cut in half), and a recorded answer, which never carries it either, still matches the same mail."""
     if not isinstance(quote, str) or not quote.strip() or not own_text:
         return None
+    from . import holds
+    quote, own_text = templates.redact_link(quote), templates.redact_link(own_text)
     at = own_text.find(quote)
     if at < 0:
         return None
-    from . import holds
     text = holds.clean(own_text[at:at + min(len(quote), SIDE_QUESTION_CHARS)])
     return holds.defang(" ".join(text.split())) or None
 
@@ -507,8 +510,10 @@ class Model(object):
         return self._fail(h, "model down after one retry: %s" % (error,))
 
     def _record(self, h, raw, t_in, t_out, cost):
+        """The answer appended for later replay, the run's meeting link in it as "[meeting link]"."""
         if not self.record_path:
             return
+        raw = templates.redact_link(raw)
         line = json.dumps({"request_sha256": h, "model_id": self.model_id, "raw": raw, "tokens_in": t_in,
                            "tokens_out": t_out, "cost_usd": cost}, sort_keys=True, ensure_ascii=True)
         try:

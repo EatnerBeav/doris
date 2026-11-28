@@ -15,9 +15,11 @@ Times are rendered from UTC by code (templates.md, ruling 10):
 """
 
 import datetime as _dt
+import html
 import os
 import re
 import unicodedata
+import urllib.parse
 
 from .shapes import UTC
 
@@ -179,6 +181,88 @@ def meeting_link():
         return _run_link
     value = os.environ.get(MEETING_LINK_ENV, "").strip()
     return value or PLACEHOLDER_MEETING_LINK
+
+
+# --- the link in what she keeps --------------------------------------------------------------------
+# The law: the meeting link never goes in a receipt. A sender may write it (a reply quoting her T1
+# does), so every receipt line, recorded model answer, kept copy of a mail and quoted text carries
+# LINK_SHOWN in its place, in whatever form the sender, defanging or an encoding wrote it.
+LINK_SHOWN = "[meeting link]"
+_LINK_PATTERNS = {}       # (link, for_bytes) -> compiled pattern
+
+
+def _link_pattern(for_bytes):
+    """The meeting link (meeting_link(): the run's pinned one) as a pattern, any case: its scheme
+    http, https, hxxp or hxxps, written "://", ":\\/\\/" or "[://]", or left off when the link has a
+    path; "." also as "[.]", "/" as "\\/", "@" as "[@]", "&" as "&amp;"; white space (a wrapped line)
+    between any two characters. For a kept copy's bytes (for_bytes), a quoted-printable soft break
+    ("=" at a line's end) may fall anywhere too, and "=" may be "=3D". None for a link too bare to
+    find safely (no host)."""
+    link = meeting_link()
+    key = (link, for_bytes)
+    if key not in _LINK_PATTERNS:
+        m = re.match(r"([A-Za-z][A-Za-z0-9+.\-]*)://", link)
+        scheme, rest = (m.group(1).lower(), link[m.end():]) if m else (None, link)
+        rest = rest.rstrip("/")
+        gap = r"(?:=\r?\n|\s)*" if for_bytes else r"\s*"
+        alts = {".": (r"\.", r"\[\.\]"), "/": ("/", r"\\/"), "@": ("@", r"\[@\]"), "&": ("&", "&amp;", "&#38;"),
+                "=": ("=3D", "=") if for_bytes else ("=",)}
+
+        def atoms(text):
+            return gap.join("(?:%s)" % "|".join(alts[c]) if c in alts else re.escape(c) for c in text)
+
+        if not rest or "." not in rest.split("/")[0]:
+            pattern = None
+        else:
+            body = atoms(rest) + "(?:%s(?:/|\\\\/))?" % gap
+            if scheme in ("http", "https"):
+                name = gap.join(("h", "[tx]", "[tx]", "p")) + "(?:%ss)?" % gap
+            else:
+                name = atoms(scheme) if scheme else None
+            if name is not None:
+                sep = "(?:%s|\\[://\\])" % gap.join((":", "(?:/|\\\\/)", "(?:/|\\\\/)"))
+                head = "(?:%s%s%s%s)" % (name, gap, sep, gap)
+                body = head + ("?" if "/" in rest or scheme is None else "") + body
+            pattern = re.compile(body.encode("ascii") if for_bytes else body, re.IGNORECASE)
+        _LINK_PATTERNS[key] = pattern
+    return _LINK_PATTERNS[key]
+
+
+def redact_link(text):
+    """text with every form of the meeting link replaced by "[meeting link]"; not a str: as it is."""
+    rx = _link_pattern(False) if isinstance(text, str) else None
+    return rx.sub(LINK_SHOWN, text) if rx is not None else text
+
+
+def redact_values(value):
+    """A receipt payload with redact_link applied to every string in it; dict keys stay as they are."""
+    if isinstance(value, str):
+        return redact_link(value)
+    if isinstance(value, dict):
+        return dict((k, redact_values(v)) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return [redact_values(v) for v in value]
+    return value
+
+
+def redact_link_bytes(data):
+    """(bytes, how many) with every form of the meeting link in a mail's bytes replaced, a
+    quoted-printable soft break inside it too. What only decoding shows (base64, an encoded header)
+    is left for has_link to find."""
+    rx = _link_pattern(True)
+    if rx is None:
+        return bytes(data), 0
+    return rx.subn(LINK_SHOWN.encode("ascii"), bytes(data))
+
+
+def has_link(text):
+    """True when the meeting link still shows in text: as it is, or once HTML entities or %-escapes
+    are undone. The last check on a kept copy, run on each of its decoded parts."""
+    rx = _link_pattern(False)
+    if rx is None or not isinstance(text, str):
+        return False
+    unescaped = html.unescape(text)
+    return any(rx.search(v) for v in (text, unescaped, urllib.parse.unquote(text), urllib.parse.unquote(unescaped)))
 
 
 # --- slot checks ---------------------------------------------------------------------------------

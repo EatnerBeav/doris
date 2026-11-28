@@ -7,7 +7,9 @@ Everything an email can try reaches Doris through this file, so it is strict:
   never used (decision 60).
 - No usable From, a broken structure or an undecodable body or header raises DecodeError.
   Screen 1 quarantines it and the run goes on. A read error never becomes "nothing found".
-- Attachments are listed by name, declared type and size and never decoded. A text/calendar
+- Attachments are listed by name, declared type and size and never decoded for reading. (The
+  meeting-link check on her kept copy, decoded_views below, undoes transfer encodings in memory to
+  look for one string; nothing in a part is parsed, rendered or opened.) A text/calendar
   part is always an attachment. An attached email (message/*) is never descended into.
   A delivery report (multipart/report or message/delivery-status) is not read at all.
 - HTML is turned into text with html.parser: script, style, head, title and template dropped,
@@ -21,6 +23,8 @@ import datetime as _dt
 import hashlib
 import re
 import unicodedata
+from email import errors as _eerrors
+from email import header as _eheader
 from email import policy as _policy
 from email import utils as _eutils
 from email.parser import BytesHeaderParser, BytesParser
@@ -797,6 +801,46 @@ def _list_report_parts(part, atts: List[Attachment], depth=0):
     if ctype in ("text/plain", "text/html") and not _is_attachment(part):
         return                             # the report's text: not read, not listed as an attachment
     atts.append(_attachment(part))
+
+
+def _header_view(value: str) -> str:
+    """A header with its encoded words undone; one that will not undo (no client could show it) as it is."""
+    try:
+        chunks = _eheader.decode_header(value)
+    except _eerrors.HeaderParseError:
+        return value
+    words = []
+    for chunk, charset in chunks:
+        if isinstance(chunk, bytes):
+            try:
+                chunk = chunk.decode(charset or "latin-1", "replace")
+            except LookupError:
+                chunk = chunk.decode("latin-1")
+        words.append(chunk)
+    return "".join(words)
+
+
+def decoded_views(raw: bytes) -> List[str]:
+    """Every way a kept copy reads once decoded, for the meeting-link check on it (templates.has_link),
+    never for reading her mail: the bytes as they are, each header with its encoded words undone, and
+    each part's body with its transfer encoding (base64, quoted-printable) undone, attachments and
+    attached mail included. Nothing is parsed past that; an error here means the check could not run."""
+    data = bytes(raw)
+    views = [data.decode("latin-1")]
+    for part in BytesParser(policy=_policy.compat32).parsebytes(data).walk():
+        for _, value in part.items():
+            views.append(_header_view(str(value)))
+        if not part.is_multipart():
+            body = part.get_payload(decode=True)
+            if isinstance(body, bytes):
+                views.append(body.decode("latin-1"))
+                charset = part.get_content_charset()
+                if charset:
+                    try:
+                        views.append(body.decode(charset, "replace"))
+                    except LookupError:
+                        pass
+    return views
 
 
 def fold_for_match(text: str) -> str:
