@@ -1,0 +1,18 @@
+Live. Every setting from the env file /root/doris-secrets/.env; model called live (claude-sonnet-5-5). She reads her own inbox every 10 minutes until `python3 -m doris stop`.
+Sat Nov 28, 7:40 AM Pacific  wolf.whizz@fastmail.com: book. T1 sent (booking confirmation). One clear time, parser and model agree, and it is available: book. Model cost $0.0038.
+Sat Nov 28, 7:50 AM Pacific  wolf.whizz@fastmail.com: file. No reply to this kind of mail (list): filed.
+Sat Nov 28, 7:50 AM Pacific  wolf.whizz@fastmail.com: offer. T2 sent (times offered). No single clear time (condition B2 not met): offer times. Model cost $0.0037.
+Sat Nov 28, 7:50 AM Pacific  wolf.whizz@fastmail.com: file. Only instructions or a lure, no real request: file, no reply. Model cost $0.0037.
+Sat Nov 28, 7:50 AM Pacific  wolf.whizz@fastmail.com: file. Newsletter, notification or FYI: file, no reply. Model cost $0.0037.
+Sat Nov 28, 8:00 AM Pacific  wolf.whizz@fastmail.com: book. T1 sent (booking confirmation). One clear time, parser and model agree, and it is available: book. Model cost $0.0039.
+Sat Nov 28, 8:00 AM Pacific  wolf.whizz@fastmail.com: book. T1 sent (booking confirmation). One clear time, parser and model agree, and it is available: book. Model cost $0.0038.
+Sat Nov 28, 8:00 AM Pacific  wolf.whizz@fastmail.com: book. T1 sent (booking confirmation). A pick plus a question: book the pick, the question goes on the digest. Model cost $0.0037.
+Sat Nov 28, 8:00 AM Pacific  wolf.whizz@fastmail.com: offer. T2 sent (times offered). No single clear time (condition B4 not met): offer times. Model cost $0.0038.
+Sat Nov 28, 8:10 AM Pacific  wolf.whizz@fastmail.com: file. No reply to this kind of mail (auto): filed.
+Sat Nov 28, 8:20 AM Pacific  wolf.whizz@fastmail.com: hold:add_person. Held: asks to add or write to another person. Model cost $0.0037.
+Sat Nov 28, 8:20 AM Pacific  wolf.whizz@fastmail.com: book. T1 sent (booking confirmation). They picked slot 2 of the open offer: book it. Model cost $0.0036.
+Sat Nov 28, 8:20 AM Pacific  wolf.whizz@fastmail.com: move. T18 sent (cancellation confirmed, new times offered). Move: cancel her booking, confirm the removal, offer fresh times. Model cost $0.0036.
+Sat Nov 28, 8:30 AM Pacific  wolf.whizz@fastmail.com: cancel. T10 sent (cancellation confirmed). Cancel of her own booking on this thread: remove it, confirm, reply. Model cost $0.0037.
+Sat Nov 28, 8:30 AM Pacific  wolf.whizz@fastmail.com: book. T1 sent (booking confirmation). They picked slot 1 of the open offer: book it. Model cost $0.0036.
+Halted: stop on the command line. The worker was dead 71 ms after the stop. Nothing in flight. Dropped 0 queued item(s). Run `python3 -m doris resume` to go on.
+Live trace kept in traces/live-run-20261128T153848Z: outcome pass.
