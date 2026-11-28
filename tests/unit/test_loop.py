@@ -302,11 +302,12 @@ class HerCopies(unittest.TestCase):
     def test_mails_whose_hashes_share_the_digits_each_keep_their_own_copy(self):
         with mock.patch.object(loop, "COPY_NAME_HEX", 1):       # 16 names for every mail of the demo day
             got = self.copies()
-        whole = [(name, sha) for name, sha, _ in got if name == "messages/%s.eml" % sha]
-        self.assertTrue(whole, "no two copies shared a digit")
-        for name, sha, data in got:
-            self.assertIn(name, ("messages/%s.eml" % sha[:1], "messages/%s.eml" % sha))
+        numbered = [(name, sha) for name, sha, _ in got if name != "messages/%s.eml" % sha[:1]]
+        self.assertTrue(numbered, "no two copies shared a digit")
+        for name, sha, data in got:              # the short name, or it and the first free number
+            self.assertRegex(name, r"^messages/%s(-[2-9]|-[1-9][0-9]+)?\.eml\Z" % sha[:1])
         self.assertEqual(len({data for _, _, data in got}), len({sha for _, sha, _ in got}))   # one copy each
+        self.assertEqual(len({name for name, _, _ in got}), len({sha for _, sha, _ in got}))   # each its own name
 
 
 class TheTerminalLines(unittest.TestCase):

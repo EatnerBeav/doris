@@ -993,7 +993,9 @@ class _Run:
         link in its bytes becomes "[meeting link]" (copy_redacted), and a copy that would still show
         the link once a part or header is decoded (base64, an encoded word) is not kept at all
         (copy_withheld), nor one the check could not run on. A mail without the link is kept byte
-        for byte. Should another mail's copy already hold the short name, this one takes the whole hash."""
+        for byte. Should another mail's copy already hold the short name, this one takes the short
+        name and the first free number (<hex>-2.eml, -3, ...), which fits the path budget as the whole
+        hash would not (test_path_lengths)."""
         data, replaced = templates.redact_link_bytes(e.item.raw)
         try:
             left = any(templates.has_link(view) for view in mail.decoded_views(data))
@@ -1001,11 +1003,13 @@ class _Run:
             return {"copy_withheld": "link_check_failed"}
         if left:
             return {"copy_withheld": "meeting_link"}
-        name = os.path.join("messages", e.raw_sha256[:COPY_NAME_HEX] + ".eml")
-        path = os.path.join(self.run_dir, name)
-        if os.path.exists(path) and _file_bytes(path) != data:
-            name = os.path.join("messages", e.raw_sha256 + ".eml")
+        short, n = e.raw_sha256[:COPY_NAME_HEX], 1
+        while True:
+            name = os.path.join("messages", short + ("-%d" % n if n > 1 else "") + ".eml")
             path = os.path.join(self.run_dir, name)
+            if not os.path.exists(path) or _file_bytes(path) == data:
+                break
+            n += 1
         if not os.path.exists(path):
             with open(path, "wb") as fh:
                 fh.write(data)
