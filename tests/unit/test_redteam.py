@@ -27,6 +27,7 @@ from unittest import mock
 from doris import gate, model, parser, paths, redteam, screens, shapes, traps
 from doris import ics as ics_mod
 from doris.shapes import ModelAnswer
+from tests.unit import test_fixtures
 
 DEMO = os.path.join(paths.SANDBOX, "inbox")
 
@@ -134,10 +135,10 @@ class StandInTest(unittest.TestCase):
 class LayOutTest(unittest.TestCase):
     """The demo-day cases run the demo's own emails, never one a judge added to sandbox/inbox."""
 
-    def test_the_demo_day_is_in_the_shipped_inbox(self):
+    def test_the_demo_day_is_the_shipped_inbox(self):
+        self.assertEqual(list(redteam.DEMO_DAY), test_fixtures.NAMES)     # the fifteen, as the fixtures pin them
         with open(os.path.join(DEMO, "facts.json"), encoding="utf-8") as fh:
             facts = json.load(fh)
-        self.assertEqual(len(set(redteam.DEMO_DAY)), 15)
         for name in redteam.DEMO_DAY:
             self.assertTrue(os.path.isfile(os.path.join(DEMO, name)), name)
             self.assertIn(name, facts)

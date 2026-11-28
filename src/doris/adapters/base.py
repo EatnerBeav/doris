@@ -1,9 +1,9 @@
 """The adapter interface. Sandbox and live both implement it, so one code path serves both.
 
-Beyond it the loop uses three things only one side has, each looked for before it is used:
-next_arrival() on the sandbox mail (the demo's advancing clock), arm() and disarm() on the
-sandbox adapters (staged faults), and smoke_left_out on the live mail (the smoke check's own
-requests a fetch left out).
+Beyond it the loop uses three things only one side has: next_arrival() on the sandbox mail,
+called only on the demo's advancing clock, which only the sandbox runs; arm() and disarm() on
+the sandbox adapters (staged faults), used only where the adapter has them; and smoke_left_out
+on the live mail (the smoke check's own requests a fetch left out), read as 0 where it is absent.
 
 Rules every implementation keeps:
 - A failure raises (MailError, CalendarError, CalendarTimeout, SendUnknown). It never returns
