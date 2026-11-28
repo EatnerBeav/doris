@@ -593,6 +593,59 @@ class ABookingFoundGone(unittest.TestCase):
                                                  "Shane: %s." % templates.HOLD_REASONS["hold.owner_removed"]]])
 
 
+class FollowUps(unittest.TestCase):
+    """PR #42: her one nudge (T9) on an offer nobody answered, and a booking found gone, on days with no new mail."""
+
+    def nudge(self, d, sender="sam@rivera.example", thread="t-sam", found=True, **extra):
+        d.add("decided", dict(extra, step="nudge", action="nudge", template="T9", sender=sender, thread=thread,
+                              message="m-sam", kept=[], dropped=[]), "", why.why("followup.nudge", n=3))
+        d.send("", "T9", {"slots": ["a", "b", "c"]}, mid="<nudge-%s@x>" % thread, found=found)
+        d.add("decided", {"step": "follow_up", "action": "close_follow_up"}, "", why.why("followup.nudge_done"))
+
+    def quiet_day(self):
+        d = Day()
+        d.call("", "mail_fetch", "inbox", {"ok": True, "count": 15})
+        return d
+
+    def test_a_nudge_on_a_day_with_no_new_mail_is_told(self):
+        d = self.quiet_day()
+        self.nudge(d, from_name="Sam Rivera")
+        self.assertEqual(story.build(d.lines)["headline"],
+                         "No new mail: the inbox held 15 messages, none of them new to her. She nudged 1 person "
+                         "once, with her times still free: Sam Rivera. 0 human approvals.")
+
+    def test_a_nudge_not_found_in_sent_says_so(self):
+        d = self.quiet_day()
+        self.nudge(d, found=False)
+        self.assertIn("She nudged 1 person once, with her times still free: sam@rivera.example (not found in her "
+                      "Sent folder).", story.build(d.lines)["headline"])
+
+    def test_a_nudge_on_a_thread_of_the_day_ends_its_line(self):
+        d = Day()
+        d.mail("m-sam", "Sam Rivera", "sam@rivera.example", thread="t-sam")
+        d.send("m-sam", "T2", {"slots": ["a", "b", "c"]})
+        d.close("m-sam", "offer", "policy.offer_no_clear_time", template="T2", thread="t-sam", slots={"cond": "B7"})
+        self.nudge(d)
+        s = story.build(d.lines)
+        self.assertEqual(s["threads"]["rows"], [["Sam Rivera", "No exact time: offered 3 times. She nudged them "
+                                                               "once, with her times still free."]])
+        self.assertIn("She nudged 1 person once, with her times still free: Sam Rivera.", s["headline"])
+
+    def test_a_booking_gone_from_an_earlier_run_is_named_from_its_own_line(self):
+        d = self.quiet_day()
+        who = {"from_name": "Marcus Lee", "from_addr": "marcus@lee.example", "booking_id": "doris-mmm",
+               "thread": "t-marcus", "message": "m-marcus"}
+        d.add("observed", dict(who, step="booking_check", owner_deleted=True), "booking:doris-mmm")
+        d.add("held", dict(who, outcome="hold:owner_removed", template="-", step="booking_check"),
+              "booking:doris-mmm", why.why("hold.owner_removed"), ts="2026-12-01T18:00:00Z")
+        d.send("booking:doris-mmm", "S1", {"reason": "hold.owner_removed"}, to="owner")
+        s = story.build(d.lines)
+        self.assertEqual(s["headline"], "No new mail: the inbox held 15 messages, none of them new to her. 1 booking "
+                                        "he removed by hand is held for him. 0 human approvals.")
+        self.assertEqual(s["needs"]["rows"][0][1], "Marcus Lee")
+        self.assertEqual(s["threads"]["rows"][0][0], "Marcus Lee")
+
+
 class NothingNew(unittest.TestCase):
     def test_a_run_with_no_new_mail_says_so_in_one_line_and_shows_no_empty_sections(self):
         d = Day()

@@ -168,6 +168,7 @@ def build(lines):
     after = None                        # her last step's time, on the day's clock
     offers = {}                         # thread -> message whose times are open to its sender, in offer order
     runs, last = 0, None
+    nudges, nudging = [], None          # her one nudge per offer: {thread, sender, name, found}
     inbox = None                        # how many messages her last inbox read saw
     inbox_failed = False                # her last inbox read came back failed
 
@@ -180,8 +181,13 @@ def build(lines):
             who, check = _who(p), p.get("step") == "booking_check"
             if check:                   # told on the thread of the email that made the booking, under its name
                 bid = p.get("booking_id") if isinstance(p.get("booking_id"), str) else subject[len(BOOKING):]
-                made = messages.get(bookings.get(bid, {}).get("subject"))
-                thread, who = (made.thread, made.who) if made is not None else (subject, "(one of her bookings)")
+                key = p.get("message") if isinstance(p.get("message"), str) else None
+                made = messages.get(key) if key else None
+                made = made or messages.get(bookings.get(bid, {}).get("subject"))
+                if made is not None:
+                    thread, who = made.thread, made.who
+                elif who == UNREADABLE:     # her line names no one: say whose it is as plainly as she can
+                    who = "(one of her bookings)"
             m = messages[subject] = _Message(subject, who, thread)
             m.booking = check
             addr = p.get("from_addr")
@@ -220,7 +226,11 @@ def build(lines):
             elif call == "send":
                 mid = p.get("message_id")
                 found = lookups.get(mid) if isinstance(mid, str) else None
-                if p.get("target") == "S2":
+                if p.get("target") == "T9" and nudging is not None:
+                    nudging["found"] = found
+                    nudges.append(nudging)
+                    nudging = None
+                elif p.get("target") == "S2":
                     digests.append((line, found))
                 elif subject in messages:
                     m = messages[subject]
@@ -244,6 +254,12 @@ def build(lines):
             checks += 1
             if p.get("passed") is not True:
                 blocked += 1
+        elif kind == "decided" and p.get("step") == "nudge":
+            sender, name = p.get("sender"), p.get("from_name")
+            nudging = {"thread": p.get("thread") if isinstance(p.get("thread"), str) else None,
+                       "sender": sender.strip().lower() if isinstance(sender, str) else "",
+                       "name": holds.sender_name(name if isinstance(name, str) else "",
+                                                 sender if isinstance(sender, str) else ""), "found": None}
         elif kind in ("decided", "held") and "outcome" in p and subject:
             m = message(subject, line)
             m.close = line
@@ -291,18 +307,23 @@ def build(lines):
         len(closed), answered, noreply, ", %d closed without a confirmed reply" % unconfirmed if unconfirmed else "")
     unfinished = len(emails) - len(closed) - len(held)
     approved = _plural(approvals, "human approval")
-    if messages:
+    for n in nudges:                    # named as the day names them, where it does
+        known = by_thread.get(n["thread"]) or [m for m in emails if n["sender"] and m.addr == n["sender"]]
+        if known and known[0].who != UNREADABLE:
+            n["name"] = known[0].who
+    also = ((" %s he removed by hand %s held for him." % (_plural(gone, "booking"), "is" if gone == 1 else "are")
+             if gone else "") + (" %s of her bookings held for him." % _plural(checks_held, "check")
+                                 if checks_held else "") + _nudge_words(nudges))
+    if emails:
         headline = "%s came in: %s, %d held for %s%s. %s on his calendar.%s %s." % (
             _plural(len(emails), "email"), handled, len(held), OWNER,
-            ", %d not finished" % unfinished if unfinished else "", _plural(len(standing), "meeting"),
-            (" %s he removed by hand %s held for him." % (_plural(gone, "booking"), "is" if gone == 1 else "are")
-             if gone else "") + (" %s of her bookings held for him." % _plural(checks_held, "check")
-                                 if checks_held else ""), approved)
+            ", %d not finished" % unfinished if unfinished else "", _plural(len(standing), "meeting"), also, approved)
     elif inbox:
-        headline = "No new mail: the inbox held %s, none of them new to her. %s." % (_plural(inbox, "message"), approved)
+        headline = "No new mail: the inbox held %s, none of them new to her.%s %s." % (
+            _plural(inbox, "message"), also, approved)
     else:
-        headline = "No new mail: %s. %s." % ("her inbox read failed" if inbox_failed else "the inbox was empty"
-                                            if inbox == 0 else "no inbox read is recorded", approved)
+        headline = "No new mail: %s.%s %s." % ("her inbox read failed" if inbox_failed else "the inbox was empty"
+                                              if inbox == 0 else "no inbox read is recorded", also, approved)
 
     # needs the owner
     rows, all_noticed = [], True
@@ -358,6 +379,10 @@ def build(lines):
             if m.who != first:
                 text = "%s: %s" % (m.who, text[0].lower() + text[1:] if text else text)
             said.append(_sentence(text))
+        for n in nudges:
+            if n["thread"] == key:
+                said.append("She nudged them once, with her times still free%s." % (
+                    "" if n["found"] else " (not found in her Sent folder)"))
         thread_rows.append([first, " ".join(s for s in said if s)])
     extra = len(threads) - MAX_THREADS
     threads_out = {"title": "Thread by thread (%d)" % len(threads), "rows": thread_rows,
@@ -409,6 +434,16 @@ def build(lines):
     return {"title": "What Doris did for %s" % OWNER, "scope": scope, "state": state, "headline": headline,
             "halt": halt, "needs": needs, "calendar": calendar, "threads": threads_out, "waiting": waiting,
             "digest": digest_line, "cost": cost_line, "gate": gate, "mode": mode or "", "quiet": not messages}
+
+
+def _nudge_words(nudges):
+    """' She nudged 2 people once, with her times still free: A, B.' (a name her lookup did not find in
+    Sent says so)."""
+    if not nudges:
+        return ""
+    names = ["%s%s" % (n["name"], "" if n["found"] else " (not found in her Sent folder)") for n in nudges]
+    return " She nudged %s once, with her times still free: %s." % (
+        _plural(len(nudges), "person", "people"), ", ".join(names))
 
 
 def _starts(line):
