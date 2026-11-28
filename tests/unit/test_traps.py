@@ -632,6 +632,17 @@ class RunnerTest(unittest.TestCase):
                               results_path=self.results, deps=deps, stamp=stamp)
         return rep, deps
 
+    def test_each_items_terminal_log_holds_the_lines_the_terminal_printed_for_it(self):
+        printed = []
+        rep = traps.run_traps(self.pack, model_source="stub", state_root=self.state, traces_root=self.traces,
+                              results_path=self.results, deps=fake_deps(FakeLoop(self.act)), stamp="20261127T1900Z",
+                              echo=printed.append)
+        self.assertTrue(printed[0].startswith("Setup:"), printed)
+        logs = [read_text(os.path.join(r.trace, "terminal.log")) for r in rep.rows]
+        for r, log in zip(rep.rows, logs):
+            self.assertTrue(log.endswith("%s: %s (%s)\n" % (r.item, r.outcome, r.verdict)), log)
+        self.assertEqual("".join(logs), "".join(line + "\n" for line in printed[1:]))
+
     def test_report_first_line_table_credit_and_traces(self):
         before = tree_state(self.pack)
         rep, deps = self.run_once("20261127T1900Z")

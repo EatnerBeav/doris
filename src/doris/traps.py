@@ -976,6 +976,7 @@ class Row:
     verify: Any = None
     inside: Dict[str, Any] = field(default_factory=dict)
     closing: Optional[Dict[str, Any]] = None
+    captured: str = ""              # what the loop itself printed for the item
 
 
 @dataclass
@@ -1172,7 +1173,7 @@ def run_item(item, run_name, run_state, traces_dir, model_source, deps, model_id
                  and (l.get("payload") or {}).get("call") == "calendar_create")
     did = _describe(lines, closing_line, outbox, sender, writes, inside, crashed)
     row = Row(item.name, item.stem, item.kind, did, outcome, verdict(payload, failures, problem), trace_dir,
-              failures, verify, inside, payload)
+              failures, verify, inside, payload, buf.getvalue())
     target = ScanTarget(item=item.stem, item_dir=item_dir, trace_dir=trace_dir,
                         input_copy=os.path.join(trace_dir, item.stem + ".eml"), sender=sender, owner=OWNER_ADDR,
                         attempts=attempts, run_name=run_name)
@@ -1337,7 +1338,13 @@ def run_traps(pack_dir, model_source="stub", state_root=None, traces_root=None, 
             found = scan_canaries([target])
             fail_sent_canaries([row], found)
             hits += found
-        say("%s: %s (%s)" % (it.name, row.outcome, row.verdict))
+        # what the terminal shows for the item, and its trace's terminal.log, line for line
+        said = [text for text in (row.captured.rstrip("\n"),) if text]
+        said.append("%s: %s (%s)" % (it.name, row.outcome, row.verdict))
+        for text in said:
+            say(text)
+        with open(os.path.join(row.trace, "terminal.log"), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("".join(text + "\n" for text in said))
     rep = Report(run_name, line, rows, hits, results_path, skipped, items, traces_run)
     os.makedirs(os.path.dirname(os.path.abspath(results_path)), exist_ok=True)
     text = render_results(rep, root, model_source, traces_run)
