@@ -1,7 +1,7 @@
 # Tracker
 
 Every item the judges score, one line each: **status** · item · owner · due (Pacific).
-Updated Fri Nov 27, 8:35 PM. Kept current on main as items move.
+Updated Fri Nov 27, 8:40 PM. Kept current on main as items move.
 
 Status words: **done** (on main, tested) · **in review** (built, in a pull request) · **building** · **blocked** (says on what) · **not started**.
 
@@ -9,8 +9,8 @@ Status words: **done** (on main, tested) · **in review** (built, in a pull requ
 
 - **building** · PR #2 merged to main: live mail and calendar, the live loop, the digest, kill-switch hardening, JMAP sending · Wolf · Fri 11:30 PM
   - JMAP sending is on the `live` branch; two Windows CI fixes, a final review and CI remain.
-- **building** · Tonight's end-to-end live smoke: a test mail to the owner, the forward to Doris, her reply over JMAP, the read-back · Wolf · Fri 9:15 PM
-  - Running on the server now; its trace goes to `traces/live-smoke-<time>/`, pass or fail.
+- **building** · Tonight's end-to-end live smoke: a test mail to the owner, the forward to Doris, her reply over JMAP, the read-back · Wolf · Fri 10:00 PM
+  - Run 1 (8:29 PM) failed at the first JMAP call, nothing sent: our host check refused Fastmail's regional API host. Fix in progress, then run 2. [Run 1 trace](https://github.com/EatnerBeav/doris/tree/traces/live-smoke-20261128T042934Z/traces/live-smoke-20261128T042934Z).
 - **blocked** · Live booking · Wolf · Sat 2:00 PM
   - On PR #2 and the smoke.
 - **blocked** · Overnight run · Wolf · Sat 8:00 PM start
