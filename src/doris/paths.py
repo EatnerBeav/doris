@@ -6,6 +6,7 @@ that points one mode's state at another's.
 """
 
 import os
+import sys
 
 SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(SRC)
@@ -19,6 +20,27 @@ STATE = os.path.join(REPO, "state")           # gitignored: ledgers, locks, run 
 LIVE_ENV = "/root/doris-secrets/.env"
 
 MODES = ("sandbox", "live", "throwaway")
+SHOWN_FROM = "DORIS_SHOWN_FROM"    # set for her worker only: the folder the command was run in (shown)
+
+
+def command(sub=""):
+    """A command as the person can type it again: `py -m doris <sub>` on Windows (the launcher the README
+    uses there; the interpreter's own name is python.exe whichever way it was started), elsewhere the
+    name of the interpreter running now (python3, python3.9, python)."""
+    exe = "py" if os.name == "nt" else (os.path.basename(sys.executable or "") or "python3")
+    return ("%s -m doris %s" % (exe, sub)).rstrip()
+
+
+def shown(path):
+    """A path to print. Inside the repository, the path from the folder the command was run in (a judge
+    runs from src/, so it pastes from there; her worker is told that folder in DORIS_SHOWN_FROM);
+    anywhere else, or when no relative path exists (Windows, another drive), the whole path."""
+    try:
+        if os.path.relpath(path, REPO).startswith(".."):
+            return path
+        return os.path.relpath(path, os.environ.get(SHOWN_FROM) or os.getcwd())
+    except (ValueError, OSError):
+        return path
 
 
 def state_dir(mode):

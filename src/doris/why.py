@@ -21,6 +21,10 @@ RULE_WORDS = frozenset({
     "cli", "stop_file", "watch_button", "budget_cap", "signal", "supervisor_gone",
     "sender", "owner", "none", "matched_slot", "ambiguous", "near_miss", "yes_single",
     "send", "booking", "cancel", "move", "digest", "hold_notice",
+    # the follow-up: why a nudge does not go, why it waits, why a booking needs no more checks
+    "nudge", "offer_closed", "expired", "thread_held", "opted_out", "they_wrote", "already_nudged",
+    "no_time_left", "gate_blocked", "send_unconfirmed", "internal_error", "model_down", "calendar_down",
+    "not_sent", "started", "cancelled", "gone",
 })
 _ID = re.compile(r"^(?:[GBTSNHQDLZ][0-9]{1,2}|T[0-9]{1,2}[a-z]?)$")
 
@@ -60,6 +64,17 @@ CODES = {
     "policy.resume_hold": "Read again after a restart: it was already held for the owner, so the hold stands and its notice goes out once.",
     "policy.resume_sent": "Read again after a restart: her {template} reply is already in Sent, so nothing more is sent.",
     "policy.resume_booking": "Read again after a restart: its booking is already written down, so she looks it up by its ID and never books it again.",
+    # --- the follow-up: a dated entry in her ledger (the law: "file the follow-up") --------------
+    "followup.nudge_filed": ("Follow-up filed in her ledger: one nudge at {when} if the offer is still unanswered "
+                             "then. The offer expires at {expires}."),
+    "followup.booking_filed": ("Follow-up filed in her ledger: every cycle until the meeting starts at {when} she "
+                               "checks this booking is still on the calendar."),
+    "followup.nudge": ("Follow-up due: the offer went two business days with no answer, so its one nudge goes, "
+                       "listing only the offer's own times still available ({n}). Never a second."),
+    "followup.no_nudge": "Follow-up closed with no nudge ({rule}).",
+    "followup.nudge_waits": "Follow-up due, but the nudge waits ({rule}): she tries again at her next cycle.",
+    "followup.nudge_done": "Follow-up closed: its one nudge is in Sent.",
+    "followup.booking_closed": "Follow-up closed ({rule}): this booking needs no more checks.",
     # --- gate -------------------------------------------------------------------------------
     "gate.pass": "All {n} checks that apply passed.",
     "gate.g1_halted": "Blocked by G1: a halt is in force ({rule}).",
@@ -122,6 +137,39 @@ CODES = {
 # supervisor (taken as Ctrl+C is) and a supervisor gone (the worker halts itself). Nothing in mail
 # halts her.
 HALT_CAUSES = ("cli", "stop_file", "watch_button", "budget_cap", "signal", "supervisor_gone")
+
+
+# Why a follow-up closed with no nudge, why a nudge waits, or why a booking needs no more checks: the
+# why's rule word in plain words, for the terminal and the readers (replay, watch, the live timeline).
+# The receipt keeps the listed why; these words are only how a person is told it.
+FOLLOW_UP_WORDS = {
+    "offer_closed": "offer answered or closed", "expired": "offer expired", "thread_held": "thread held for the owner",
+    "opted_out": "they opted out", "they_wrote": "they wrote since the offer",
+    "already_nudged": "the thread had its one nudge", "no_time_left": "no offered time still available",
+    "gate_blocked": "a safety check stopped the nudge", "send_unconfirmed": "nudge not confirmed in Sent",
+    "internal_error": "an error, see the error line", "started": "meeting started", "cancelled": "booking cancelled",
+    "gone": "booking gone from the calendar",
+    "model_down": "the model is not available", "calendar_down": "the calendar did not answer",
+    "not_sent": "the mail server did not take it",
+}
+
+# How the hold notice for a booking found gone went: the `notice` word on its held line, and how the
+# terminal says it. "handed_over" is never "not sent": the mail server took it, so the owner has it.
+GONE_NOTICE_WORDS = {
+    "sent": "sent",
+    "handed_over": "handed to the mail server (her copy is not in Sent yet)",
+    "unknown": "may have gone (not confirmed in Sent)",
+    "none": "not sent (the digest lists the hold)",
+}
+
+
+def gone_notice(payload):
+    """That word as the readers take it from a held line: one of GONE_NOTICE_WORDS' keys, or None
+    when the line does not say (a line that only says her copy was found in Sent is "sent")."""
+    word = payload.get("notice")
+    if isinstance(word, str) and word in GONE_NOTICE_WORDS:
+        return word
+    return "sent" if payload.get("notice_sent") is True else None
 
 
 class WhyError(ValueError):

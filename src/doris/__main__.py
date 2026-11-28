@@ -1,11 +1,12 @@
-"""python -m doris <command>: the one way in.
+"""python3 -m doris <command>: the one way in.
 
     demo     the sandbox day under the kill switch: no install, no key
     run      the long run under the kill switch: a pass over the inbox every ten minutes until
-             `python -m doris stop`, and the day's digest to the owner at her first pass from
+             `python3 -m doris stop`, and the day's digest to the owner at her first pass from
              5:00 PM Pacific; the sandbox by default (no key), or with --live her own
              mailbox and the owner's calendar from the env file (--env PATH, default
-             /root/doris-secrets/.env; --fresh starts the live ledger, once)
+             /root/doris-secrets/.env, on our server; never asked of a judge; --fresh
+             starts the live ledger, once)
     traps    the Trap Pack, one file at a time on fresh throwaway state
     verify   recompute a run's receipt chain (the latest sandbox run by default)
     stop     halt Doris now, in the sandbox and live; she stays halted until resume
@@ -18,28 +19,99 @@
     redteam  the yes-man proof: the real loop and gate with a model that obeys every
              injection, on throwaway state; passes only with 0 bad actions
 
+With ANTHROPIC_API_KEY in .env at the repo root (or in src/.env, or in the environment, which wins),
+demo, the sandbox run and traps --model live call the model and print its measured cost.
+
 Every live run, the smoke included, keeps its trace in traces/live-<run|smoke>-<UTC stamp>/ when
 it ends, pass or fail (livetrace.py); a start refused before anything was contacted keeps none.
 """
 
 import argparse
+import contextlib
 import datetime as _dt
 import json
 import os
 import sys
+import time
 
-from . import caps, livetrace, loop, paths, receipts, supervisor
+from . import caps, envfile, livetrace, loop, paths, receipts, story, supervisor
 
 SANDBOX_OWNER = loop.SANDBOX_OWNER
 SANDBOX_DORIS = loop.SANDBOX_DORIS
 STOP_MODES = ("sandbox", "live")
+STOP_WHERE = {"sandbox": "in the sandbox", "live": "live"}
 WORKER = "_worker"
+SHOWN_FROM = paths.SHOWN_FROM      # set for her worker only: the folder the command was run in (paths.shown)
 RUN_CYCLE_S = loop.CYCLE.total_seconds()   # `run`: the wall-clock wait from one pass to her next cycle
 
 
 def answers_path():
     """Recorded model answers for the judge path: sandbox/answers.jsonl, from a real run."""
     return os.path.join(paths.SANDBOX, "answers.jsonl")
+
+
+# --- the model key from .env --------------------------------------------------------------------
+DOTENV_NAMES = ("ANTHROPIC_API_KEY", "DORIS_MODEL")    # all a sandbox run or traps takes from .env
+
+
+def dotenv_files():
+    """The .env files a judge may fill, first first: the repo root's, beside .env.example, then src/'s,
+    the folder every command is run from."""
+    return [os.path.join(paths.REPO, ".env"), os.path.join(paths.SRC, ".env")]
+
+
+def load_dotenv(environ=None, files=None):
+    """ANTHROPIC_API_KEY and DORIS_MODEL from .env into this command's environment, which the worker it
+    starts inherits, so a key in .env calls the model just as an exported one does. A name already in
+    the environment, even empty, is left as it is: the environment wins. The first file that gives a
+    name a value gives it. No other name is taken, the live run reads none of this (only its own env
+    file), and no value is ever printed. Returns {name: the file it came from}. A file outside the
+    KEY=VALUE format raises envfile.EnvFileError naming the file and the line, never a value."""
+    environ = os.environ if environ is None else environ
+    came_from = {}
+    for path in dotenv_files() if files is None else files:
+        if not os.path.isfile(path):
+            continue
+        try:
+            values = envfile.load(path, names=DOTENV_NAMES)
+        except envfile.EnvFileError as exc:
+            raise envfile.EnvFileError("%s: %s" % (_display(path), exc)) from None
+        for name in DOTENV_NAMES:
+            value = (values.get(name) or "").strip()
+            if value and name not in environ and name not in came_from:
+                if "\x00" in value:          # POSIX refuses it, Windows cuts the value there: neither is the key
+                    raise envfile.EnvFileError("%s: %s holds a character the environment cannot take"
+                                               % (_display(path), name))
+                environ[name] = value
+                came_from[name] = path
+    return came_from
+
+
+def model_key():
+    """load_dotenv, then where the key is from, for the first line: the .env path as typed from here,
+    "the environment", or None when there is no key."""
+    came_from = load_dotenv()
+    if "ANTHROPIC_API_KEY" in came_from:
+        return _display(came_from["ANTHROPIC_API_KEY"])
+    return "the environment" if (os.environ.get("ANTHROPIC_API_KEY") or "").strip() else None
+
+
+@contextlib.contextmanager
+def refusals_said(say):
+    """For one command: the model adapter says a refused call through say, once (model.NOTICE), and
+    the hook is put back as it was afterwards."""
+    from . import model as model_mod
+    before = model_mod.NOTICE
+    model_mod.NOTICE = model_mod.Notice(say)
+    try:
+        yield
+    finally:
+        model_mod.NOTICE = before
+
+
+def _not_started_env(exc):
+    print("Not started: %s. Fix the .env file or remove it." % (exc,))
+    return 2
 
 
 def demo_source(env, answers_exist):
@@ -57,52 +129,203 @@ def run_name(source, mode, when=None):
     return "model-%s-%s-%s" % (source, mode, when.astimezone(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
 
 
-def _recorded_run(path):
+def _recorded_first(path, field):
     try:
         with open(path, encoding="utf-8") as fh:
             first = json.loads(fh.readline() or "{}")
-        return str(first.get("run_id") or "unknown")
+        value = first.get(field)
+        return value if isinstance(value, str) and value.strip() else None
     except (OSError, ValueError, AttributeError):
-        return "unknown"
+        return None
 
 
-def first_line(source, model_id):
+def _recorded_run(path):
+    return _recorded_first(path, "run_id") or "unknown"
+
+
+def first_line(source, model_id, key_from=None):
+    """The banner: what reads the mail, and for a live model where the key came from (model_key)."""
     if source == "live":
-        return "Sandbox. Model called live (%s); its answers are recorded with this run." % (model_id,)
+        return ("Sandbox. Model called live (%s, key from %s); its answers are recorded with this run."
+                % (model_id, key_from or "the environment"))
     if source == "replayed":
-        return ("Sandbox. Model answers replayed from recorded run %s. No key found."
+        return ("Sandbox. Model answers replayed from recorded run %s. No key in .env or the environment."
                 % (_recorded_run(answers_path()),))
     return ("Sandbox. No key and no recorded answers, so a built-in keyword stand-in (stub) reads the mail; "
-            "every receipt says stub. Add ANTHROPIC_API_KEY to call the model.")
+            "every receipt says stub. Put ANTHROPIC_API_KEY in .env or the environment to call the model.")
 
 
 # --- demo and run --------------------------------------------------------------------------------
 def demo(argv):
-    argparse.ArgumentParser(prog="python -m doris demo",
+    argparse.ArgumentParser(prog=paths.command("demo"),
                             description="The sandbox day under the kill switch.").parse_args(argv)
     refusal = supervisor._halt_refusal("sandbox")
     if refusal:
         print(refusal)
         return supervisor.EXIT_REFUSED_HALT
+    try:
+        kept = fresh_day()
+    except NotMoved as refused:
+        print(refused)
+        return 1
+    left = orphaned_outputs()
+    if left:
+        print("Not started: her sends or bookings from an earlier demo day are still in the sandbox, but that day's "
+              "state is not in %s, so a demo now would send and book them all again beside them. Move these into "
+              "that day's folder in %s (or out of the sandbox), then run the demo again:\n%s"
+              % (os.path.join(_display(paths.state_dir("sandbox")), ""),
+                 os.path.join(_display(os.path.join(paths.STATE, "old")), ""),
+                 "\n".join("  " + _display(f) for f, _ in left)))
+        return 1
+    try:
+        key_from = model_key()
+    except envfile.EnvFileError as exc:
+        return _not_started_env(exc)
     source, model_id = sandbox_source()
     state = paths.state_dir("sandbox")
     name, run_dir = new_run_dir(state, run_name(source, "sandbox"))
-    _say(first_line(source, model_id))
-    return supervise("sandbox", state, name, run_dir,
+    _say(first_line(source, model_id, key_from))
+    if kept:
+        _say("A fresh sandbox day: the last demo's state and her sends and bookings are kept in %s."
+             % (os.path.join(_display(kept), ""),))
+    code = supervise("sandbox", state, name, run_dir,
                      sandbox_config(name, state, run_dir, source, model_id, digest=True))
+    for line in story.lines(os.path.join(run_dir, "receipts.jsonl")):     # what she did, from her receipts alone
+        _say(line)
+    return code
+
+
+# --- a fresh day for each demo -------------------------------------------------------------------
+RUN_CALENDAR = ("doris-", "staged-")     # what a run writes into sandbox/calendar/: her bookings, staged events
+
+
+class NotMoved(Exception):
+    """The last demo day could not be moved aside: the demo is not started, and the message says
+    where everything is."""
+
+
+MOVE_RETRY_WAITS_S = (0.1, 0.3, 0.6)
+
+
+def _move(src, dst):
+    """One folder or file, never copied. Windows refuses one held open; a virus scanner or the indexer
+    holds a just-written file for a moment, so that refusal is tried again a few times before it is said."""
+    for wait in MOVE_RETRY_WAITS_S:
+        try:
+            os.rename(src, dst)
+            return
+        except PermissionError:
+            time.sleep(wait)
+    os.rename(src, dst)
+
+
+def last_day_finished():
+    """True when the latest sandbox run wrote its closing summary line and no halted line: the day
+    is done. Anything else (no run yet; a halt, whose dropped mail the next run reads again with
+    nothing sent twice; a crash; a run still going; a file that cannot be read) is not."""
+    path = latest_receipts("sandbox")
+    if path is None:
+        return False
+    try:
+        lines = receipts.read_lines(path)
+    except Exception:
+        return False
+    return bool(lines) and lines[-1].get("kind") == "summary" and not any(l.get("kind") == "halted" for l in lines)
+
+
+def her_outputs():
+    """[(file, folder name under the kept day)] for what a run wrote into the sandbox: her sends
+    (outbox/, but .gitkeep) and her bookings and staged events (calendar/doris-*.ics, staged-*.ics)."""
+    found = []
+    for folder, mine in (("outbox", lambda n: n != ".gitkeep"),
+                         ("calendar", lambda n: n.startswith(RUN_CALENDAR) and n.endswith(".ics"))):
+        where = os.path.join(paths.SANDBOX, folder)
+        for name in sorted(os.listdir(where)) if os.path.isdir(where) else ():
+            if mine(name) and os.path.isfile(os.path.join(where, name)):
+                found.append((os.path.join(where, name), folder))
+    return found
+
+
+def orphaned_outputs():
+    """Her sends or bookings in the sandbox with no sandbox ledger beside them: a day half moved aside (a
+    move that could not be put back, or one cut off). A demo then would start a new ledger and send and
+    book the whole day again beside them, so it is refused. [] when there is a ledger, or nothing of hers."""
+    if os.path.exists(os.path.join(paths.state_dir("sandbox"), "ledger.sqlite")):
+        return []
+    return her_outputs()
+
+
+def fresh_day():
+    """Before a demo: when the last sandbox day finished, move it aside, never delete it, into
+    state/old/sandbox-<UTC stamp>/ (the whole state/sandbox folder as one rename, then her sends in
+    outbox/ and her bookings in calendar/ inside it), so this demo is the same day again. Returns
+    that folder, or None when nothing was moved (see last_day_finished). A move that fails puts back
+    what had moved and raises NotMoved; whatever cannot be put back is named, with where it is."""
+    if not last_day_finished():
+        return None
+    state, old = paths.state_dir("sandbox"), os.path.join(paths.STATE, "old")
+    base = "sandbox-" + _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    kept = os.path.join(old, base)
+    for n in range(2, 100):
+        if not os.path.lexists(kept):
+            break
+        kept = os.path.join(old, "%s-%d" % (base, n))
+    moved = []                              # (from, to), in the order they moved
+    src = old
+    try:
+        os.makedirs(old, exist_ok=True)
+        src = state
+        _move(state, kept)
+        moved.append((state, kept))
+        for src, folder in her_outputs():
+            os.makedirs(os.path.join(kept, folder), exist_ok=True)
+            dst = os.path.join(kept, folder, os.path.basename(src))
+            _move(src, dst)
+            moved.append((src, dst))
+    except OSError as exc:
+        stuck = _put_back(moved, kept)
+        said = ("Not started: the last demo day could not be moved aside. %s refused to move (%s: %s)"
+                % (_display(src), type(exc).__name__, exc.strerror or exc))
+        if stuck:
+            said += (". These had already moved and could not be put back; nothing is lost. Move them back by "
+                     "hand before the next demo:\n"
+                     + "\n".join("  %s is now at %s" % (_display(a), _display(b)) for a, b in stuck))
+        else:
+            said += ("; close whatever holds it open and run the demo again. Nothing was moved: her state, sends "
+                     "and bookings are where they were.")
+        raise NotMoved(said) from exc
+    return kept
+
+
+def _put_back(moved, kept):
+    """Undo fresh_day's moves, last first. Returns the (from, to) pairs that could not be put back."""
+    stuck = []
+    for src, dst in reversed(moved):
+        try:
+            if dst == kept:                 # the state folder: without the folders made inside it
+                if stuck:                   # a send or booking is still in there: it stays where that is said
+                    raise OSError("her sends or bookings are still inside it")
+                for folder in ("outbox", "calendar"):
+                    if os.path.isdir(os.path.join(kept, folder)) and not os.listdir(os.path.join(kept, folder)):
+                        os.rmdir(os.path.join(kept, folder))
+            _move(dst, src)
+        except OSError:
+            stuck.append((src, dst))
+    return list(reversed(stuck))
 
 
 def run_cmd(argv):
     ap = argparse.ArgumentParser(
-        prog="python -m doris run",
+        prog=paths.command("run"),
         description="The long run under the kill switch: a pass over the inbox every ten minutes until "
-                    "`python -m doris stop`, and the day's digest to the owner from 5:00 PM Pacific. "
-                    "The sandbox by default; --live for her own mailbox.")
+                    "`%s`, and the day's digest to the owner from 5:00 PM Pacific. "
+                    "The sandbox by default; --live for her own mailbox." % paths.command("stop"))
     ap.add_argument("--live", action="store_true",
                     help="her own mailbox and the owner's shared calendar, every setting from the env file")
     ap.add_argument("--fresh", action="store_true",
                     help="live: start the live ledger (once); she reads only mail that arrives after it")
-    ap.add_argument("--env", metavar="PATH", help="live: the env file (default %s)" % paths.LIVE_ENV)
+    ap.add_argument("--env", metavar="PATH",
+                    help="live: the env file (default %s, on our server; never asked of a judge)" % paths.LIVE_ENV)
     args = ap.parse_args(argv)
     if not args.live and (args.fresh or args.env is not None):
         print("Not started: --fresh and --env are for a live run, so they need --live.")
@@ -113,11 +336,15 @@ def run_cmd(argv):
         print(refusal)
         return supervisor.EXIT_REFUSED_HALT
     state = paths.state_dir(mode)
-    every = "every %s until `python -m doris stop`" % _span(RUN_CYCLE_S)
+    every = "every %s until `%s`" % (loop.wait_words(RUN_CYCLE_S), paths.command("stop"))
     if not args.live:
+        try:
+            key_from = model_key()
+        except envfile.EnvFileError as exc:
+            return _not_started_env(exc)
         source, model_id = sandbox_source()
         name, run_dir = new_run_dir(state, run_name(source, "sandbox"))
-        _say(first_line(source, model_id))
+        _say(first_line(source, model_id, key_from))
         _say("She reads the sandbox inbox %s; a new .eml dropped in waits for her next cycle." % every)
         return supervise("sandbox", state, name, run_dir, sandbox_config(
             name, state, run_dir, source, model_id, digest=True, cycles=None, cycle_s=RUN_CYCLE_S))
@@ -159,10 +386,16 @@ def live_trace(run_dir, name, started, code, term):
 
 
 def sandbox_source():
-    """(model source, model ID) for a sandbox run: see demo_source; the ID only when called live."""
+    """(model source, model ID) for a sandbox run: see demo_source. Live: DORIS_MODEL or the default.
+    Replayed: the model the answers were recorded with, never DORIS_MODEL, since the model ID is part
+    of every request a recorded answer is matched by. Stub: none."""
     from . import model as model_mod
     source = demo_source(os.environ, os.path.exists(answers_path()))
-    return source, model_mod.default_model_id(os.environ) if source == "live" else None
+    if source == "live":
+        return source, model_mod.default_model_id(os.environ)
+    if source == "replayed":
+        return source, _recorded_first(answers_path(), "model_id") or model_mod.DEFAULT_MODEL
+    return source, None
 
 
 def sandbox_config(name, state, run_dir, source, model_id, **more):
@@ -195,23 +428,24 @@ def supervise(mode, state, name, run_dir, config, say=None):
     with open(config_path, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(config, fh, indent=1, sort_keys=True)
         fh.write("\n")
-    return supervisor.run_supervised(
-        mode, name, [sys.executable, "-m", "doris", WORKER, config_path],
-        os.path.join(run_dir, "receipts.jsonl"), os.path.join(state, "ledger.sqlite"), say=say, cwd=paths.SRC,
-        run_id=name)
-
-
-def _span(seconds):
-    if seconds >= 60 and seconds % 60 == 0:
-        minutes = int(seconds // 60)
-        return "minute" if minutes == 1 else "%d minutes" % minutes
-    return "%g seconds" % seconds
+    before = os.environ.get(SHOWN_FROM)
+    os.environ[SHOWN_FROM] = os.getcwd()     # her worker runs in src/; its printed paths are from here
+    try:
+        return supervisor.run_supervised(
+            mode, name, [sys.executable, "-m", "doris", WORKER, config_path],
+            os.path.join(run_dir, "receipts.jsonl"), os.path.join(state, "ledger.sqlite"), say=say, cwd=paths.SRC,
+            run_id=name)
+    finally:
+        if before is None:
+            os.environ.pop(SHOWN_FROM, None)
+        else:
+            os.environ[SHOWN_FROM] = before
 
 
 def worker(argv):
     """The child the kill switch watches: one run from its config file. Exit 0 done, 1 the run
-    failed (the inbox could not be read: once in a finite run, caps.MAIL_READ_FAILURES_IN_A_ROW
-    cycles running in a run until stopped; or the chain failed its own check), 3 another Doris
+    failed (a finite run's inbox could not be read, or the chain failed its own check; a run until
+    stopped never ends on failed reads: decision 89), 3 another Doris
     holds the ledger, 4 halted (the parent writes that line; when her supervisor is gone, she has
     written it herself). Under run_supervised her stdin is her lifeline to it (supervisor.Lifeline).
     A live worker's lines also go to terminal.log beside its config, for the run's trace."""
@@ -224,7 +458,8 @@ def worker(argv):
     lifeline = supervisor.lifeline(fields.get("mode"), fields.get("state_dir"))
     cfg = loop.RunConfig(supervised=True, say=say, lifeline=lifeline, **fields)
     try:
-        s = loop.run(cfg)
+        with refusals_said(say):            # a refused key or tier: said once, before the holds
+            s = loop.run(cfg)
     except loop.Refused as refused:
         say(str(refused))
         return refused.exit_code
@@ -238,33 +473,54 @@ def worker(argv):
                supervisor._resume_command()))
         return supervisor.WORKER_EXIT_HALTED
     if s.read_failed:
-        times = "" if cfg.cycles is not None else " %d times in a row" % caps.MAIL_READ_FAILURES_IN_A_ROW
-        say("Stopped: the inbox could not be read%s, so the run ended there (%d handled, %d held before it). "
+        say("Stopped: the inbox could not be read, so the run ended there (%d handled, %d held before it). "
             "Nothing was read as an empty inbox. Receipts %s: %s."
-            % (times, s.handled, s.held, _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
+            % (s.handled, s.held, _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
         return 1
     cost = "none (stub)" if cfg.model_source == "stub" else "$%.4f%s" % (
         s.cost_usd, " (recorded)" if cfg.model_source == "replayed" else "")
-    say("Done: %d handled, %d held, %d human approvals. %d sent to prospects, %d hold notices, %d bookings. "
-        "Model calls %d, cost %s. Receipts %s: %s."
-        % (s.handled, s.held, s.human_approvals, s.sends, s.hold_notices, s.bookings, s.model_calls, cost,
+    say("Done: %d handled, %d held, %s. %d sent to prospects, %s, %s. "
+        "%s calls %d, cost %s. Receipts %s: %s."
+        % (s.handled, s.held, _n(s.human_approvals, "human approval"), s.sends, _n(s.hold_notices, "hold notice"),
+           _n(s.bookings, "booking"),
+           "Stand-in" if cfg.model_source == "stub" else "Model", s.model_calls, cost,
            _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
     return 0 if s.verify_ok else 1
 
 
+def _n(k, word):
+    return "%d %s%s" % (k, word, "" if k == 1 else "s")
+
+
 # --- stop and resume ----------------------------------------------------------------------------
 def stop(argv):
-    argparse.ArgumentParser(prog="python -m doris stop",
+    argparse.ArgumentParser(prog=paths.command("stop"),
                             description="Halt Doris now, in the sandbox and live.").parse_args(argv)
-    for mode in STOP_MODES:
-        supervisor.request_stop(mode, "cli")
-    print("Stopped: Doris is halted in the sandbox and live. A run in progress is killed mid-call and its "
-          "receipt names what was dropped. Nothing more is sent or booked until `python -m doris resume`.")
-    return 0
+    halted, failed = [], []
+    for mode in STOP_MODES:                 # every mode is tried, whatever the one before it did
+        try:
+            supervisor.request_stop(mode, "cli")
+            if supervisor.halt_cause(mode) is None:       # read back from disk: said only when it is there
+                raise OSError("no halt is in force after the write")
+            halted.append(mode)
+        except Exception as exc:            # noqa: BLE001 - the other mode is still stopped, and this is said
+            failed.append((mode, "%s: %s" % (type(exc).__name__, exc)))
+    if not failed:
+        print("Stopped: Doris is halted in the sandbox and live. A run in progress is killed mid-call and its "
+              "receipt names what was dropped. Nothing more is sent or booked until `%s`." % paths.command("resume"))
+        return 0
+    for mode, why in failed:
+        print("NOT halted %s: %s." % (STOP_WHERE[mode], why.rstrip(".")))
+    for mode in halted:
+        print("Halted %s. Nothing more is sent or booked there until `%s`."
+              % (STOP_WHERE[mode], paths.command("resume")))
+    print("The stop did NOT land everywhere: run `%s` again now, and check that no run goes on."
+          % paths.command("stop"))
+    return 1
 
 
 def resume(argv):
-    argparse.ArgumentParser(prog="python -m doris resume",
+    argparse.ArgumentParser(prog=paths.command("resume"),
                             description="Clear a halt. Only the command line can.").parse_args(argv)
     code, said = 0, []
     for mode in STOP_MODES:
@@ -289,7 +545,7 @@ def latest_receipts(mode="sandbox"):
 
 
 def verify(argv):
-    ap = argparse.ArgumentParser(prog="python -m doris verify", description="Recompute a run's receipt chain.")
+    ap = argparse.ArgumentParser(prog="python3 -m doris verify", description="Recompute a run's receipt chain.")
     ap.add_argument("path", nargs="?", help="a receipts file (default: the latest sandbox run)")
     args = ap.parse_args(argv)
     path = args.path or latest_receipts()
@@ -298,17 +554,27 @@ def verify(argv):
         return 2
     r = receipts.verify(path, finished=True)
     if r.ok:
-        print("ok: %d lines, every hash matches the line before it (%s). %s" % (r.lines, _display(path), r.reason))
+        notes = "; ".join(r.reason.split("; ")[1:])        # the reason is "ok", then anything the chain records
+        print("ok: %d lines, every hash matches the line before it (%s).%s"
+              % (r.lines, _display(path), " %s." % (notes[:1].upper() + notes[1:]) if notes else ""))
         return 0
     where = "seq %d" % r.first_bad_seq if r.first_bad_seq else "the file"
-    print("BROKEN at %s: %s. %d lines verified before it (%s)." % (where, r.reason, r.lines, _display(path)))
+    said = "broken at %s: " % where                        # the reason names the seq too: say it once
+    reason = r.reason[len(said):] if r.reason.startswith(said) else r.reason
+    before = ". %d line%s verified before it" % (r.lines, "" if r.lines == 1 else "s") if r.lines else ""
+    print("BROKEN at %s: %s%s (%s)." % (where, reason, before, _display(path)))
     return 1
 
 
 # --- the rest ---------------------------------------------------------------------------------------
 def traps_cmd(argv):
     from . import traps
-    return traps.main(argv)
+    try:
+        load_dotenv()                     # the key and model for `traps --model live`, as for demo
+    except envfile.EnvFileError as exc:
+        return _not_started_env(exc)
+    with refusals_said(print):
+        return traps.main(argv)
 
 
 def replay_cmd(argv):
@@ -334,13 +600,7 @@ def _say(text):
         pass        # no terminal left to say it to (a hang-up, a closed pipe): the receipts keep the record
 
 
-def _display(path):
-    """Inside the repository, the path from its root; anywhere else, the whole path."""
-    try:
-        rel = os.path.relpath(path, paths.REPO)
-    except ValueError:
-        return path
-    return path if rel.startswith("..") else rel
+_display = paths.shown      # every printed path: from the folder the command was run in
 
 
 def smoke_cmd(argv):
@@ -352,14 +612,19 @@ COMMANDS = {"demo": demo, "run": run_cmd, "traps": traps_cmd, "verify": verify, 
             "smoke": smoke_cmd, "replay": replay_cmd, "watch": watch_cmd, "redteam": redteam_cmd, WORKER: worker}
 
 
+def _help():
+    """The command list, with the interpreter spelled as it runs here (paths.command)."""
+    return __doc__.strip().replace("python3 -m doris", paths.command())
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help", "help"):
-        print(__doc__.strip())
+        print(_help())
         return 0 if argv else 2
     command = COMMANDS.get(argv[0])
     if command is None:
-        print("Unknown command %r.\n\n%s" % (argv[0], __doc__.strip()))
+        print("Unknown command %r.\n\n%s" % (argv[0], _help()))
         return 2
     return command(argv[1:])
 

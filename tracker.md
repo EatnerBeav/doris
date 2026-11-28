@@ -1,7 +1,7 @@
 # Tracker
 
 Every item the judges score, one line each: **status** · item · owner · due (Pacific).
-Updated Fri Nov 27, 10:35 PM. Re-checked against the law's Never cut, commands and Dates and the Brief check tab after the smoke. Kept current on main as items move.
+Updated Sat Nov 28, 1:00 AM (demo-fresh thread: PR #23 merged, Shane's answers to HANDOFF.md, decision 103). Re-checked against the law's Never cut, commands and Dates and the Brief check tab after the smoke. Kept current on main as items move.
 
 Status words: **done** (on main, tested) · **in review** (built, in a pull request) · **building** · **blocked** (says on what) · **not started**.
 
@@ -13,62 +13,96 @@ Status words: **done** (on main, tested) · **in review** (built, in a pull requ
   - Run 1 (8:29 PM) failed at the first JMAP call, nothing sent: our host check refused Fastmail's regional API host. Fixed. [Run 1 trace](https://github.com/EatnerBeav/doris/tree/traces/live-smoke-20261128T042934Z/traces/live-smoke-20261128T042934Z).
   - Run 2 (9:15 PM): the whole mail path passed live (forward to Doris in 31 s, her reply over JMAP for $0.004, read back in Sent and in wolf's inbox). Failed on the CalDAV test event (a reused test ID) and the secret scan wrongly blocked its trace on an address. Both fixed. [Run 2 trace](https://github.com/EatnerBeav/doris/tree/traces/live-smoke-20261128T051500Z/traces/live-smoke-20261128T051500Z).
   - Run 3 (9:50 PM) passed, every step: calendar write and read-back, the forward in 31 s, her reply over JMAP with the live model for $0.004, read back in her Sent and in wolf's inbox. 0 human approvals. [Run 3 trace](https://github.com/EatnerBeav/doris/tree/traces/live-smoke-20261128T055002Z/traces/live-smoke-20261128T055002Z).
-- **building** · Live booking: wolf asks for a meeting at an exact time, Doris books it on the owner's calendar and replies · Wolf · pulled forward to Fri night
-  - After PR #11 merges: the test sender tool is being built; her first pass of `run --live` does the booking.
-- **not started** · Short overnight soak tonight, the same live run left going, trace committed in the morning (extra evidence) · Wolf · Fri night to Sat morning
-  - Only if the booking checks out.
-- **blocked** · Overnight run, under 60 emails (never cut; a sandbox run is the fallback) · Wolf · Sat 8:00 PM start
-  - On the live booking (tonight). Stays the main overnight run.
-- **not started** · Recorded answers from a real keyed demo run, so `demo` replays a real model · Wolf · Sat 12:00 PM, again at the freeze
-  - Unblocked. Today the demo falls back to the keyword stand-in and says so.
-- **not started** · Fresh live-model Trap Pack run on merged main, RESULTS.md and RUNS.md to match · Wolf · Sat 12:00 PM
-  - Unblocked. The committed report is run 1's; run 2 (20/20) is on its own branch.
+- **done** · Live booking: wolf asks for a meeting, Doris books it on the owner's calendar and replies · Wolf · Fri 11:20 PM
+  - Wolf asked for Wed Dec 2, 10 AM; the owner was busy 9-11, so she offered 3 times (T4). Wolf picked 11:00; she re-checked, booked it, read it back CONFIRMED (11:00-11:30 AM Pacific), sent T1 with the .ics, found in Sent. 0 held, 0 errors, 0 approvals, $0.0076. Main a13cadd. Trace: [traces/live-run-20261128T065251Z/](traces/live-run-20261128T065251Z/) (the soak's).
+- **done** · Short overnight soak: the same live run left going since 10:52 PM, a pass every 10 minutes · Wolf · stopped Sat 7:05 AM
+  - 8 h 12 min live on a13cadd: 2 handled (the offer and the booking above), 0 held, 0 errors, 0 human approvals, 3 sends (digest, T4, T1), 2 model calls, $0.0076. Ended by `stop`: worker dead 59 ms later, nothing in flight, 0 dropped. Outcome pass; 153 lines, chain verified on our server and again on main's code. Committed from our server: [traces/live-run-20261128T065251Z/](traces/live-run-20261128T065251Z/).
+- **done** · The full live loop: wolf's demo-day mix, live, handled end to end with nobody in the loop · Wolf · Sat 9:25 AM
+  - Sat 7:39 to 8:37 AM on main 5be0658, `run --live` plus [tests/tools/live_mix.py](tests/tools/live_mix.py): 15 emails from wolf in 8 threads, each answer as planned (15 of 15 met, 0 wrong). She booked 6 (one in Eastern for 45 min, one ISO date, one pick plus a question), offered 3 times, moved 1, cancelled 1, filed 4 (list mail, an auto-reply, an injection, an FYI), held 1 (add a person; the notice reached the owner). 15 messages, 14 handled, 1 held, 0 errors, 0 human approvals, 11 sends each found in Sent, every booking read back, 13 model calls, $0.0485. Ended by `stop`: worker dead 71 ms later, nothing in flight. Outcome pass; 287 lines, chain verified. Trace: [traces/live-run-20261128T153848Z/](traces/live-run-20261128T153848Z/), the mix's log [traces/live-loop-20261128T153848Z/](traces/live-loop-20261128T153848Z/). Rae's Gmail emails moved to the 2:30 PM rehearsal (Steve, decision 115).
+- **not started** · Overnight run, under 60 emails (never cut; a sandbox run is the fallback) · Wolf · Sat 8:00 PM start
+  - Unblocked: the live booking passed tonight. Stays the main overnight run.
+- **done** · Recorded answers from a real keyed demo run, so `demo` replays a real model · Wolf · Sat 12:00 PM, again at the freeze
+  - Sat 4:33 AM on our server, main 18d160a: 13 handled, 2 held, 9 calls, $0.0337 ([traces/model-live-sandbox-20261128T123315Z/](traces/model-live-sandbox-20261128T123315Z/)). A zero-key demo replays it to the same day. PR #29 merged Sat 5:17 AM (main 318752a); re-record at the freeze.
+- **done** · Fresh live-model Trap Pack run on merged main, RESULTS.md and RUNS.md to match · Wolf · Sat 12:00 PM
+  - Run 3, Sat 4:33 AM, main 18d160a, $0.0649: pass 20 on invariants; against the key met 13, safe and silent 7, missed 0, bug 0.
 - **not started** · Feature freeze and the video: the full unattended run, then a fresh run and the Stop landing mid-call; unlisted YouTube checked in a signed-out window, link in the README · Wolf with Shane · Sun evening
 - **not started** · The submission form (team, T1, repo, video link) · Shane · Sun night
+
+## The head start: Usefulness, Demo, a judge's first 15 minutes (Shane, Fri 10:49 PM)
+
+No new features; the law and the scope stand. Bar: first place, and would Steve Jobs ship it.
+
+- **in review** · Judge experience: a stranger runs the README's one command and understands what they saw in 60 seconds; fresh-clone runs on Linux and Windows, every stumble fixed · judge-experience thread · Sat 10:00 AM
+  - README PR #19 (draft) and a judge-path CI walk. Unblocked: PR #23 merged (a rerun starts the day fresh, honest digest line, paths from where you run, template names, the story at the end). sandbox/README.md's "mail she has already read is skipped" is false after a finished day; its fix goes in #19, which owns that file.
+  - PR #26 (output polish, judge pass items 2 to 5): every hint names the interpreter running (`py` on Windows, `paths.command`); replay, traps and redteam print paths from where you run, like demo (`paths.shown`), with no doubled Windows backslashes; a stop closes first in its batch, so Dana's "opted out earlier" is true; redteam's table fits 120 columns; watch shows Pacific time; "1 booking"; no repeated date after the digest line. Still open: `verify`'s help says python3 (PR #25 owns verify); story.py's `python -m doris` and repo-root paths are the demo-story thread's 8 AM item 4.
+- **done** · Demo value: when `demo` ends, the owner's view in plain words, all from the receipts · demo-value thread · Sat 12:00 PM
+  - story.py in PR #18, printed at the end of `demo` by PR #23 (decision 102).
+- **not started** · The same story as a section on the watch page · demo-value thread · Sat 2:00 PM
+  - Built and tested but not on GitHub: /mnt/project-files/doris-v2/patches/watch-story-section.patch, to rebase on main and open as its own PR with one Fable review.
+- **in review** · The video: a 3:00-max script and shot list Shane narrates; credit Shane Bornstein and Wolf (Claude), his CTO; Hire the Machines only · video thread · rehearsal Sat afternoon, filming Sun
+  - PR #20 (docs/video/), decision 99; Shane to confirm.
+
+## From the brief check (brief-compliance.md, PR #21: 75 rows, 50 met, 14 partly, 9 missing, 2 wrong)
+
+- **not started** · `demo`, `traps` and the sandbox `run` read the model key from a `.env` at the repo root as well as the environment; the README gives the step (row 1.2, wrong today) · Wolf · Sat 12:00 PM
+- **done** · tests/trap-pack/RESULTS.md carries the grade against the key beside each generated verdict and links RUNS.md; run 2's trace lands on main beside run 1's (rows 9.3 wrong, 9.4, 9.5) · Wolf · Sat 12:00 PM
+- **done** · The follow-up named in the receipt and the digest when an offer is filed (row 6.2; with the nudge) · nudge thread
+  - Every offer and every booking files a dated entry in her ledger, named in its own receipt line, in the terminal and in the digest. AGENT.md, "The follow-up"; `tests/unit/test_followups.py`.
+- **not started** · A loop test pinning the calendar failing twice into a clean hold (behaviour right, no test) · Wolf · Sat 2:00 PM
+- **done** · The form's team field: the one registered person in the field, "Wolf (Claude), his CTO" in the free-text fields (row 10.2; Shane's call, decision 103) · Steve submits · Sun night
+- **not started** · Daily check of the registration inbox for judges' questions, Nov 30 to Dec 10 (row 5.8) · Wolf (project chat) · Mon 9:30 AM
+- **not started** · Near Miss write-up drafted from the log, posted and tagged (row 10.3) · Wolf drafts, Shane posts · draft Fri Dec 4, post by Mon Dec 7 10:00 AM
+- **done** · GitHub repo description typo fixed by Shane (seen fixed Sat 2:36 AM): now "an inbox and calendar agent you can walk away from" (decision 103) · Shane
+
+- **done** · The law's ruling 13 matches decision 77: fix applied Sat 1:33 AM, now "13. Hidden text: read the plain-text part; HTML with hiding styles is held, quoting visible text only." (law 15,967 chars; decision 106) · Shane
 
 ## Safety bonus: audit trail, live monitoring, kill switch, guardrails
 
 - **done** · `verify`: chain check plus the tamper demo · Wolf
-- **in review** · `replay` (audit): step-through of any finished run, chain checked first · replay thread · Sat 12:00 AM
-  - PR #8, landing in PR #11 with the command wired.
-- **in review** · Watch page: the four labels and a code-written why on every decision, one Stop button · watch thread · Sat 12:00 AM
-  - PR #9, landing in PR #11 with the command wired. Every decision receipt already carries its why.
+  - PR #25 (decision 105): after a re-save with CRLF line endings (PowerShell's `Set-Content`), `verify` and `replay` still name the line that was really edited, and so do `watch` and the story. A CRLF file never verifies. Each message says its seq once.
+  - Queued low: a re-save in another encoding (Windows PowerShell 5.1's `>` and `Out-File` write UTF-16; `-Encoding UTF8` adds a byte-order mark) still reads "BROKEN at seq 1: the line is not valid JSON". Name the encoding in the reason.
+- **done** · `replay` (audit): step-through of any finished run, chain checked first · replay thread
+  - PR #8, merged in PR #11 with the command wired (Fri 10:48 PM).
+- **done** · Watch page: the four labels and a code-written why on every decision, one Stop button · watch thread
+  - PR #9, merged in PR #11 with the command wired. Every decision receipt carries its why.
 - **done** · Halt receipt names the call in flight and the dropped queue · Wolf · on camera at Sat 4:00 PM rehearsal
 - **done** · `stop` / `resume` · Wolf
   - PR #2 adds SIGTERM/SIGHUP, the lifeline and the `sending` state.
-- **in review** · Yes-man redteam proof: a model that obeys every injection, 0 bad actions · redteam thread · Sat 12:00 PM
-  - PR #10, landing in PR #11: 0 bad actions in 206 runs over 24 cases.
+- **done** · Yes-man redteam proof: a model that obeys every injection, 0 bad actions · redteam thread
+  - PR #10, merged in PR #11: 0 bad actions in 206 runs over 24 cases.
 - **done** · Signature check (gate G8) · Wolf
 - **done** · Booking re-check before the write, read back after (gate G11, ruling 4) · Wolf
 - **done** · Sensitive-mail screen before the model: filed unread, no reply, a sender-only digest line · Wolf
 - **done** · The digest: once a day, the ratio first, only what needs the owner · Wolf
-- **not started** · Model bill capped at the provider too, by a spend limit Shane sets on the key (the code cap is done) · Shane · Sat 12:00 PM
+- **done** · Model bill capped at the provider too: Steve set the spend limit on the key (the code cap is done too; decision 106) · Steve
 - **done** · The never-mention list checked on trace commits from our server · Wolf
   - Found tonight: the server's scan had no private terms file. Added (Shane's yes); the whole repo and Trap Pack run 2's trace re-scanned clean.
-- **in review** · SAFETY.md: the five verbs (send, delete, overwrite, pay, deploy) · docs thread · Sun final
-  - PR #7, landing in PR #11.
-- **in review** · Only the supervisor starts a process (a test for SAFETY's deploy row) · docs thread
-  - In PR #7.
+- **done** · SAFETY.md: the five verbs (send, delete, overwrite, pay, deploy) · docs thread · final pass Sun
+  - PR #7, merged in PR #11.
+- **done** · Only the supervisor starts a process (a test for SAFETY's deploy row) · docs thread
+  - PR #7, merged in PR #11.
 
 ## Reliability, engineering, honesty
 
 - **done** · One calendar timeout with retry in the demo · Wolf
 - **done** · Trap Pack report: every input, what she did, the outcome in the rubric's words (recover, retry, ask, stop cleanly, refused, not inspected), a plain line on each failure · Wolf
 - **done** · `.agentware.toml`, LICENSE (MIT) and the organizers' repo layout · Wolf
-- **in review** · The one command from a fresh clone on three systems · Wolf · Sat 10:00 AM
+- **done** · The one command from a fresh clone on three systems: [PR #19](https://github.com/EatnerBeav/doris/pull/19) · Wolf, then the judge-experience thread · Sat 1:35 AM
   - CI runs `demo` and `traps` on Linux, macOS and Windows on every push, all green on main. By hand: Linux all pass; Windows `traps` failed on paths over 260 characters, fixed on main; a re-run on Shane's PC is next.
 - **done** · No-key line in the demo · Wolf
   - Wording of what a key costs to check on Sunday.
 - **building** · Live or replayed mark on every trace · Wolf · Sat 12:00 PM
   - Live runs write a manifest (live, date, commit, measured cost); demo and Trap Pack traces next.
-- **building** · `terminal.log` in every trace folder · Wolf · Sat 10:00 AM
-  - Live traces carry it; new Trap Pack runs get it in the follow-up PR (being built). The committed old traces stay as they ran.
-- **building** · `traps` with no key leaves the committed RESULTS.md alone (a `--record` flag for our committed runs), and replays a recorded live run · Wolf · Sat 12:00 PM
-  - The first half is in the follow-up PR being built.
-- **in review** · AGENT.md permissions: each credential, its scope, what it cannot do · docs thread · Sun final
-  - PR #7.
-- **not started** · Follow-up nudge on an unanswered offer (T9) · new thread after PR #2 · Sat 2:00 PM
-- **not started** · Ruling 17's once-a-cycle check for a booking gone from the calendar · new thread after PR #2 · Sat 2:00 PM
+- **done** · `terminal.log` in every trace folder · Wolf
+  - Live traces and new Trap Pack runs carry it (PR #17). The committed old traces stay as they ran.
+- **done** · `traps` with no key leaves the committed RESULTS.md alone (`--record` for our committed runs) · Wolf
+  - PR #17. Replaying a recorded live run waits on recorded answers. `redteam --record` is on main too (PR #13).
+- **done** · AGENT.md permissions: each credential, its scope, what it cannot do · docs thread · final pass Sun
+  - PR #7, merged in PR #11.
+- **done** · Follow-up nudge on an unanswered offer (T9) · nudge thread
+  - One nudge per offer and per thread, two business days after the offer, through the gate, listing only the offer's own times still available. `tests/unit/test_followups.py` (class `Nudge`).
+- **done** · Ruling 17's once-a-cycle check for a booking gone from the calendar · nudge thread
+  - Missing on two reads a short wait apart: the owner gets a hold notice, the prospect gets nothing. Edits are not checked. `tests/unit/test_followups.py` (`test_owner_deleted_holds`).
 - **not started** · Keys, tiers and cost table · README pass · Sun 6:00 PM
 - **not started** · README rubric-to-evidence map · README pass · Sun 6:00 PM
 - **not started** · README: the 60-second run, known limits (no Google or Microsoft calendar, overnight under 60 emails), optional live setup never asked of a judge · README pass · Sun 6:00 PM

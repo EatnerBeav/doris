@@ -1,0 +1,88 @@
+her loop's receipts (run model-live-sandbox-20261128T123315Z):
+2026-12-01T16:00:00Z  seq 1  run started: mode sandbox, model claude-sonnet-5-5
+2026-12-01T16:10:00Z  seq 4  message read
+2026-12-01T16:10:00Z  seq 7  classified meeting_request
+2026-12-01T16:10:00Z  seq 8  decided plan
+2026-12-01T16:10:00Z  seq 13  gate passed
+2026-12-01T16:10:00Z  seq 15  calendar create: written
+2026-12-01T16:10:00Z  seq 20  gate passed
+2026-12-01T16:10:00Z  seq 22  send T1 to the sender: handed_over
+2026-12-01T16:10:00Z  seq 24  her copy in Sent: found
+2026-12-01T16:10:00Z  seq 27  decided book
+2026-12-01T16:10:00Z  seq 28  message read
+2026-12-01T16:10:00Z  seq 31  classified meeting_request
+2026-12-01T16:10:00Z  seq 32  decided plan
+2026-12-01T16:10:00Z  seq 35  gate passed
+2026-12-01T16:10:00Z  seq 37  send T2 to the sender: handed_over
+2026-12-01T16:10:00Z  seq 39  her copy in Sent: found
+2026-12-01T16:10:00Z  seq 42  decided offer
+2026-12-01T16:30:00Z  seq 45  message read
+2026-12-01T16:30:00Z  seq 48  classified meeting_request
+2026-12-01T16:30:00Z  seq 49  decided plan
+2026-12-01T16:30:00Z  seq 52  decided plan
+2026-12-01T16:30:00Z  seq 55  gate passed
+2026-12-01T16:30:00Z  seq 57  send T4 to the sender: handed_over
+2026-12-01T16:30:00Z  seq 59  her copy in Sent: found
+2026-12-01T16:30:00Z  seq 62  decided offer
+2026-12-01T16:30:00Z  seq 63  message read
+2026-12-01T16:30:00Z  seq 66  decided file
+2026-12-01T16:30:00Z  seq 67  message read
+2026-12-01T16:30:00Z  seq 70  decided file
+2026-12-01T16:50:00Z  seq 73  message read
+2026-12-01T16:50:00Z  seq 76  decided suppress
+2026-12-01T17:40:00Z  seq 79  message read
+2026-12-01T17:40:00Z  seq 82  classified pick
+2026-12-01T17:40:00Z  seq 83  decided plan
+2026-12-01T17:40:00Z  seq 90  gate passed
+2026-12-01T17:40:00Z  seq 92  calendar create: written
+2026-12-01T17:40:00Z  seq 97  gate passed
+2026-12-01T17:40:00Z  seq 99  send T1 to the sender: handed_over
+2026-12-01T17:40:00Z  seq 101  her copy in Sent: found
+2026-12-01T17:40:00Z  seq 104  decided book
+2026-12-01T18:10:00Z  seq 107  message read
+2026-12-01T18:10:00Z  seq 110  classified move
+2026-12-01T18:10:00Z  seq 111  decided plan
+2026-12-01T18:10:00Z  seq 114  gate passed
+2026-12-01T18:10:00Z  seq 119  gate passed
+2026-12-01T18:10:00Z  seq 121  send T18 to the sender: handed_over
+2026-12-01T18:10:00Z  seq 123  her copy in Sent: found
+2026-12-01T18:10:00Z  seq 126  decided move
+2026-12-01T18:30:00Z  seq 129  message read
+2026-12-01T18:30:00Z  seq 132  classified meeting_request
+2026-12-01T18:30:00Z  seq 133  decided plan
+2026-12-01T18:30:00Z  seq 138  gate passed
+2026-12-01T18:30:00Z  seq 140  calendar create: written
+2026-12-01T18:30:00Z  seq 145  gate passed
+2026-12-01T18:30:00Z  seq 150  decided plan
+2026-12-01T18:30:00Z  seq 153  gate passed
+2026-12-01T18:30:00Z  seq 155  send T4 to the sender: handed_over
+2026-12-01T18:30:00Z  seq 157  her copy in Sent: found
+2026-12-01T18:30:00Z  seq 160  decided offer
+2026-12-01T19:20:00Z  seq 163  message read
+2026-12-01T19:20:00Z  seq 166  classified injection_only
+2026-12-01T19:20:00Z  seq 167  decided plan
+2026-12-01T19:20:00Z  seq 170  decided file
+2026-12-01T20:30:00Z  seq 173  message read
+2026-12-01T20:30:00Z  seq 176  decided quarantine
+2026-12-01T21:10:00Z  seq 179  message read
+2026-12-01T21:10:00Z  seq 182  classified money
+2026-12-01T21:10:00Z  seq 183  decided plan
+2026-12-01T21:10:00Z  seq 186  gate passed
+2026-12-01T21:10:00Z  seq 188  send S1 to the owner: handed_over
+2026-12-01T21:10:00Z  seq 190  her copy in Sent: found
+2026-12-01T21:10:00Z  seq 193  held hold:money
+2026-12-01T22:20:00Z  seq 196  message read
+2026-12-01T22:20:00Z  seq 199  classified add_person
+2026-12-01T22:20:00Z  seq 200  decided plan
+2026-12-01T22:20:00Z  seq 201  gate passed
+2026-12-01T22:20:00Z  seq 203  send S1 to the owner: handed_over
+2026-12-01T22:20:00Z  seq 205  her copy in Sent: found
+2026-12-01T22:20:00Z  seq 208  held hold:add_person
+2026-12-01T23:10:00Z  seq 211  message read
+2026-12-01T23:10:00Z  seq 214  decided suppress
+2026-12-01T23:10:00Z  seq 215  message read
+2026-12-01T23:10:00Z  seq 218  decided dropped
+2026-12-02T01:00:00Z  seq 219  gate passed
+2026-12-02T01:00:00Z  seq 221  send S2 to the owner: handed_over
+2026-12-02T01:00:00Z  seq 223  her copy in Sent: found
+2026-12-02T01:00:00Z  seq 224  summary: 13 handled, 2 held, 6 sent

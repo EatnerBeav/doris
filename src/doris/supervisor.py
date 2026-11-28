@@ -71,6 +71,11 @@ class HaltFileError(RuntimeError):
     """A halt file exists but cannot be read. Callers treat it as a halt in force (fail closed)."""
 
 
+class HaltWriteError(OSError):
+    """request_stop could not put HALT down, even after its few short tries: the stop is not in
+    force, and the caller is told so loudly (an OSError, as the failed replace was)."""
+
+
 HALT_READ_TRIES = 5          # reads of a HALT that cannot be read before it counts as unreadable
 HALT_READ_WAIT_S = 0.05      # the wait between them: Windows refuses a file another process replaces
 _pause = time.sleep          # that wait (a test keeps it instead)
@@ -178,7 +183,10 @@ def _utc_ms(epoch):
 
 def request_stop(mode, cause="cli", state_dir=None):
     """Write HALT atomically (temp file, fsync, os.replace). The first cause stays: a second
-    stop while one is in force changes nothing. Returns the cause in force."""
+    stop while one is in force changes nothing. Returns the cause in force. A replace Windows
+    refuses (PermissionError: a reader holds HALT open) is tried again, HALT_READ_TRIES times in
+    all, HALT_READ_WAIT_S apart; refused every time, it raises HaltWriteError: a stop never
+    silently fails to happen."""
     if cause not in HALT_CAUSES:
         raise ValueError("unlisted halt cause %r" % (cause,))
     try:
@@ -196,7 +204,15 @@ def request_stop(mode, cause="cli", state_dir=None):
             fh.write(body.encode("ascii") + b"\n")
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, halt_file(mode, state_dir))
+        for n in range(HALT_READ_TRIES):
+            try:
+                os.replace(tmp, halt_file(mode, state_dir))
+                break
+            except PermissionError as exc:
+                if n + 1 >= HALT_READ_TRIES:
+                    raise HaltWriteError("HALT could not be written (%s, %d tries): the stop is NOT in force"
+                                         % (exc.__class__.__name__, HALT_READ_TRIES)) from exc
+                _pause(HALT_READ_WAIT_S)
     except BaseException:
         try:
             os.remove(tmp)
@@ -677,7 +693,7 @@ def _say(text):
 
 
 def _resume_command():
-    return "py -m doris resume" if os.name == "nt" else "python3 -m doris resume"
+    return paths.command("resume")
 
 
 def _halt_refusal(mode, state_dir=None):

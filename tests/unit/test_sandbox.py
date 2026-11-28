@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import time
 import unittest
+import unittest.mock
 
 from doris import caps, ics, slots
 from doris.adapters import sandbox
@@ -602,6 +603,26 @@ class MailFetchTest(MailFixture):
         self.assertTrue(ctx.exception.staged)
         self.mail.disarm()
         self.assertEqual(len(self.mail.fetch_new()), 1)
+
+    def test_a_file_that_grew_under_the_same_modified_time_waits_two_seconds(self):
+        """A coarse file clock (FAT keeps two seconds) can leave a growing file's modified time as it
+        was: a size that changed since her last look says it was written just now."""
+        whole = eml("a@x.example", "the whole of it")
+        path = os.path.join(self.inbox, "14-judge.eml")
+        wall = [time.time()]
+        with unittest.mock.patch.object(sandbox, "_wall", lambda: wall[0]):
+            self.assertEqual(self.mail.fetch_new(), [])        # her first look: nothing there yet
+            self.drop("14-judge.eml", whole[:len(whole) // 2])
+            stamp = os.stat(path).st_mtime_ns
+            self.assertEqual(self.mail.fetch_new(), [])        # written just now
+            self.drop("14-judge.eml", whole)
+            os.utime(path, ns=(stamp, stamp))
+            wall[0] += 3
+            self.assertEqual(self.mail.fetch_new(), [])        # its time is old, but it grew since her last look
+            wall[0] += 1
+            self.assertEqual(self.mail.fetch_new(), [])
+            wall[0] += 1
+            self.assertEqual([i.raw for i in self.mail.fetch_new()], [whole])
 
 
 class MailSendTest(MailFixture):

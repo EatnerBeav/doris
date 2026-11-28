@@ -17,6 +17,13 @@ What it reads from each line (the loop writes these):
 - `called` with payload call == "model", and the `result` whose payload `call_seq` names it
   (payload `cost_usd`).
 - any payload with `human_approval: true` counts as a human approval (there are none in Doris).
+- `error` with payload step == "fetch": one failed inbox read (decision 89: a run until stopped
+  keeps trying, one error line a try).
+- `decided` with payload step == "follow_up" (brief 6.2): action "file_follow_up" with new true is
+  one follow-up filed in her ledger (payload follow_up: its id and kind, "nudge" or
+  "booking_check"); action "close_follow_up" with why.code followup.nudge_done is one nudge sent.
+- a booking found gone (ruling 17) is one `observed` and one `held` line of its own (subject
+  "booking:" and the booking ID, the prospect's address and name in the payload): one more held.
 """
 
 import datetime as _dt
@@ -75,6 +82,9 @@ def build(receipt_lines, now, verified=None):
     calls = 0
     quarantined, not_addressed = set(), set()
     opted = {}       # sender address as written -> queued requests dropped, in the order they opted out
+    read_failures = 0
+    filed = {"nudge": set(), "booking_check": set()}    # follow-up ids filed in the period, by kind
+    nudged = set()   # follow-up ids whose one nudge went
 
     def who(line):
         """(address as written, the name a notice shows): a sender's address or display name may carry
@@ -100,6 +110,14 @@ def build(receipt_lines, now, verified=None):
         if kind == "called" and p.get("call") == "model":
             calls += 1
             model_seqs.add(line.get("seq"))
+        if kind == "error" and p.get("step") == "fetch":
+            read_failures += 1
+        entry = p.get("follow_up")
+        if kind == "decided" and p.get("step") == "follow_up" and isinstance(entry, dict):
+            if p.get("action") == "file_follow_up" and p.get("new") is True and entry.get("kind") in filed:
+                filed[entry["kind"]].add(entry.get("id"))
+            if p.get("action") == "close_follow_up" and code == "followup.nudge_done":
+                nudged.add(entry.get("id"))
         if kind == "result" and p.get("call_seq") in model_seqs:
             c = p.get("cost_usd")
             if isinstance(c, (int, float)) and not isinstance(c, bool) and c > 0:
@@ -143,8 +161,10 @@ def build(receipt_lines, now, verified=None):
     slots["offered_to"] = []
     for addr, name in offers.values():
         _add_once(slots["offered_to"], name)
+    slots["follow_ups"] = (len(filed["nudge"]), len(filed["booking_check"]), len(nudged))
     slots["quarantined"] = len(quarantined)
     slots["not_addressed"] = len(not_addressed)
+    slots["read_failures"] = read_failures
     slots["model_calls"] = calls
     slots["cost_usd"] = round(cost, 6)
     slots["verified"] = verified is True

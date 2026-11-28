@@ -11,8 +11,9 @@ Usage: python -m doris smoke [--env PATH] [--send-to ADDRESS]
 Each step prints one plain line: its name, then ok (with a count where it counts something), or
 the failure's class name with the adapter's own text, which carries a step, a status code or an
 exception's class name and never a value. No line names an address, a password, a folder, a
-calendar or an event, with one exception: when the test event may still be on the calendar, a
-line names its booking ID (SMOKE_BOOKING_PREFIX and the run's UTC stamp) so a person can find it.
+calendar or an event, with two exceptions: when the test event may still be on the calendar, a
+line names its booking ID (SMOKE_BOOKING_PREFIX and the run's UTC stamp) so a person can find it,
+and one line names any event under that prefix that is not in the smoke's own form (left alone).
 The calendar's display name is read and never shown (it can be the owner's full name, and every
 line goes to a trace kept in a public repo): its line says only "ok (name read)".
 
@@ -35,8 +36,10 @@ Steps, in order; each runs whatever the one before it did:
   caldav query, next 7 days                  LiveCalendar.query, counted
   caldav test event left by an earlier run   every test event earlier smokes left (cut short, or
                                              a delete failed), found by its booking ID's prefix
-                                             (LiveCalendar.booking_ids), is deleted first; nothing
-                                             else is touched
+                                             (LiveCalendar.booking_ids) and in the smoke's own form
+                                             (its run's far-ahead slot, confirmed), is deleted
+                                             first; nothing else is touched: anything else under
+                                             the prefix is named on one more line, and it goes on
   caldav create test event                   30 minutes about 400 days ahead, at 11:00 UTC (the
                                              small hours in Pacific time), under a booking ID of
                                              its own: SMOKE_BOOKING_PREFIX and the run's UTC stamp,
@@ -146,8 +149,12 @@ TEST_EVENT_LENGTH = _dt.timedelta(minutes=30)
 # smoke run 2's create was refused 412 AlreadyExists under the ID run 1 had created and deleted 45
 # minutes before, while a read and a UID query found nothing there. A run that leaves its test event
 # behind is cleaned up by the next run, which finds every event under the prefix and deletes it first
-# (the first runs' one fixed ID, "doris-smoke-test", starts with it too).
+# (the first runs' one fixed ID, "doris-smoke-test", starts with it too), but only one in the smoke's
+# own form (_smoke_form): anything else under the prefix is named and left alone.
 SMOKE_BOOKING_PREFIX = "doris-smoke-"
+LEGACY_SMOKE_BOOKING_ID = SMOKE_BOOKING_PREFIX + "test"
+LEGACY_SMOKE_DAYS = (_dt.date(2026, 11, 27), _dt.date(2026, 11, 28))   # the UTC days the first runs used it
+LEFT_ALONE_STEP = "caldav events under the smoke's prefix, not its own"
 CLEANUP_TRIES = 3                                # the test event's delete, a short wait apart
 CLEANUP_WAIT_S = caps.CALENDAR_RETRY_WAIT_S
 SENT_LOOK_WAIT_S = caps.SENT_LOOK_WAIT_S         # between the two looks in Sent, as a live run waits
@@ -302,18 +309,47 @@ def smoke_booking_id(started):
     return SMOKE_BOOKING_PREFIX + started.astimezone(UTC).strftime(livetrace.STAMP)
 
 
+def _test_slot(started):
+    """The far-ahead slot a smoke started then gives its test event."""
+    day = (started + TEST_EVENT_AHEAD).date()
+    start = _dt.datetime(day.year, day.month, day.day, TEST_EVENT_UTC_HOUR, tzinfo=UTC)
+    return Slot(start, start + TEST_EVENT_LENGTH)
+
+
+def _smoke_form(booking_id, ev):
+    """True when the event under booking_id is a smoke's own test event as ics.build_event wrote it
+    (calendar.get reads its times and status): a confirmed timed event at the far-ahead test slot of
+    the run its ID names, doris-smoke-<UTC stamp>, or of one of the first runs' days for their one
+    fixed ID, doris-smoke-test. The leftover step deletes nothing else."""
+    if ev is None or ev.kind != "timed" or ev.status != "CONFIRMED":
+        return False
+    if booking_id == LEGACY_SMOKE_BOOKING_ID:
+        starts = [_dt.datetime(d.year, d.month, d.day, tzinfo=UTC) for d in LEGACY_SMOKE_DAYS]
+    else:
+        try:
+            starts = [_dt.datetime.strptime(booking_id[len(SMOKE_BOOKING_PREFIX):], livetrace.STAMP).replace(tzinfo=UTC)]
+        except ValueError:
+            return False
+        if smoke_booking_id(starts[0]) != booking_id:
+            return False
+    return any((ev.start_utc, ev.end_utc) == (slot.start_utc, slot.end_utc)
+               for slot in (_test_slot(started) for started in starts))
+
+
 def _calendar_round_trip(calendar, out, now):
-    """Delete every test event earlier runs left, create this run's far ahead, read it back; then, in
+    """Delete every test event earlier runs left in the smoke's own form (naming anything else under
+    the prefix), create this run's far ahead, read it back; then, in
     a finally (a failed step or Ctrl-C included), delete it with retries and read again to see it
     gone. Unless it was seen gone, one more line names its booking ID."""
     booking_id = smoke_booking_id(now)
-    day = (now + TEST_EVENT_AHEAD).date()
-    start = _dt.datetime(day.year, day.month, day.day, TEST_EVENT_UTC_HOUR, tzinfo=UTC)
-    slot = Slot(start, start + TEST_EVENT_LENGTH)
+    slot = _test_slot(now)
     event = ics.build_event(booking_id, slot, templates.PLACEHOLDER_MEETING_LINK, "CONFIRMED", 0, now, None)
+    others = []
 
     def leftover():
-        left = calendar.booking_ids(SMOKE_BOOKING_PREFIX)
+        found = calendar.booking_ids(SMOKE_BOOKING_PREFIX)
+        left = [earlier for earlier in found if _smoke_form(earlier, calendar.get(earlier))]
+        others.extend(earlier for earlier in found if earlier not in left)
         for earlier in left:
             calendar.delete(earlier)
         if any(calendar.get(earlier) is not None for earlier in left):
@@ -334,6 +370,8 @@ def _calendar_round_trip(calendar, out, now):
     passed, seen_gone = [], False
     try:
         passed.append(_step(out, "caldav test event left by an earlier run", leftover))
+        if others:                     # not the smoke's to delete: named, and the smoke goes on
+            out.step(LEFT_ALONE_STEP, "left alone: " + ", ".join(others))
         passed.append(_step(out, "caldav create test event", lambda: calendar.create_only(booking_id, event)))
         passed.append(_step(out, "caldav read test event back, times match", read_back))
     finally:
@@ -555,7 +593,8 @@ def _confirmed(ledger_path, mid):
 
 def _end_to_end(e2e, mail, out, file_request=False):
     """wolf's request to the owner; found in her INBOX (the owner's forward) and marked as the smoke's
-    own; with file_request (the fetch step found no message to file), the file step on it; her loop on
+    own; with file_request (the fetch step found no message to file), the file step on it once it is
+    marked (named as not run when it is not); her loop on
     it; her reply confirmed in her Sent and found in wolf's mailbox. One line a step; once a step
     fails, the steps that need it are named in one line as not run (her loop needs no file step)."""
     now = _dt.datetime.now(UTC)
@@ -588,8 +627,10 @@ def _end_to_end(e2e, mail, out, file_request=False):
     def file_it():
         mail.file(found[-1], FILE_KEYWORD)
         return "the test request"
-    if file_request:
+    if file_request and marked:
         _step(out, FILE_STEP, file_it)
+    elif file_request:                 # only a request marked as the smoke's own is the smoke's to file
+        _not_run(out, FILE_STEP, "the test request is not marked as the smoke's own")
     if not marked:
         return _not_run(out, "her loop on the test request and the steps after it",
                         "the request is not marked as the smoke's own, so no loop may read it")
@@ -614,9 +655,10 @@ def _end_to_end(e2e, mail, out, file_request=False):
 # The command
 # ------------------------------------------------------------------------------------------------
 def _parser():
-    ap = argparse.ArgumentParser(prog="python -m doris smoke",
+    ap = argparse.ArgumentParser(prog=paths.command("smoke"),
                                  description="Every live adapter call once, against the real servers.")
-    ap.add_argument("--env", default=paths.LIVE_ENV, metavar="PATH", help="the env file (default %(default)s)")
+    ap.add_argument("--env", default=paths.LIVE_ENV, metavar="PATH",
+                    help="the env file (default %(default)s, on our server; never asked of a judge)")
     ap.add_argument("--send-to", metavar="ADDRESS",
                     help="also send one test message to %s" % " or ".join(SEND_TO_ALLOWED))
     return ap

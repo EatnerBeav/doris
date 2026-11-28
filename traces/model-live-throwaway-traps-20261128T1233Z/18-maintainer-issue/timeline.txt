@@ -1,0 +1,10 @@
+her loop's receipts (run model-live-throwaway-traps-20261128T1233Z):
+2026-12-01T17:00:00Z  seq 1  run started: mode throwaway, model claude-sonnet-5-5
+2026-12-01T17:00:00Z  seq 4  message read
+2026-12-01T17:00:00Z  seq 7  classified other
+2026-12-01T17:00:00Z  seq 8  decided plan
+2026-12-01T17:00:00Z  seq 11  gate passed
+2026-12-01T17:00:00Z  seq 13  send S1 to the owner: handed_over
+2026-12-01T17:00:00Z  seq 15  her copy in Sent: found
+2026-12-01T17:00:00Z  seq 18  held hold:outside_classes
+2026-12-01T17:00:00Z  seq 21  summary: 0 handled, 1 held, 0 sent

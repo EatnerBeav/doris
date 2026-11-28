@@ -3,8 +3,8 @@
     python -m doris watch [--port N]
 
 One page, served on 127.0.0.1 only (never 0.0.0.0), so only this computer can open it. On a server, reach
-it through an SSH tunnel. It is a live tail of the newest run's receipts, the sandbox's or live, whichever
-started last: the brief's four panes at the top (current step, tool calls, decisions, cost so far), then
+it through an SSH tunnel. It is a live tail of the newest run's receipts, the sandbox's or live (the smoke's
+own run of her loop included), whichever started last: the brief's four panes at the top (current step, tool calls, decisions, cost so far), then
 every receipt line as it lands, newest first, each decision with its why in the receipt's own words. It
 reads the receipt file and nothing else, so it cannot show anything the trace lacks, and it never writes
 there. Every string reaches the page as text, never as HTML: a display name or a Message-ID is email text.
@@ -13,7 +13,8 @@ Model words never reach it (a classified line shows its class, from the closed l
 
 One Stop button. It does what `python -m doris stop` does, through the same function: supervisor.request_stop
 for each of that command's modes, the sandbox and live, with the cause watch_button. The supervisor then kills
-a running worker mid-call and writes the halted line, as for any stop. Only a POST from the page itself stops
+a running worker mid-call and writes the halted line, as for any stop. The smoke runs her loop without the
+supervisor: her own halt check stops it between calls, and the page says so for that run. Only a POST from the page itself stops
 her: it carries a token made fresh each time `watch` starts, and its Host and Origin must be this page's. A
 request from any other site, or through a name rebound to this computer, is refused and stops nothing. The
 page can stop her; it has no way to start, resume or release anything. No external assets: one inline script
@@ -39,9 +40,11 @@ from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-from . import paths, receipts, supervisor
+from . import paths, receipts, supervisor, zones
 from .loop import count_outcomes
 from .shapes import CLASSES
+from .why import gone_notice
+from .why import FOLLOW_UP_WORDS
 
 HOST = "127.0.0.1"                  # fixed: no option serves the page to another computer
 DEFAULT_PORT = 8765
@@ -53,42 +56,67 @@ MAX_BODY = 1024                     # the Stop form is one token
 CLIP = 120                          # email text is cut to this many characters on the page
 MAX_ROWS = 1000                     # the page holds the newest lines; the receipt file holds every one
 
-Run = namedtuple("Run", "name folder mode started has_receipts")
+Run = namedtuple("Run", "name folder mode started has_receipts smoke known")
 
 
 # ------------------------------------------------------------------------------------------
 # Which run: the newest one started, in the sandbox or live
 # ------------------------------------------------------------------------------------------
-def _started(folder):
-    """When a run started: its config.json, written once before the worker starts (else its receipts)."""
-    for name in ("config.json", "receipts.jsonl"):
+_SMOKE_STAMP = re.compile(r"-smoke-(\d{8}T\d{6}Z)$")
+
+
+def _started(folder, name="", smoke=False):
+    """(when a run started, in ns, or None; whether that is known). A run's config.json is written once,
+    before its worker starts and before the halt check. The smoke writes none: its run is named for the
+    instant the smoke began (smoke.py, livetrace.STAMP). Failing both, the receipt file's last change,
+    which moves with every line, so it is not known."""
+    m = _SMOKE_STAMP.search(name) if smoke else None
+    if m:
         try:
-            return os.stat(os.path.join(folder, name)).st_mtime_ns
+            began = _dt.datetime.strptime(m.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=_dt.timezone.utc)
+            return int(began.timestamp()) * 10 ** 9, True
+        except ValueError:
+            pass
+    for name_, known in (("config.json", True), ("receipts.jsonl", False)):
+        try:
+            return os.stat(os.path.join(folder, name_)).st_mtime_ns, known
         except OSError:
             continue
-    return None
+    return None, False
+
+
+def _listed(runs):
+    try:
+        return [(name, os.path.join(runs, name)) for name in os.listdir(runs)]
+    except OSError:
+        return []
+
+
+def _run_folders():
+    """(name, folder, mode, smoke) for every run folder the page follows: state/<mode>/runs/* for the sandbox
+    and live, and the smoke's own runs of her loop, state/live/smoke/<stamp>/runs/* (smoke.py)."""
+    for mode in WATCHED_MODES:
+        for name, folder in _listed(paths.runs_dir(mode)):
+            yield name, folder, mode, False
+    smoke = os.path.join(paths.state_dir("live"), "smoke")
+    for _stamp, stamp_folder in _listed(smoke):
+        for name, folder in _listed(os.path.join(stamp_folder, "runs")):
+            yield name, folder, "live", True
 
 
 def newest_run():
-    """The run started last under state/<mode>/runs, for the sandbox and live, or None. A run with receipts
-    comes first: a run refused at the start (a halt in force, or another run holding the ledger) leaves a
-    folder with its config.json and no receipts, and must not hide the run that is going. A folder with no
-    receipts is watched only when no run has any (one starting, before its first line)."""
+    """The run started last, in the sandbox or live (the smoke's own runs of her loop included), or None. A
+    run with receipts comes first: a run refused at the start (a halt in force, or another run holding the
+    ledger) leaves a folder with its config.json and no receipts, and must not hide the run that is going.
+    A folder with no receipts is watched only when no run has any (one starting, before its first line)."""
     best = {True: None, False: None}
-    for mode in WATCHED_MODES:
-        runs = paths.runs_dir(mode)
-        try:
-            names = os.listdir(runs)
-        except OSError:
+    for name, folder, mode, smoke in _run_folders():
+        started, known = _started(folder, name, smoke)
+        if started is None:
             continue
-        for name in names:
-            folder = os.path.join(runs, name)
-            started = _started(folder)
-            if started is None:
-                continue
-            has = os.path.exists(os.path.join(folder, "receipts.jsonl"))
-            if best[has] is None or (started, name) > best[has][0]:
-                best[has] = ((started, name), Run(name, folder, mode, started, has))
+        has = os.path.exists(os.path.join(folder, "receipts.jsonl"))
+        if best[has] is None or (started, name) > best[has][0]:
+            best[has] = ((started, name), Run(name, folder, mode, started, has, smoke, known))
     pick = best[True] or best[False]
     return pick[1] if pick is not None else None
 
@@ -98,7 +126,7 @@ def newest_run():
 # ------------------------------------------------------------------------------------------
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
 _TS = re.compile(r"^(\d{4}-\d\d-\d\d)T(\d\d:\d\d:\d\dZ)$")
-_RUN_NAME = re.compile(r"^model-(live|replayed|stub)-")
+_RUN_NAME = re.compile(r"^model-(live|replayed|stub|yes-man)-")
 _HIDDEN = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})   # controls, direction overrides, lone surrogates, breaks
 
 
@@ -194,12 +222,59 @@ def _tally(p):
                _s(_int(p.get("bookings")), "booking"), _s(_int(p.get("model_calls")), "model call")))
 
 
+def _due(value):
+    """A follow-up's date (UTC on its line) on the Pacific clock, to the minute: 'Thu Dec 3, 8:10 AM Pacific'."""
+    text = _time(value)
+    return "a time that can't be read" if text == "?" else re.sub(r":\d\d (AM|PM)$", r" \1", text) + " Pacific"
+
+
+def _follow_up(p):
+    """The follow-up a line names, from its code-written fields: the one nudge and its date, or the
+    check that a booking is still on the calendar."""
+    fu = p.get("follow_up") if isinstance(p.get("follow_up"), dict) else {}
+    if fu.get("kind") == "nudge":
+        return "one nudge, due %s" % _due(fu.get("due"))
+    if fu.get("kind") == "booking_check":
+        return "her check each cycle that booking %s is still on the calendar, until it starts %s" % (
+            _token(fu.get("booking_id")), _due(fu.get("due")))
+    return "an entry of a kind not on the list"
+
+
+def _rule(p):
+    rule = p.get("rule")
+    return FOLLOW_UP_WORDS.get(rule, _token(rule)) if isinstance(rule, str) else _token(rule)
+
+
+def _follow_up_line(p):
+    """A follow-up line that closes no message: filed, closed, the nudge going, or a nudge that waits."""
+    action = p.get("action")
+    if action == "file_follow_up":
+        return "Follow-up %s: %s." % ("filed" if p.get("new") is not False else "already filed", _follow_up(p))
+    if action == "close_follow_up":
+        return "Follow-up closed: %s%s." % (_follow_up(p), " (%s)" % _rule(p) if "rule" in p else "")
+    if action == "nudge":
+        kept = p.get("kept")
+        return "Follow-up due: the one nudge (%s) goes with %s still available." % (
+            _token(p.get("template")),
+            "%d of the offer's times" % len(kept) if isinstance(kept, list) else "the offer's times")
+    if action == "nudge_waits":
+        return "Follow-up due, and the nudge waits (%s). She tries again at her next cycle." % _rule(p)
+    return None
+
+
 def _what(kind, p):
     """What the line says happened, in code words. Email text only in a read line's sender."""
     if kind == "observed":
         if p.get("step") == "start":
             return "Run started: %s, model %s." % (_token(p.get("mode")), _token(p.get("model_source")))
         name, addr = _text(p.get("from_name")), _text(p.get("from_addr"))
+        if p.get("step") == "booking_check":        # ruling 17: her own calendar check, no mail read
+            reads = p.get("reads")
+            how = ("marked gone before a restart" if p.get("recovered") is True else
+                   "missing on %s" % _s(_int(reads), "read") if _int(reads) else "missing")
+            return "Her calendar check, no mail: her booking %s%s is gone from the calendar (%s)." % (
+                _token(p.get("booking_id")), " with %s" % ("%s <%s>" % (name, addr) if name else addr) if addr else "",
+                how)
         if addr:
             text = "Read a message from %s." % ("%s <%s>" % (name, addr) if name else addr)
         else:
@@ -219,14 +294,24 @@ def _what(kind, p):
             text += ", %s" % _token(p.get("template"))
         if p.get("booking_id"):
             text += ", booking %s" % _token(p.get("booking_id"))
+        if isinstance(p.get("follow_up"), dict):
+            text += ". Follow-up filed: %s" % _follow_up(p)
         return text + "."
     if kind == "decided":
         if p.get("step") == "plan":
             template = p.get("template")
             return "Plan: %s%s." % (_token(p.get("action")), ", " + _token(template) if template else "")
-        return "Decided."
+        return _follow_up_line(p) or "Decided."
     if kind == "held":
-        return "Held for the owner: %s." % _token(p.get("outcome"))
+        text = "Held for the owner: %s." % _token(p.get("outcome"))
+        if p.get("step") == "booking_check":
+            text += {"sent": " Hold notice sent to the owner; nothing sent to the prospect.",
+                     "handed_over": " Hold notice handed to the mail server, not yet seen in Sent; nothing sent to "
+                                    "the prospect.",
+                     "unknown": " The hold notice may have gone (not confirmed in Sent); nothing sent to the prospect.",
+                     "none": " No hold notice went; the digest lists the hold. Nothing sent to the prospect.",
+                     }.get(gone_notice(p), " Whether a hold notice went is not recorded. Nothing sent to the prospect.")
+        return text
     if kind == "checked":
         if p.get("passed") is True:
             return "Gate on %s: passed." % _token(p.get("action"))
@@ -237,6 +322,9 @@ def _what(kind, p):
             text += " to the %s" % _token(p.get("to"))
         if _int(p.get("attempt")) > 1:
             text += ", attempt %d" % p["attempt"]
+        if p.get("call") == "calendar_get" and "booking_check" in p:
+            text += (", her check that the booking is still on the calendar" +
+                     (" (read again after a short wait)" if p.get("booking_check") == 2 else ""))
         return text + "."
     if kind == "result":
         ok = p.get("ok") is True
@@ -259,6 +347,9 @@ def _what(kind, p):
     if kind == "error" and "moved_to" in p:     # the writer's own line: a cut-off line moved aside, on reopening
         return "A cut-off line (%d bytes after line %s) was moved aside to %s." % (
             _int(p.get("torn_bytes")), _token(p.get("after_seq")), _token(p.get("moved_to")))
+    if kind == "error" and p.get("step") == "booking_check" and p.get("read") == "failed":
+        return ("Her calendar check could not read her booking %s. That is never \"missing\": she reads it again "
+                "at her next cycle." % (_token(p.get("booking_id")),))
     if kind == "error":
         error = p.get("error")
         name = error.split(":", 1)[0] if isinstance(error, str) else None
@@ -276,9 +367,25 @@ def _tone(kind, p):
     return TONES.get(kind, "read")
 
 
+def _pacific(utc):
+    """An aware instant on the Pacific wall clock, as the terminal tells times: 'Tue Dec 1, 8:10:05 AM'."""
+    t = zones.to_local(utc, "Pacific")
+    clock = "%d:%02d:%02d" % ((t.hour + 11) % 12 + 1, t.minute, t.second)
+    return "%s %s %d, %s %s" % ("Mon Tue Wed Thu Fri Sat Sun".split()[t.weekday()],
+                                "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()[t.month - 1], t.day,
+                                clock, "AM" if t.hour < 12 else "PM")
+
+
 def _time(ts):
+    """A receipt line's time (UTC on the line) on the Pacific clock, as the terminal shows it."""
     m = _TS.match(ts) if isinstance(ts, str) else None
-    return "%s %s" % m.groups() if m else "?"
+    if not m:
+        return "?"
+    try:
+        return _pacific(_dt.datetime.strptime("%s %s" % m.groups(), "%Y-%m-%d %H:%M:%SZ").replace(
+            tzinfo=_dt.timezone.utc))
+    except (ValueError, OverflowError):     # not a date, or one the Pacific clock can't reach (year 1)
+        return "?"
 
 
 def row(line):
@@ -289,7 +396,9 @@ def row(line):
         "seq": _int(line.get("seq")),
         "hash": _token(hash_[:8], "") if isinstance(hash_, str) else "",
         "time": _time(line.get("ts")),
-        "step": "start" if kind == "observed" and p.get("step") == "start" else STEPS.get(kind, "?"),
+        "step": ("start" if kind == "observed" and p.get("step") == "start" else
+                 "calendar check" if kind == "observed" and p.get("step") == "booking_check" else
+                 STEPS.get(kind, "?")),
         "message": _text(line.get("subject")),
         "what": _what(kind, p),
         "why": _text(why.get("text"), 400),       # written by code from the fixed list (why.py)
@@ -308,7 +417,12 @@ SOURCE_WORDS = {
             "every receipt says stub.",
     "replayed": "Model answers replayed from a recorded real run; no model is called now.",
     "live": "Model called live; the cost is measured.",
+    "yes-man": "No model: the yes-man stand-in (redteam) gives the most permissive valid answer and obeys any "
+               "instruction in the mail, so the gate alone bounds what she does.",
 }
+# smoke.py runs her loop itself, not under the supervisor: her own halt check stops it, between calls
+SMOKE_WORDS = ("The smoke's own run of her loop, on its one test request, without the kill switch's supervisor: "
+               "a Stop halts such a run at her next check, after any call in flight returns, not mid-call.")
 
 
 def _chain(path):
@@ -325,11 +439,12 @@ def _chain(path):
     shown = _text(path, 400)
     if not result.ok:
         reason = result.reason.split(": ", 1)[-1]
-        return good, False, ("Chain BROKEN at line %d: %s. Check it with python -m doris verify %s"
-                             % (result.first_bad_seq, reason, shown)), result.first_bad_seq
+        return good, False, ("Chain BROKEN at line %d: %s. Check it with %s %s"
+                             % (result.first_bad_seq, reason, paths.command("verify"), shown)), result.first_bad_seq
     if torn and good and good[-1]["kind"] in receipts.CLOSING_KINDS and not receipts._summary_follows(good[-1]):  # noqa: SLF001
         return good, False, ("Chain BROKEN after its closing line (line %d): %d bytes follow it that are not a whole "
-                             "line. Check it with python -m doris verify %s" % (len(good), len(torn), shown)), len(good) + 1
+                             "line. Check it with %s %s"
+                             % (len(good), len(torn), paths.command("verify"), shown)), len(good) + 1
     if torn:
         return good, True, ("Chain verified through line %d; the line after it is still being written, "
                             "or was cut short." % len(good)), None
@@ -396,7 +511,7 @@ def _decision_note(decisions):
 
 
 def _clock(ns):
-    return _dt.datetime.fromtimestamp(ns / 1e9, _dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return "%s Pacific" % _pacific(_dt.datetime.fromtimestamp(ns / 1e9, _dt.timezone.utc))
 
 
 def snapshot(run):
@@ -407,8 +522,8 @@ def snapshot(run):
                 "status": "", "chain": "", "chain_ok": True, "state": "none",
                 "panes": [{"label": label, "value": "\u2014", "note": ""} for label in LABELS],
                 "rows": [], "after": 0, "more": "",
-                "empty": "No run yet. Start one with python -m doris demo, or python -m doris run; this page "
-                         "picks it up as soon as it starts."}
+                "empty": "No run yet. Start one with %s, or %s; this page picks it up as soon as it "
+                         "starts." % (paths.command("demo"), paths.command("run"))}
     path = os.path.join(run.folder, "receipts.jsonl")
     landed = None
     if os.path.exists(path):
@@ -501,7 +616,8 @@ def snapshot(run):
             if len(rows) > MAX_ROWS else "")
     name = _text(run.name, 200)          # a folder name is bytes on disk, not always text
     return {"run": name, "title": "Doris watch: " + name, "run_line": "Run %s" % name,
-            "source": " ".join(w for w in (MODE_WORDS.get(mode, ""), SOURCE_WORDS.get(source, "")) if w),
+            "source": " ".join(w for w in (MODE_WORDS.get(mode, ""), SOURCE_WORDS.get(source, ""),
+                                           SMOKE_WORDS if run.smoke else "") if w),
             "status": status, "chain": chain, "chain_ok": chain_ok, "state": state, "panes": panes,
             "rows": rows, "after": max([r["seq"] for r in rows] or [0]), "more": more, "empty": ""}
 
@@ -513,7 +629,7 @@ def unreadable(run, exc):
     return {"run": name, "title": "Doris watch: receipts not shown",
             "run_line": "Run %s" % name if run is not None else "", "source": "",
             "status": "The receipts could not be shown (%s). The Stop button still works. Check them with "
-                      "python -m doris verify %s" % (exc.__class__.__name__, path),
+                      "%s %s" % (exc.__class__.__name__, paths.command("verify"), path),
             "chain": "", "chain_ok": False, "state": "unreadable",
             "panes": [{"label": label, "value": "?", "note": ""} for label in LABELS],
             "rows": [], "after": 0, "more": "", "empty": ""}
@@ -551,7 +667,7 @@ _WHERE = {"sandbox": "the sandbox", "live": "live"}
 
 def pressed_words(done, failed, now):
     """The page's one line about a press of its Stop button."""
-    words = ["Stop pressed %s UTC." % now.strftime("%Y-%m-%d %H:%M:%S")]
+    words = ["Stop pressed %s Pacific." % _pacific(now)]
     if done:
         if all(cause == CAUSE for _, cause in done):
             words.append("Halted in %s." % " and ".join(_WHERE.get(m, m) for m, _ in done))
@@ -559,11 +675,11 @@ def pressed_words(done, failed, now):
             words.append("Halted in %s." % " and ".join(
                 "%s (%s)" % (_WHERE.get(m, m), supervisor.CAUSE_WORDS.get(c, c)) for m, c in done))
     if failed:
-        words.append("NOT halted: %s. Run python -m doris stop now."
-                     % ", ".join("%s (%s)" % (m, e) for m, e in failed))
+        words.append("NOT halted: %s. Run %s now."
+                     % (", ".join("%s (%s)" % (m, e) for m, e in failed), paths.command("stop")))
     else:
-        words.append("A run in progress is killed mid-call and its receipt names what was dropped. Nothing more "
-                     "is sent or booked until python -m doris resume.")
+        words.append("A run under the kill switch is killed mid-call and its receipt names what was dropped. Nothing more "
+                     "is sent or booked until %s." % paths.command("resume"))
     return " ".join(words)
 
 
@@ -730,8 +846,8 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
   <form class="stop" method="post" action="/stop">
     <input type="hidden" name="token" value="$token">
     <div class="sign"><button type="submit">Stop</button></div>
-    <p>Halts Doris now, mid-call, in the sandbox and live, as <code>python -m doris stop</code> does.
-      Only <code>python -m doris resume</code>, on the command line, lets her run again.</p>
+    <p>Halts Doris now in the sandbox and live, as <code id="stop-cmd">$stop_cmd</code> does. A run under the kill switch is killed mid-call.
+      Only <code>$resume_cmd</code>, on the command line, lets her run again.</p>
     <p id="pressed" role="status">$pressed</p>
   </form>
 </header>
@@ -750,7 +866,7 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
   <p id="empty">$empty</p>
   <p id="more">$more</p>
   <div class="scroll"><table>
-    <thead><tr><th scope="col">Line</th><th scope="col">Time (UTC)</th><th scope="col">Step</th>
+    <thead><tr><th scope="col">Line</th><th scope="col">Time (Pacific)</th><th scope="col">Step</th>
       <th scope="col">Message</th><th scope="col">What happened</th><th scope="col">Why</th></tr></thead>
     <tbody id="steps" data-run="$run" data-after="$after" data-tip="$tip">$rows</tbody>
   </table></div>
@@ -829,7 +945,7 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
   }
   function lost() {
     put("lost", "This page has lost touch with the watch command, so it is not live and its Stop button " +
-        "cannot reach her. Stop her on the command line: python -m doris stop");
+        "cannot reach her. Stop her on the command line: " + document.getElementById("stop-cmd").textContent);
   }
   function poll() {
     fetch("/state?run=" + encodeURIComponent(run) + "&after=" + after + "&tip=" + encodeURIComponent(tip),
@@ -857,7 +973,7 @@ def boot_id(token):
 
 
 def checked_words(now):
-    return "Page updated %s UTC." % now.strftime("%Y-%m-%d %H:%M:%S")
+    return "Page updated %s Pacific." % _pacific(now)
 
 
 def render_page(snap, token, nonce, pressed="", now=None):
@@ -869,6 +985,7 @@ def render_page(snap, token, nonce, pressed="", now=None):
               "state": _e(snap["state"]), "pressed": _e(pressed), "empty": _e(snap["empty"]),
               "after": int(snap["after"]), "poll": int(POLL_MS), "max_rows": int(MAX_ROWS),
               "boot": _e(boot_id(token)), "checked": _e(checked_words(now)), "more": _e(snap["more"]),
+              "stop_cmd": _e(paths.command("stop")), "resume_cmd": _e(paths.command("resume")),
               "tip": _e(snap["rows"][-1]["hash"] if snap["rows"] else ""),
               "rows": "".join(_row_html(r) for r in reversed(snap["rows"][-MAX_ROWS:]))}
     for i, pane in enumerate(snap["panes"]):
@@ -910,9 +1027,9 @@ class WatchServer(ThreadingHTTPServer):
 
     def view(self):
         """(the newest run's snapshot, the line about a press of Stop). The snapshot is read again only when
-        the receipt file has changed. The press line stays until a run with receipts whose config.json was
-        written after the press: that run got past the halt, so `resume` had cleared it. A press that failed
-        anywhere is said until watch closes."""
+        the receipt file has changed. The press line stays until a run with receipts is known to have started
+        after the press (its config.json, or the smoke's stamp): that run got past the halt, so `resume` had
+        cleared it. A press that failed anywhere is said until watch closes."""
         run = newest_run()
         key = None
         if run is not None:
@@ -937,13 +1054,10 @@ class WatchServer(ThreadingHTTPServer):
                 key = None
             with self._lock:
                 self._cache = (key, snap) if key is not None else None
-        if pressed and not failed and run is not None and run.has_receipts:
-            try:                            # its config.json: written before the halt check, never by a halt
-                configured = os.stat(os.path.join(run.folder, "config.json")).st_mtime_ns
-            except OSError:
-                configured = None
-            if configured is not None and configured > pressed_ns:
-                pressed = ""                # a press that failed anywhere is said until watch closes
+        # a run's known start (config.json, or the smoke's stamp) comes before its halt check; a press that
+        # failed anywhere is said until watch closes
+        if pressed and not failed and run is not None and run.has_receipts and run.known and run.started > pressed_ns:
+            pressed = ""
         return snap, pressed
 
     def press(self):
@@ -1044,7 +1158,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _refuse(self, status, why):
         text = "Refused a Stop request: %s. Nothing was stopped." % why
         self.server.say(text)
-        return self._text(status, text + " Use the Stop button on the page, or `python -m doris stop`.")
+        return self._text(status, text + " Use the Stop button on the page, or `%s`." % paths.command("stop"))
 
 
 # ------------------------------------------------------------------------------------------
@@ -1052,7 +1166,7 @@ class _Handler(BaseHTTPRequestHandler):
 # ------------------------------------------------------------------------------------------
 def main(argv) -> int:
     ap = argparse.ArgumentParser(
-        prog="python -m doris watch",
+        prog=paths.command("watch"),
         description="The live page: every step of the newest run, why, and its cost so far, with one Stop "
                     "button. Served on 127.0.0.1 only.")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT, help="the port on 127.0.0.1 (default %d)" % DEFAULT_PORT)
@@ -1063,12 +1177,12 @@ def main(argv) -> int:
     try:
         server = WatchServer(args.port)
     except OSError as exc:
-        print("Not started: port %d on %s can't be used (%s). Try another, or `python -m doris watch --port 0` "
-              "for any free one." % (args.port, HOST, exc.__class__.__name__))
+        print("Not started: port %d on %s can't be used (%s). Try another, or `%s` "
+              "for any free one." % (args.port, HOST, exc.__class__.__name__, paths.command("watch --port 0")))
         return 2
     _say("Watch page: %s (this computer only). It follows the newest run, sandbox or live, as its receipts "
-         "land. Its Stop button halts her as `python -m doris stop` does. Ctrl+C closes the page; it does not "
-         "stop her." % server.url)
+         "land. Its Stop button halts her as `%s` does. Ctrl+C closes the page; it does not "
+         "stop her." % (server.url, paths.command("stop")))
     try:
         server.serve_forever(poll_interval=0.25)
     except KeyboardInterrupt:

@@ -1,0 +1,6 @@
+Live. Every setting from the env file /root/doris-secrets/.env; model called live (claude-sonnet-5-5). She reads her own inbox every 10 minutes until `python -m doris stop`. A fresh live ledger: she reads only mail that arrives from now on.
+Fri Nov 27, 10:52 PM Pacific  Digest sent to the owner: Handled 0, held 0, human approvals 0. Fri Nov 27
+Fri Nov 27, 11:00 PM Pacific  wolf.whizz@fastmail.com: offer. T4 sent. The time they wrote is not bookable or not available (overlap): offer other times. Model cost $0.0038.
+Fri Nov 27, 11:20 PM Pacific  wolf.whizz@fastmail.com: book. T1 sent. They picked slot 1 of the open offer: book it. Model cost $0.0038.
+Halted: stop on the command line. The worker was dead 59 ms after the stop. Nothing in flight. Dropped 0 queued item(s). Run `python3 -m doris resume` to go on.
+Live trace kept in traces/live-run-20261128T065251Z: outcome pass.

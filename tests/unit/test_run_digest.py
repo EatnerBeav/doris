@@ -13,6 +13,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -41,13 +42,17 @@ def digest_mid(day):
 
 class NoWait(object):
     """loop._time and loop._sleep: each wait for her next cycle is one sleep that takes no time,
-    after which waited() runs."""
+    after which waited() runs. wall is the files' clock (the sandbox adapter's): her waits pass on it
+    as they would for real, so a mail written during one is older than two seconds at her next pass."""
 
     def __init__(self, waited):
         self.now, self.waited = 1000.0, waited
 
     def time(self):
         return self.now
+
+    def wall(self):
+        return time.time() + (self.now - 1000.0)
 
     def sleep(self, seconds):
         self.now += seconds
@@ -101,7 +106,8 @@ class LongRun(unittest.TestCase):
                 supervisor.request_stop("throwaway", "cli", state_dir=self.state)
 
         fake = NoWait(waited)
-        with mock.patch.object(loop, "_time", fake.time), mock.patch.object(loop, "_sleep", fake.sleep):
+        with mock.patch.object(loop, "_time", fake.time), mock.patch.object(loop, "_sleep", fake.sleep), \
+                mock.patch.object(sandbox_mod, "_wall", fake.wall):
             try:
                 return loop.run(self.config(digest=True, cycles=None, cycle_s=1.0))
             finally:
@@ -142,7 +148,7 @@ class DueAtFive(LongRun):
         self.assertEqual(len(self.digest_checks(s)), 1)
         self.assertEqual(self.send_state("2026-12-01"), "confirmed")
         self.assertIn("Tue Dec 1, 5:00 PM Pacific  Digest sent to the owner: "
-                      "Handled 0, held 0, human approvals 0. Tue Dec 1", self.said)
+                      "Handled 0, held 0, human approvals 0.", self.said)    # the date is the line's own, once
         self.assertTrue(receipts.verify(s.receipts_path, finished=True).ok)
 
     def test_one_digest_for_each_pacific_date_however_many_passes(self):
@@ -170,6 +176,19 @@ class NeverTwice(LongRun):
         self.assertEqual(self.digest_checks(again), [])
         self.assertEqual([l for l in receipts.read_lines(again.receipts_path)
                           if l["kind"] == "called" and l["payload"]["call"] in ("send", "sent_lookup")], [])
+
+    def test_a_finite_run_whose_days_digest_went_in_an_earlier_run_says_so_and_claims_no_send(self):
+        self.clock(TUE_450PM)
+        loop.run(self.config(digest=True))                # the demo's shape: one pass, then the day's digest
+        self.assertEqual(len([l for l in self.said if "Digest sent to the owner: " in l]), 1, self.said)
+        del self.said[:]
+        again = loop.run(self.config(digest=True))        # the same day again on the same ledger
+        self.assertEqual(len(self.digests()), 1)
+        self.assertEqual([l for l in receipts.read_lines(again.receipts_path)
+                          if l["kind"] == "called" and l["payload"]["call"] == "send"], [])
+        self.assertEqual([l for l in self.said if "Digest" in l],
+                         ["Tue Dec 1, 5:00 PM Pacific  Digest already sent to the owner earlier today; "
+                          "not sent twice."])
 
     def test_a_kill_after_the_hand_over_before_the_record_sends_nothing_more(self):
         self.clock(TUE_450PM)
@@ -293,6 +312,79 @@ class Window(LongRun):
         self.run_until_stopped(passes=3)
         (sent,) = self.digests()
         self.assertEqual(sent[1][:2], ["Handled 1, held 0, human approvals 0. Tue Dec 1", "Receipts verify: no."])
+
+
+class FiniteRunWholeDay(LongRun):
+    """The demo's digest (a finite run with the digest on) counts the whole day as the daily digest
+    does: every run of the mode since the last digest the server took. Stopped part way, resumed and
+    run again, its first line is the day's, as the end-of-day summary's is, never only what the run
+    after the stop did."""
+    names = ("01-priya-request.eml", "02-marcus-request.eml", "05-opsweekly-newsletter.eml", ELENA)
+
+    def stopped_part_way(self):
+        """One demo-shaped run that a stop ends right after Marcus's offer closes."""
+        real = loop._Run.close
+
+        def close_then_stop(run, e, kind, outcome, *a, **k):
+            out = real(run, e, kind, outcome, *a, **k)
+            if outcome == "offer":
+                supervisor.request_stop("throwaway", "cli", state_dir=self.state)
+            return out
+
+        with mock.patch.object(loop._Run, "close", close_then_stop):
+            first = loop.run(self.config(digest=True))
+        self.assertEqual(first.halted, "cli")
+        supervisor.resume("throwaway", state_dir=self.state)
+        return first
+
+    def test_a_day_run_in_one_go_and_a_day_stopped_and_resumed_report_the_same_digest(self):
+        whole = loop.run(self.config(digest=True))
+        ((_, in_one_go),) = self.digests()
+        self.assertEqual((whole.handled, whole.held), (3, 1))
+        self.assertEqual(in_one_go[0], "Handled 3, held 1, human approvals 0. Tue Dec 1")
+        self.setUp()                                      # the same day again from nothing, stopped part way
+        first = self.stopped_part_way()
+        self.assertEqual(self.digests(), [])              # a halted run sends no digest
+        second = loop.run(self.config(digest=True))
+        self.assertEqual((first.handled + second.handled, first.held + second.held), (3, 1))
+        self.assertLess(second.handled, 3)                # the run after the stop did only the rest of the day
+        ((_, resumed),) = self.digests()
+        self.assertEqual(resumed, in_one_go)
+        self.assertIn("Digest sent to the owner: Handled 3, held 1, human approvals 0.", self.said[-1])
+
+    def test_it_lists_what_the_stopped_run_did_and_verifies_both_runs(self):
+        self.stopped_part_way()
+        loop.run(self.config(digest=True))
+        ((_, body),) = self.digests()
+        self.assertIn("Offered times to: Marcus Lee", body)                  # offered before the stop
+        self.assertIn("Follow-ups filed: 1 nudge, 1 booking check.", body)  # filed before the stop
+        self.assertIn(ELENA_HELD % "1:10", body)                             # held after the resume
+        self.assertTrue([l for l in body if l.endswith("Receipts verify: yes.")], body)
+
+    def test_a_message_read_again_after_the_stop_counts_once(self):
+        real = loop._Run.reply
+
+        def stop_before_the_offer(run, e, f, template, *a, **k):
+            if template == "T2":
+                supervisor.request_stop("throwaway", "cli", state_dir=self.state)
+            return real(run, e, f, template, *a, **k)
+
+        with mock.patch.object(loop._Run, "reply", stop_before_the_offer):
+            first = loop.run(self.config(digest=True))    # Marcus was observed, never closed: read again after
+        self.assertEqual(first.halted, "cli")
+        supervisor.resume("throwaway", state_dir=self.state)
+        loop.run(self.config(digest=True))
+        ((_, body),) = self.digests()
+        self.assertEqual(body[0], "Handled 3, held 1, human approvals 0. Tue Dec 1")
+
+    def test_receipts_of_an_earlier_run_that_cannot_be_read_send_no_digest_and_say_so(self):
+        first = self.stopped_part_way()
+        os.remove(first.receipts_path)
+        second = loop.run(self.config(digest=True))
+        self.assertEqual(self.digests(), [])
+        self.assertEqual([l["payload"]["step"] for l in receipts.read_lines(second.receipts_path)
+                          if l["kind"] == "error"], ["digest"])
+        self.assertTrue([l for l in self.said if "Digest not sent: " in l], self.said)
 
 
 class FailsClosed(LongRun):

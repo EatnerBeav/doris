@@ -146,6 +146,10 @@ class TempState(unittest.TestCase):
     def look(self):
         return watch.snapshot(watch.newest_run())
 
+    def look_at(self, name, mode="live"):
+        folder = os.path.join(self.state, mode, "runs", name)
+        return watch.snapshot(watch.Run(name, folder, mode, 0, True, False, True))
+
 
 def serve(test, say=None):
     """A watch server on a free port in a thread of its own, shut down at the test's end."""
@@ -305,7 +309,7 @@ class Panes(TempState):
     def test_no_run_yet_says_how_to_start_one(self):
         snap = self.look()
         self.assertEqual((snap["run"], snap["rows"], snap["state"]), ("", [], "none"))
-        self.assertIn("python -m doris demo", snap["empty"])
+        self.assertIn(paths.command("demo"), snap["empty"])
         self.assertEqual(snap["title"], "Doris watch: no run yet")
         page = watch.render_page(snap, token="t", nonce="n")
         self.assertIn("<h2>Current step</h2>", page)
@@ -325,7 +329,7 @@ class Panes(TempState):
                                "Latest: Held: money in the sender's own words."))
         self.assertEqual((cost["value"], cost["note"]), ("$0.0042 (recorded)", "2 model calls."))
         self.assertEqual(snap["status"], "No closing line yet: 1 handled, 1 held, 0 human approvals so far. "
-                                         "Last line landed at 2026-11-21 00:00:00 UTC.")
+                                         "Last line landed at Fri Nov 20, 4:00:00 PM Pacific.")
         self.assertIn("replayed", snap["source"])
 
     def test_a_live_run_costs_what_was_measured(self):
@@ -417,6 +421,48 @@ class Panes(TempState):
         write_run(self.state, "model-stub-sandbox-20261128T020000Z", [start_line("c", "stub")], started=now)
         run = watch.newest_run()
         self.assertEqual((run.name, run.mode), ("model-stub-sandbox-20261128T020000Z", "sandbox"))
+
+    def test_the_smokes_own_run_of_her_loop_is_watched_and_its_stop_is_said_plainly(self):
+        now = time.time()
+        older = "model-live-live-20261128T050000Z"
+        write_run(self.state, older, [start_line(older, "live", "live")], mode="live", started=now - 60)
+        stamp = _dt.datetime.fromtimestamp(now, _dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        name = "model-live-live-smoke-" + stamp
+        folder = os.path.join(self.state, "live", "smoke", stamp, "runs", name)
+        os.makedirs(folder)                 # where smoke.py runs her loop: no config.json, its own ledger
+        writer = receipts.ReceiptWriter(os.path.join(folder, "receipts.jsonl"), name, "live", clock=lambda: T0)
+        writer.write(*start_line(name, "live", "live"))
+        run = watch.newest_run()
+        self.assertEqual((run.name, run.mode, run.folder), (name, "live", folder))
+        snap = self.look()
+        self.assertEqual(snap["run"], name)
+        # her loop under the smoke has no supervisor to kill it mid-call: the page must not imply one
+        self.assertIn("The smoke's own run of her loop", snap["source"])
+        self.assertIn("a Stop halts such a run at her next check, after any call in flight returns, not mid-call",
+                      snap["source"])
+        page = watch.render_page(snap, token="t", nonce="n", pressed=watch.pressed_words(
+            [("sandbox", "watch_button"), ("live", "watch_button")], [], _dt.datetime(2026, 11, 28, tzinfo=_dt.timezone.utc)))
+        self.assertNotRegex(page.replace("not mid-call", ""), r"(?<!kill switch is killed )mid-call")
+        self.assertNotIn("smoke", self.look_at(older)["source"])
+
+    def test_a_smoke_run_started_when_its_stamp_says_not_when_its_last_line_landed(self):
+        now = time.time()
+        stamp = _dt.datetime.fromtimestamp(now - 100, _dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        smoke = "model-live-live-smoke-" + stamp
+        going = "model-stub-sandbox-20261128T060000Z"
+        write_run(self.state, going, [start_line(going, "stub")], started=now - 50)
+        folder = os.path.join(self.state, "live", "smoke", stamp, "runs", smoke)
+        os.makedirs(folder)
+        writer = receipts.ReceiptWriter(os.path.join(folder, "receipts.jsonl"), smoke, "live", clock=lambda: T0)
+        writer.write(*start_line(smoke, "live", "live"))     # its closing line lands now, after the sandbox run began
+        self.assertEqual(watch.newest_run().name, going)
+
+    def test_a_yes_man_run_is_named_for_what_answers(self):
+        folder = os.path.join(self.state, "sandbox", "runs", "model-yes-man-sandbox-20261128T030000Z")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "config.json"), "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        self.assertIn("yes-man", self.look()["source"])
 
     def test_a_run_whose_receipts_are_not_written_yet_is_starting(self):
         folder = os.path.join(self.state, "sandbox", "runs", "model-stub-sandbox-20261128T030000Z")
@@ -652,8 +698,8 @@ class Server(TempState):
         self.assertEqual(supervisor.halt_cause("sandbox"), "watch_button")
         self.assertEqual(supervisor.halt_cause("live"), "watch_button")
         page = ask(self.server, "GET", "/")[2].decode("utf-8")
-        self.assertRegex(page, r"Stop pressed \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC")
-        self.assertIn("python -m doris resume", page)
+        self.assertRegex(page, r"Stop pressed \w{3} \w{3} \d{1,2}, \d{1,2}:\d\d:\d\d [AP]M Pacific\.")
+        self.assertIn(paths.command("resume"), page)
         self.assertEqual(len(self.said), 1)
         self.assertIn("Stop pressed", self.said[0])
 
@@ -683,6 +729,18 @@ class Server(TempState):
         newer = "model-stub-live-20261128T020000Z"
         write_run(self.state, newer, [start_line(newer, "stub", "live")], mode="live", started=time.time() + 5)
         self.assertIn("NOT halted: live (OSError)", state_json(self.server)["pressed"])
+
+    def test_a_press_is_dropped_once_a_newer_smoke_run_has_started(self):
+        self.assertEqual(press(self.server)[0], 303)
+        for mode in cli.STOP_MODES:
+            self.assertTrue(supervisor.resume(mode).ok)
+        stamp = _dt.datetime.fromtimestamp(time.time() + 5, _dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        smoke = "model-live-live-smoke-" + stamp
+        folder = os.path.join(self.state, "live", "smoke", stamp, "runs", smoke)
+        os.makedirs(folder)
+        writer = receipts.ReceiptWriter(os.path.join(folder, "receipts.jsonl"), smoke, "live", clock=lambda: T0)
+        writer.write(*start_line(smoke, "live", "live"))
+        self.assertEqual(state_json(self.server)["pressed"], "")
 
     def test_a_press_is_not_dropped_for_a_run_with_no_config(self):
         self.assertEqual(press(self.server)[0], 303)
@@ -751,7 +809,8 @@ class Server(TempState):
         def request_stop(mode, cause="cli", state_dir=None):
             calls.append((mode, cause, state_dir))
             return cause
-        with mock.patch.object(supervisor, "request_stop", side_effect=request_stop):
+        with mock.patch.object(supervisor, "request_stop", side_effect=request_stop), \
+                mock.patch.object(supervisor, "halt_cause", return_value="cli"):    # stop reads its halt back
             self.assertEqual(run_cli(["stop"])[0], 0)
             by_cli = list(calls)
             del calls[:]
@@ -771,7 +830,7 @@ class Server(TempState):
         self.assertEqual(status, 500)
         text = body.decode("utf-8")
         self.assertIn("NOT halted: live (PermissionError)", text)
-        self.assertIn("python -m doris stop", text)
+        self.assertIn(paths.command("stop"), text)
         self.assertEqual(supervisor.halt_cause("sandbox"), "watch_button")
         self.assertIsNone(supervisor.halt_cause("live"))
 

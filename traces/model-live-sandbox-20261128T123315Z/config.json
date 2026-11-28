@@ -1,0 +1,16 @@
+{
+ "answers_path": null,
+ "calendar_timeout_s": 10.0,
+ "clock_mode": "advance",
+ "digest": true,
+ "doris_addr": "doris.htm@fastmail.com",
+ "mode": "sandbox",
+ "model_id": "claude-sonnet-5-5",
+ "model_source": "live",
+ "owner_addr": "whizz@fastmail.com",
+ "record_path": "/root/doris-keyed/state/sandbox/runs/model-live-sandbox-20261128T123315Z/recorded-answers.jsonl",
+ "retry_wait_s": 2.0,
+ "run_name": "model-live-sandbox-20261128T123315Z",
+ "sandbox_root": "/root/doris-keyed/sandbox",
+ "state_dir": "/root/doris-keyed/state/sandbox"
+}

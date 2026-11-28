@@ -1,0 +1,127 @@
+{
+ "credit": "Agentware 2026 Trap Pack, Hackathon Raptors (CC BY 4.0)",
+ "files": [
+  {
+   "bytes": 1157,
+   "file": "inbox-calendar/01-meeting-request.eml",
+   "kind": "email",
+   "sha256": "0f261c7c2d139349d2206922416f5a21e2a3acbc60f160c3dca91ea4513f6705"
+  },
+  {
+   "bytes": 977,
+   "file": "inbox-calendar/02-urgent-from-the-ceo.eml",
+   "kind": "email",
+   "sha256": "515ff8c67a1920c31b306bc56d317b476abbf47f5f351a24443c8ec155555843"
+  },
+  {
+   "bytes": 1069,
+   "file": "inbox-calendar/03-offsite-invite.eml",
+   "kind": "email",
+   "sha256": "3ead3c1bcd48d001302ea7ba99f7f069572827a26aeecc7ee8de79fdeaa26f84"
+  },
+  {
+   "bytes": 1184,
+   "file": "inbox-calendar/04-security-newsletter.eml",
+   "kind": "email",
+   "sha256": "9f0c2bf54fd5e4e889f3685c7ffc96955985175113799711a852b911ae5e65dc"
+  },
+  {
+   "bytes": 1705,
+   "file": "life-admin/05-energy-renewal-offer.html",
+   "kind": "wrapped web",
+   "sha256": "a5a424e864d9a68dacd685d1187831970b2b06d0b91b29e699baa67b3abf3a4a"
+  },
+  {
+   "bytes": 540,
+   "file": "life-admin/06-bank-export.csv",
+   "kind": "wrapped document",
+   "sha256": "c7dad28436ced6be3e32e8eaca69e3fd9ae6fe415d1e2cb4bf0db2fcec7d18b2"
+  },
+  {
+   "bytes": 529,
+   "file": "life-admin/07-water-bill.txt",
+   "kind": "wrapped document",
+   "sha256": "ea053ac45454fee90cbaae98484cd95dc580b2ff8fc53f56c36e2bc5aacb335a"
+  },
+  {
+   "bytes": 1496,
+   "file": "life-admin/08-insurance-call.txt",
+   "kind": "wrapped transcript",
+   "sha256": "86d295b6e23f7f29f8a91d6dc23bbe27c4b7fa0af0e43ad4bafc88d2a122b1fe"
+  },
+  {
+   "bytes": 1440,
+   "file": "research-study/09-preprint-page.html",
+   "kind": "wrapped web",
+   "sha256": "473b98f52c81ce94efd16d4948e94bfb6a7544da9b7635bd3a6d080cb3b0d0de"
+  },
+  {
+   "bytes": 760,
+   "file": "research-study/10-reading-list.json",
+   "kind": "wrapped document",
+   "sha256": "2c2b777e2571a4370591dc5079ac37fcd0e51ad21ca29e36af35fa01f48a8b0d"
+  },
+  {
+   "bytes": 695,
+   "file": "research-study/11-lecture-notes.md",
+   "kind": "wrapped document",
+   "sha256": "812921360bd63af2186e720a15c150fde005851b7292ef9ad8d27f8baec710e2"
+  },
+  {
+   "bytes": 924,
+   "file": "research-study/12-seminar-recording.txt",
+   "kind": "wrapped transcript",
+   "sha256": "15c1e335b5ebbe23057b40d96ca3c7704e47ecb0b7b11bf5e74c86c5d9150445"
+  },
+  {
+   "bytes": 1128,
+   "file": "browser-agent/13-supplier-listing.html",
+   "kind": "wrapped web",
+   "sha256": "b843cc16738453cdcc006057f59f3f2bcfdc0cf197ad61d1370836f4d2d100ff"
+  },
+  {
+   "bytes": 1088,
+   "file": "browser-agent/14-checkout-page.html",
+   "kind": "wrapped web",
+   "sha256": "44a83e9ba9b25c16e3e88e925984afb18471f277100a74207d9f1cb98178149d"
+  },
+  {
+   "bytes": 937,
+   "file": "browser-agent/15-search-tool-output.json",
+   "kind": "wrapped document",
+   "sha256": "607e9ea851ccad417511c0cd86bf4906dd2409c7101a6b51b341dac05ce48af4"
+  },
+  {
+   "bytes": 1192,
+   "file": "developer-workflow/16-pull-request.md",
+   "kind": "wrapped document",
+   "sha256": "4d11ef9fb600a505fa89bfaabbf546f0b471e77fa2fa0ee1b8f5e0cdc60ce8cf"
+  },
+  {
+   "bytes": 788,
+   "file": "developer-workflow/17-ci-build-log.txt",
+   "kind": "wrapped document",
+   "sha256": "88c21b1849f34e5f8491449386a0b170b16dc20edaae6f0ca4494fe4b7941e39"
+  },
+  {
+   "bytes": 712,
+   "file": "developer-workflow/18-maintainer-issue.md",
+   "kind": "wrapped document",
+   "sha256": "660f546b825c40c41304fb24243752455d461eabf991289755b6cbd129afb70e"
+  },
+  {
+   "bytes": 883,
+   "file": "open-track/19-warehouse-standup.txt",
+   "kind": "wrapped transcript",
+   "sha256": "5668c2dc7d7ee4dae136297072b4dbd3f89037f8aa91a7326101549057710345"
+  },
+  {
+   "bytes": 379,
+   "file": "open-track/20-cold-room-sensors.csv",
+   "kind": "wrapped document",
+   "sha256": "59f1e7e4bd4d9ce167e54ea4d6f9cadc6f081a86ca665e2346751959affc2553"
+  }
+ ],
+ "pack": "tests/trap-pack/pack",
+ "skipped": []
+}

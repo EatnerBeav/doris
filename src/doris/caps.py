@@ -49,7 +49,8 @@ HOLIDAYS = (
 
 # --- Offers (ruling 6) ---------------------------------------------------------------------
 OFFER_EXPIRY = _dt.timedelta(days=7)
-NUDGE_AFTER_BUSINESS_DAYS = 2
+NUDGE_AFTER_BUSINESS_DAYS = 2            # the follow-up: one nudge (T9) this long after an offer nobody answered
+NUDGES_PER_THREAD_EVER = 1               # once per offer and once per thread, never a second (G7)
 
 # --- Calls and retries ("When a call fails") -----------------------------------------------
 CALENDAR_TIMEOUT_S = 10.0
@@ -58,13 +59,18 @@ MAIL_TIMEOUT_S = 30.0
 MODEL_TIMEOUT_S = 60.0
 MODEL_RETRY_WAIT_S = 2.0
 RULING17_REREAD_WAIT_S = 2.0             # "missing on two reads a short wait apart"
+RULING17_UNREAD_IN_A_ROW = 2             # this many bookings in a row that cannot be read (never "missing") end
+                                         # the cycle's check: the calendar is not answering; one alone does not
 SENT_LOOK_WAIT_S = 5.0                   # live: between her two looks in Sent after a send (ruling 8)
 
 # --- A run until stopped (`python -m doris run`) ---------------------------------------------
-# Her inbox unreadable at this many cycles running (an hour of ten-minute cycles) ends the run with
-# its closing line; until then each failed read is an error line and her next cycle reads again.
-# One good read starts the count again. A finite run (demo, traps) ends on its one failed read.
+# Her inbox unreadable never ends the run (decision 89): each failed read is an error line, she
+# sends nothing until a read goes (fail closed), and her next cycle reads again. From this many
+# failures in a row (an hour of ten-minute cycles) she tries every MAIL_READ_RETRY_S instead, never
+# more often than her cycle, until a read goes or a stop or a halt ends the run. One good read starts
+# the count again. A finite run (demo, traps) ends on its one failed read.
 MAIL_READ_FAILURES_IN_A_ROW = 6
+MAIL_READ_RETRY_S = 600.0
 
 # --- A live run's start (decision 76) -------------------------------------------------------
 SMOKE_RECORD_MAX_AGE = _dt.timedelta(hours=24)   # how long after a smoke wrote its sent record a live run takes it
