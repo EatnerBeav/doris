@@ -3,13 +3,16 @@
 Receipts here are written with receipts.ReceiptWriter, as her loop and the kill switch write them;
 the git folders are made by hand, as git leaves them (no git program is needed or run).
 """
+import builtins
 import datetime as dt
 import json
+import ntpath
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from doris import livetrace, paths, receipts
 
@@ -20,6 +23,18 @@ RUN = "model-live-live-20261201T160000Z"
 
 
 START = ("observed", {"step": "start", "mode": "live", "model": "claude-sonnet-5-5"})
+
+
+def as_on_windows():
+    """livetrace's files opened as Windows opens a text file: each "\\n" written becomes "\\r\\n"
+    unless the open says newline= otherwise. On any OS it shows what a trace file would hold there."""
+    real = builtins.open
+
+    def windows_open(file, mode="r", *args, **kw):
+        if "b" not in mode and len(args) < 4 and kw.get("newline") is None:
+            kw["newline"] = "\r\n"
+        return real(file, mode, *args, **kw)
+    return mock.patch.object(livetrace, "open", windows_open, create=True)
 
 
 def model_call(cost):
@@ -276,6 +291,32 @@ class WriteTest(Tmp):
         self.assertEqual(files["timeline.txt"].decode("utf-8"),
                          "2026-12-01T16:00:00Z  imap login and inbox count: ok (2 messages in INBOX)\n")
 
+    def test_as_on_windows_every_file_it_writes_ends_its_lines_in_a_bare_newline(self):
+        path = self.write_chain([START, ("halted", {"cause": "cli"})])
+        self.term("Live. Her own inbox every 10 minutes.")
+        with as_on_windows():
+            folder = livetrace.write("run", T0, T0, "pass", None, printed=self.term, receipts_path=path,
+                                     traces_root=self.root, repo=self.repo)
+        files = self.files(folder)
+        self.assertEqual(sorted(files), ["manifest.json", "receipts.jsonl", "terminal.log", "timeline.txt"])
+        for name, data in files.items():
+            self.assertNotIn(b"\r", data, name)
+
+    def test_the_folder_is_named_from_the_repository_root_with_slashes_on_every_os(self):
+        """On Windows os.path.relpath gives traces\\live-smoke-<stamp>: the line shows
+        traces/live-smoke-<stamp> there too. A folder outside the repository is shown whole."""
+        with mock.patch.object(os, "sep", "\\"), mock.patch.object(os.path, "relpath", ntpath.relpath), \
+                mock.patch.object(paths, "REPO", "C:\\doris"):
+            self.assertEqual(livetrace._display("C:\\doris\\traces\\live-smoke-20261201T160000Z"),
+                             "traces/live-smoke-20261201T160000Z")
+            self.assertEqual(livetrace._display("D:\\runs\\live-run-20261201T160000Z"),
+                             "D:\\runs\\live-run-20261201T160000Z")
+        with mock.patch.object(paths, "REPO", self.repo):
+            folder = livetrace.write("smoke", T0, T0, "pass", None, printed=self.term,
+                                     traces_root=os.path.join(self.repo, "traces"), repo=self.repo)
+        self.assertEqual(self.said[-1], "Live trace kept in traces/live-smoke-20261201T160000Z: outcome pass.")
+        self.assertEqual(folder, os.path.join(self.repo, "traces", "live-smoke-20261201T160000Z"))
+
     def test_the_outcome_is_pass_or_fail(self):
         with self.assertRaises(ValueError):
             livetrace.write("run", T0, T0, "ok", None, printed=self.term, traces_root=self.root, repo=self.repo)
@@ -285,17 +326,21 @@ class WriteTest(Tmp):
 class PrintedTest(Tmp):
 
     def test_each_line_is_printed_kept_with_its_time_and_added_to_its_file_at_once(self):
+        """As on Windows too: every line ends in a bare \\n, the other process's (the worker's own
+        Printed on the same file) as much as this one's."""
         said, path = [], os.path.join(self.dir, "terminal.log")
-        term = livetrace.Printed(out=said.append, path=path, clock=lambda: T0)
-        term("one")
-        with open(path, encoding="utf-8") as fh:
-            self.assertEqual(fh.read(), "one\n")
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write("another process's line\n")
-        term("two")
+        with as_on_windows():
+            term = livetrace.Printed(out=said.append, path=path, clock=lambda: T0)
+            term("one")
+            with open(path, "rb") as fh:
+                self.assertEqual(fh.read(), b"one\n")
+            livetrace.Printed(out=lambda line: None, path=path)("another process's line")
+            term("two")
         self.assertEqual(said, ["one", "two"])
         self.assertEqual(term.lines, [(T0, "one"), (T0, "two")])
         self.assertEqual(term.text(), "one\nanother process's line\ntwo\n")
+        with open(path, "rb") as fh:
+            self.assertEqual(fh.read(), b"one\nanother process's line\ntwo\n")
 
     def test_without_a_file_its_text_is_its_own_lines_and_a_file_it_cannot_write_still_prints(self):
         said = []

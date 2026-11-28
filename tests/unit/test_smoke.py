@@ -142,8 +142,10 @@ class SmokeFixture(unittest.TestCase):
         self.jmap.on_deliver = self.delivers
 
     def names(self):
-        """The step name of each line, the trace's last line left out (it names a folder)."""
+        """The step name of each line, the trace's last line left out (it names a folder, with "/"
+        between its parts on every OS)."""
         self.assertTrue(self.lines[-1].startswith("Live trace kept in traces/live-smoke-"), self.lines[-1])
+        self.assertNotIn("\\", self.lines[-1])
         return [line.split(": ", 1)[0] for line in self.lines[:-1]]
 
     def trace(self):
@@ -208,7 +210,8 @@ class SmokeTest(SmokeFixture):
             self.assertTrue(self.result(step).startswith("not needed (found on look 1)" if step in looks_after_a_find
                                                          else "ok"), self.lines)
         self.assertEqual(self.result("smoke"), "ok, every step passed")
-        self.assertEqual(self.lines[-1], "Live trace kept in %s: outcome pass." % os.path.relpath(self.trace(), self.repo))
+        self.assertEqual(self.lines[-1], "Live trace kept in %s: outcome pass."
+                         % os.path.relpath(self.trace(), self.repo).replace(os.sep, "/"))
         self.assert_no_value()
 
     def test_without_send_to_the_send_is_named_as_not_run_and_never_every_step_passed(self):

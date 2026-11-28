@@ -46,12 +46,13 @@ def _iso(moment):
 
 
 def _display(path):
-    """Inside the repository, the path from its root; anywhere else, the whole path."""
+    """Inside the repository, the path from its root, with "/" between its parts on every OS (as
+    traces/live-smoke-<stamp> reads in the repo, and on Windows too); anywhere else, the whole path."""
     try:
         rel = os.path.relpath(path, paths.REPO)
     except ValueError:
         return path
-    return path if rel.startswith("..") else rel
+    return path if rel.startswith("..") else rel.replace(os.sep, "/")
 
 
 # ------------------------------------------------------------------------------------------------
