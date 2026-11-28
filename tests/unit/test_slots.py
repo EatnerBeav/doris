@@ -450,6 +450,154 @@ class FindSlotsSteerTest(unittest.TestCase):
         self.assertEqual(starts(found), [u(2026, 12, 2, 18, 0), u(2026, 12, 3, 18, 0), u(2026, 12, 4, 18, 0)])
 
 
+class FindSlotsNamedDaysTest(unittest.TestCase):
+    """What the sender named comes first: every day they named, and the part of the day they wrote."""
+
+    AFTERNOON = (dt.time(12, 0), dt.time(17, 0))
+
+    def test_each_named_day_gets_a_slot_before_any_gets_a_second(self):
+        # "Tuesday or Wednesday next week": Tue Dec 8 and Wed Dec 9, not three times on one day.
+        found = slots.find_slots([], TUE_9AM, 30, steer_day=(dt.date(2026, 12, 8), dt.date(2026, 12, 9)))
+        # Tue 9:00 and 9:30 AM, Wed 9:00 AM Pacific, shown in time order.
+        self.assertEqual(starts(found), [u(2026, 12, 8, 17, 0), u(2026, 12, 8, 17, 30), u(2026, 12, 9, 17, 0)])
+
+    def test_the_day_named_first_gets_the_extra_slot(self):
+        found = slots.find_slots([], TUE_9AM, 30, steer_day=(dt.date(2026, 12, 9), dt.date(2026, 12, 8)))
+        # Tue 9:00 AM, Wed 9:00 and 9:30 AM Pacific.
+        self.assertEqual(starts(found), [u(2026, 12, 8, 17, 0), u(2026, 12, 9, 17, 0), u(2026, 12, 9, 17, 30)])
+
+    def test_a_whole_week_gives_one_slot_a_day(self):
+        # "Sometime next week": Mon Dec 7 to Sun Dec 13.
+        week = tuple(dt.date(2026, 12, 7) + dt.timedelta(days=n) for n in range(7))
+        found = slots.find_slots([], TUE_9AM, 30, steer_day=week)
+        self.assertEqual(starts(found), [u(2026, 12, 7, 17, 0), u(2026, 12, 8, 17, 0), u(2026, 12, 9, 17, 0)])
+
+    def test_one_named_day_given_twice_is_one_day(self):
+        twice = slots.find_slots([], TUE_9AM, 30, steer_day=(dt.date(2026, 12, 8), dt.date(2026, 12, 8)))
+        once = slots.find_slots([], TUE_9AM, 30, steer_day=dt.date(2026, 12, 8))
+        self.assertEqual(starts(twice), starts(once))
+        self.assertEqual(starts(once), [u(2026, 12, 8, 17, 0), u(2026, 12, 8, 17, 30), u(2026, 12, 8, 18, 0)])
+
+    def test_no_named_day_is_the_same_as_none(self):
+        self.assertEqual(starts(slots.find_slots([], TUE_9AM, 30, steer_day=())),
+                         starts(slots.find_slots([], TUE_9AM, 30)))
+
+    def test_a_named_day_keeps_its_place_when_the_part_of_day_cannot_fit(self):
+        # "Tuesday afternoon GMT": 12:00 to 5:00 PM UTC is 4:00 to 9:00 AM Pacific, before Shane's day
+        # starts. Tuesday is still the day they asked for: its slots nearest that afternoon come first.
+        found = slots.find_slots([], TUE_9AM, 30, steer_day=dt.date(2026, 12, 8), steer_window=self.AFTERNOON,
+                                 steer_zone="UTC")
+        # Tue Dec 8, 9:00, 9:30 and 10:00 AM Pacific (5:00, 5:30 and 6:00 PM UTC).
+        self.assertEqual(starts(found), [u(2026, 12, 8, 17, 0), u(2026, 12, 8, 17, 30), u(2026, 12, 8, 18, 0)])
+
+    def test_a_full_part_of_day_gives_the_nearest_slot_that_day_then_that_part_of_other_days(self):
+        # "Thursday afternoon", and Thursday afternoon is taken.
+        busy = timed(u(2026, 12, 3, 20, 0), u(2026, 12, 4, 1, 0))       # Thu 12:00 to 5:00 PM Pacific
+        found = slots.find_slots([busy], TUE_9AM, 30, steer_day=dt.date(2026, 12, 3), steer_window=self.AFTERNOON)
+        # Thu 11:30 AM (the nearest to that afternoon), then Wed and Fri at 12:00 PM Pacific.
+        self.assertEqual(starts(found), [u(2026, 12, 3, 19, 30), u(2026, 12, 2, 20, 0), u(2026, 12, 4, 20, 0)])
+
+    def test_a_named_day_with_no_room_at_all_leaves_the_part_of_day_on_other_days(self):
+        busy = all_day(dt.date(2026, 12, 3), dt.date(2026, 12, 4))
+        found = slots.find_slots([busy], TUE_9AM, 30, steer_day=dt.date(2026, 12, 3), steer_window=self.AFTERNOON)
+        # Wed, Fri and Mon at 12:00 PM Pacific.
+        self.assertEqual(starts(found), [u(2026, 12, 2, 20, 0), u(2026, 12, 4, 20, 0), u(2026, 12, 7, 20, 0)])
+
+    def test_a_part_of_day_that_never_fits_gives_each_days_nearest_slot(self):
+        # "Morning" for a sender at UTC+8 is 9:00 AM to 12:00 PM there: 5:00 to 8:00 PM Pacific the day
+        # before. The last slot of Shane's day (4:30 PM Pacific, 8:30 AM for them) is the nearest.
+        found = slots.find_slots([], TUE_9AM, 30, steer_window=(dt.time(9, 0), dt.time(12, 0)),
+                                 steer_zone="UTC+08:00")
+        # Wed, Thu and Fri at 4:30 PM Pacific.
+        self.assertEqual(starts(found), [u(2026, 12, 3, 0, 30), u(2026, 12, 4, 0, 30), u(2026, 12, 5, 0, 30)])
+
+    def test_a_part_of_day_that_runs_past_midnight_in_the_senders_zone(self):
+        # 11:30 PM to 12:30 AM UTC is 3:30 to 4:30 PM Pacific: her 3:30 and 4:00 PM slots fit inside it.
+        late = (dt.time(23, 30), dt.time(0, 30))
+        found = slots.find_slots([], TUE_9AM, 30, steer_window=late, steer_zone="UTC")
+        # Wed, Thu and Fri at 3:30 PM Pacific.
+        self.assertEqual(starts(found), [u(2026, 12, 2, 23, 30), u(2026, 12, 3, 23, 30), u(2026, 12, 4, 23, 30)])
+        only_wed = timed(u(2026, 12, 3, 1, 0), u(2027, 1, 5, 0, 0))     # busy from Wed 5:00 PM Pacific on
+        found = slots.find_slots([only_wed], TUE_9AM, 30, steer_window=late, steer_zone="UTC")
+        # Wed 3:30 and 4:00 PM (both inside it), and 3:00 PM, the nearest outside it.
+        self.assertEqual(starts(found), [u(2026, 12, 2, 23, 0), u(2026, 12, 2, 23, 30), u(2026, 12, 3, 0, 0)])
+
+    def test_an_excluded_start_is_not_offered_on_a_named_day(self):
+        found = slots.find_slots([], TUE_9AM, 30, steer_day=dt.date(2026, 12, 8),
+                                 exclude_starts=[u(2026, 12, 8, 17, 0)])
+        self.assertEqual(starts(found), [u(2026, 12, 8, 17, 30), u(2026, 12, 8, 18, 0), u(2026, 12, 8, 18, 30)])
+
+    def test_the_senders_own_time_still_leads_and_is_not_offered_twice(self):
+        thu_2pm = u(2026, 12, 3, 22, 0)
+        found = slots.find_slots([], TUE_9AM, 30, first=[thu_2pm], steer_day=dt.date(2026, 12, 3),
+                                 steer_window=self.AFTERNOON)
+        # Thu 2:00 PM as written, then Thu 12:00 and 12:30 PM Pacific.
+        self.assertEqual(starts(found), [thu_2pm, u(2026, 12, 3, 20, 0), u(2026, 12, 3, 20, 30)])
+
+
+class FindSlotsOneTimeTest(unittest.TestCase):
+    """Ruling 6: the one time the sender asked for. The window is that time itself, so only that time
+    fits inside it. Taken or not, the rest of the offer stays as near to it as it can."""
+
+    TWO_PM = (dt.time(14, 0), dt.time(14, 30))
+
+    def test_a_taken_time_gives_the_nearest_that_day_then_that_hour_on_the_nearest_days(self):
+        # Asked: Thu Dec 17 at 2:00 PM Pacific. Thursday is busy from 1:00 to 5:00 PM.
+        asked = u(2026, 12, 17, 22, 0)
+        busy = timed(u(2026, 12, 17, 21, 0), u(2026, 12, 18, 1, 0))
+        found = slots.find_slots([busy], TUE_9AM, 30, first=[asked], steer_day=dt.date(2026, 12, 17),
+                                 steer_window=self.TWO_PM)
+        # Thu Dec 17 at 12:30 PM (the nearest free that day), then Wed Dec 16 and Fri Dec 18 at 2:00 PM
+        # Pacific: the days next to the one they asked for, not the first days she has.
+        self.assertEqual(starts(found), [u(2026, 12, 17, 20, 30), u(2026, 12, 16, 22, 0), u(2026, 12, 18, 22, 0)])
+
+    def test_a_free_time_leads_then_that_hour_on_the_nearest_days(self):
+        asked = u(2026, 12, 17, 22, 0)
+        found = slots.find_slots([], TUE_9AM, 30, first=[asked], steer_day=dt.date(2026, 12, 17),
+                                 steer_window=self.TWO_PM)
+        # Thu Dec 17 at 2:00 PM as written, then Wed Dec 16 and Fri Dec 18 at 2:00 PM Pacific.
+        self.assertEqual(starts(found), [asked, u(2026, 12, 16, 22, 0), u(2026, 12, 18, 22, 0)])
+
+    def test_that_hour_taken_on_the_next_day_goes_to_the_day_after(self):
+        # The demo's Dana: Fri Dec 4 at 2:00 PM, with Fri busy 1:00 to 5:00 PM and Wed busy 2:00 to 3:00 PM.
+        busy = [timed(u(2026, 12, 4, 21, 0), u(2026, 12, 5, 1, 0)), timed(u(2026, 12, 2, 22, 0), u(2026, 12, 2, 23, 0))]
+        found = slots.find_slots(busy, TUE_9AM, 30, first=[u(2026, 12, 4, 22, 0)], steer_day=dt.date(2026, 12, 4),
+                                 steer_window=self.TWO_PM)
+        # Fri 12:30 PM, then Thu Dec 3 and Mon Dec 7 at 2:00 PM Pacific.
+        self.assertEqual(starts(found), [u(2026, 12, 4, 20, 30), u(2026, 12, 3, 22, 0), u(2026, 12, 7, 22, 0)])
+
+    def test_a_quarter_hour_time_gives_the_nearest_slot_on_the_nearest_days(self):
+        # Asked: Thu Dec 17 at 1:15 PM Pacific, free. None of her own slots starts at a quarter past.
+        asked = u(2026, 12, 17, 21, 15)
+        found = slots.find_slots([], TUE_9AM, 30, first=[asked], steer_day=dt.date(2026, 12, 17),
+                                 steer_window=(dt.time(13, 15), dt.time(13, 45)))
+        # Then Wed Dec 16 and Fri Dec 18 at 1:00 PM Pacific, not two more times on Thursday.
+        self.assertEqual(starts(found), [asked, u(2026, 12, 16, 21, 0), u(2026, 12, 18, 21, 0)])
+
+    def test_the_hour_asked_for_is_read_in_the_senders_zone(self):
+        # 4:00 PM Central on Thu Dec 3 is 2:00 PM Pacific.
+        asked = u(2026, 12, 3, 22, 0)
+        found = slots.find_slots([], TUE_9AM, 30, first=[asked], steer_day=dt.date(2026, 12, 3),
+                                 steer_window=(dt.time(16, 0), dt.time(16, 30)), steer_zone="Central")
+        # Thu at 2:00 PM, then Wed Dec 2 and Fri Dec 4 at 2:00 PM Pacific.
+        self.assertEqual(starts(found), [asked, u(2026, 12, 2, 22, 0), u(2026, 12, 4, 22, 0)])
+
+    def test_a_day_she_does_not_work_gives_that_hour_on_the_days_around_it(self):
+        # Asked: Sat Dec 5 at 10:00 AM Pacific.
+        found = slots.find_slots([], TUE_9AM, 30, first=[u(2026, 12, 5, 18, 0)], steer_day=dt.date(2026, 12, 5),
+                                 steer_window=(dt.time(10, 0), dt.time(10, 30)))
+        # Thu Dec 3, Fri Dec 4 and Mon Dec 7 at 10:00 AM Pacific.
+        self.assertEqual(starts(found), [u(2026, 12, 3, 18, 0), u(2026, 12, 4, 18, 0), u(2026, 12, 7, 18, 0)])
+
+    def test_a_part_of_day_still_takes_the_first_days_she_has(self):
+        # "Thursday the 17th, in the afternoon", with that afternoon taken: a part of day is not one time.
+        busy = timed(u(2026, 12, 17, 20, 0), u(2026, 12, 18, 1, 0))
+        found = slots.find_slots([busy], TUE_9AM, 30, steer_day=dt.date(2026, 12, 17),
+                                 steer_window=(dt.time(12, 0), dt.time(17, 0)))
+        # Thu Dec 17 at 11:30 AM, then Wed Dec 2 and Thu Dec 3 at 12:00 PM Pacific.
+        self.assertEqual(starts(found), [u(2026, 12, 17, 19, 30), u(2026, 12, 2, 20, 0), u(2026, 12, 3, 20, 0)])
+
+
 class FindSlotsAcrossDaylightChangeTest(unittest.TestCase):
 
     def test_slots_after_nov_1_2026_start_at_nine_standard_time(self):

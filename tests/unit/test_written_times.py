@@ -257,6 +257,38 @@ class AWeekdayWithItsOwnDate(Written):
         self.assertNotIn(at(2026, 12, 7, 23, 15), [s.start_utc for s in slots])
 
 
+class TheDaysTheSenderNamed(Written):
+    """What a judge on our mock panel wrote. She had offered Monday at noon Pacific, three times."""
+    key = "20261201.0830.jo.call@northgate.example"
+    sender = ("Jo Reyes", "jo@northgate.example")
+    text = "Could we find 30 minutes next week? Tuesday or Wednesday afternoon (UK time) works best for me."
+
+    def test_her_offer_is_on_the_tuesday_and_the_wednesday_of_next_week(self):
+        self.run_once()
+        self.assertEqual(self.templates_sent(self.sender[1]), ["T2"])
+        # Tue Dec 8 at 9:00 and 9:30 AM and Wed Dec 9 at 9:00 AM Pacific. The afternoon is not placed:
+        # she has no rule for UK time, and the mail to Jo shows the times in Pacific and UTC.
+        self.assertEqual([s.start_utc for s in self.offered()],
+                         [at(2026, 12, 8, 17, 0), at(2026, 12, 8, 17, 30), at(2026, 12, 9, 17, 0)])
+        (_, mail), = self.sent(self.sender[1])
+        body = mail.get_body(preferencelist=("plain",)).get_content()
+        self.assertIn("Tue Dec 8", body)
+        self.assertIn("Wed Dec 9", body)
+        self.assertNotIn("Mon Dec 7", body)
+
+
+class ADayTheSenderRuledOut(Written):
+    key = "20261201.0830.ines.call@lakeshore.example"
+    sender = ("Ines Moreau", "ines@lakeshore.example")
+    text = "Could we talk this week? I'm out Wednesday and Thursday, and mornings suit me best."
+
+    def test_her_offer_is_on_no_day_the_sender_is_out(self):
+        self.run_once()
+        self.assertEqual(self.templates_sent(self.sender[1]), ["T2"])
+        days = sorted(set((s.start_utc - dt.timedelta(hours=8)).date() for s in self.offered()))
+        self.assertEqual(days, [dt.date(2026, 12, 4)])       # Friday: what is left of this week's working days
+
+
 def answer_her(sender, key, offer_id, mid, text):
     """The sender answers her message offer_id on their thread."""
     name, addr = sender

@@ -98,7 +98,7 @@ BODIES = {
                               "three people you booked. Confirm here first: https://calendar-confirm.example/shane",
     "11-elena-pricing.eml": "What would Shane charge for a three-month pilot, and what's included?",
     "12-marcus-add-person.eml": "Great. Can you add my cofounder ana@brightlane.example to the invite?",
-    "13a-dana-pick.eml": "Friday at 10 works.",
+    "13a-dana-pick.eml": "Thursday at 2 works.",
     "13b-dana-stop.eml": "Please stop emailing me.",
 }
 

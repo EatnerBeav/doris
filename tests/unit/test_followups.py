@@ -31,7 +31,8 @@ PRIYA_KEY = "20261201.0802.priya.quick-call@northwind.example"
 MARCUS = tr.MARCUS
 MARCUS_KEY = tr.MARCUS_KEY
 DANA = "dana@harborlight.example"
-NEXT_WEEK = b"Any chance we can talk next week? I'm on Eastern time."
+# One day, so her offer is three times on that morning (a named week gets a time on each of its days).
+MONDAY_DEC_7 = b"Any chance we can talk on Monday, December 7? I'm on Eastern time."
 THIS_WEEK = b"Any chance we can talk later this week? I'm on Eastern time."
 DUE = "2026-12-03T16:10:00Z"            # two business days after her offer of Tue Dec 1, 8:10 AM Pacific
 REMOVED = "you removed this booking from your calendar; I haven't told them"
@@ -765,13 +766,13 @@ class HerOwnCancelPartWay(Base):
 # The nudge (T9)
 # ---------------------------------------------------------------------------------------------
 class NudgeSetup(Base):
-    """Marcus asks for next week and gets an offer (T2) of three times in a first run; nobody answers."""
+    """Marcus asks for Monday Dec 7 and gets an offer (T2) of three times in a first run; nobody answers."""
     names = ("02-marcus-request.eml",)
     SLOTS = ("2026-12-07T17:00:00Z", "2026-12-07T17:30:00Z", "2026-12-07T18:00:00Z")   # Mon Dec 7, 9:00 to 10:30 AM Pacific
 
     def setUp(self):
         Base.setUp(self)
-        tr.edit(self.root, "02-marcus-request.eml", lambda raw: raw.replace(THIS_WEEK, NEXT_WEEK))
+        tr.edit(self.root, "02-marcus-request.eml", lambda raw: raw.replace(THIS_WEEK, MONDAY_DEC_7))
         self.first = self.run_once()
         self.assertEqual(self.templates_sent(MARCUS), ["T2"])
 
@@ -1267,7 +1268,7 @@ class NudgeAndTheirAnswer(Base):
 
     def setUp(self):
         Base.setUp(self)
-        tr.edit(self.root, "02-marcus-request.eml", lambda raw: raw.replace(THIS_WEEK, NEXT_WEEK))
+        tr.edit(self.root, "02-marcus-request.eml", lambda raw: raw.replace(THIS_WEEK, MONDAY_DEC_7))
         self.run_once()
         (_, self.t2) = self.sent(MARCUS)[0]
 

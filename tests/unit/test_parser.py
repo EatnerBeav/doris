@@ -7,7 +7,9 @@ The bookable check (slots.bookable, calendar builder's module) is faked here wit
 so these tests never depend on a half-built slots.py.
 """
 import datetime as dt
+import time
 import unittest
+from unittest import mock
 
 from doris import caps, parser, zones
 from doris.shapes import ModelAnswer, ParseResult, PickResult, Slot
@@ -927,11 +929,14 @@ class RelativeTest(Base):
         self.assertEqual(self.offer("A week from Thursday?").steer_day, dt.date(2026, 12, 10))
 
     def test_rel_week(self):
-        self.assertEqual(self.offer("Sometime next week?").steer_day, dt.date(2026, 12, 7))
-        self.assertEqual(self.offer("This week?").steer_day, dt.date(2026, 12, 1))
-        self.assertEqual(self.offer("Early next week?").steer_day, dt.date(2026, 12, 7))
-        self.assertEqual(self.offer("The week of December 7?").steer_day, dt.date(2026, 12, 7))
-        self.assertEqual(self.offer("The first week of December?").steer_day, dt.date(2026, 12, 1))
+        # a span of days (row L6): the week's days, from the day the mail was sent
+        this_week = tuple(dt.date(2026, 12, d) for d in range(1, 7))
+        next_week = tuple(dt.date(2026, 12, d) for d in range(7, 14))
+        self.assertEqual(self.offer("Sometime next week?").steer_day, next_week)
+        self.assertEqual(self.offer("This week?").steer_day, this_week)
+        self.assertEqual(self.offer("Early next week?").steer_day, next_week)
+        self.assertEqual(self.offer("The week of December 7?").steer_day, next_week)
+        self.assertEqual(self.offer("The first week of December?").steer_day, this_week)
 
     def test_rel_open(self):
         for text in ("Soon?", "Sometime?", "ASAP please", "Next month?", "After the holidays?"):
@@ -941,6 +946,394 @@ class RelativeTest(Base):
 
     def test_rel_mention_blocks_other_date(self):
         self.offer("Hope to talk soon. December 3 at 10am PT?", "B2")
+
+
+# ---------------------------------------------------------------------------------------
+# The offer's steer: the days the sender named, the part of day, the zone it is read in
+# ---------------------------------------------------------------------------------------
+AFTERNOON = (dt.time(12, 0), dt.time(17, 0))
+
+
+class SteerTest(Base):
+    """December 2026: Tue 1 (today), Wed 2, Thu 3, Fri 4, Mon 7, Tue 8, Wed 9, Thu 10, Fri 11."""
+
+    def days(self, text, now=CLOCK):
+        """The days of December the offer is steered to, in offer order."""
+        d = P(text, now).steer_day
+        if d is None:
+            return ()
+        if isinstance(d, dt.date):
+            return (d.day,)
+        self.assertIsInstance(d, tuple)
+        self.assertGreater(len(d), 1, "one day is a date, not a tuple")
+        return tuple(x.day for x in d)
+
+    # --- a week phrase is a span of days (row L6) ---
+    def test_a_week_is_every_day_of_it_from_the_day_the_mail_was_sent(self):
+        self.assertEqual(self.days("Sometime next week?"), (7, 8, 9, 10, 11, 12, 13))
+        self.assertEqual(self.days("Early next week?"), (7, 8, 9, 10, 11, 12, 13))
+        self.assertEqual(self.days("This week?"), (1, 2, 3, 4, 5, 6))
+        self.assertEqual(self.days("The week of December 7?"), (7, 8, 9, 10, 11, 12, 13))
+        self.assertEqual(self.days("The week of December 9?"), (7, 8, 9, 10, 11, 12, 13))
+        self.assertEqual(self.days("The first week of December?"), (1, 2, 3, 4, 5, 6))
+
+    def test_late_in_a_week_is_that_week_from_its_end(self):
+        self.assertEqual(self.days("Late next week?"), (13, 12, 11, 10, 9, 8, 7))
+        r = P("Any chance we can talk later this week? I'm on Eastern time.")
+        self.assertEqual(r.steer_day, tuple(dt.date(2026, 12, d) for d in (6, 5, 4, 3, 2, 1)))
+        self.assertEqual(r.zone, "Eastern")
+
+    # --- a weekday written with a week is the one inside that week ---
+    def test_the_weekdays_a_judge_named_inside_next_week(self):
+        r = P("Could we find 30 minutes next week? Tuesday or Wednesday afternoon (UK time) works best for me.")
+        self.assertEqual(r.steer_day, (dt.date(2026, 12, 8), dt.date(2026, 12, 9)))
+        self.assertIsNone(r.steer_window)       # an afternoon in a zone she has no rule for is not placed
+        self.assertIsNone(r.zone)
+        self.assertEqual(r.verdict, "offer")
+
+    def test_a_weekday_before_or_after_its_week(self):
+        self.assertEqual(self.days("Tuesday next week?"), (8,))
+        self.assertEqual(self.days("Wednesday of next week?"), (9,))
+        self.assertEqual(self.days("Tuesday or Wednesday next week?"), (8, 9))
+        self.assertEqual(self.days("Next week, Wednesday?"), (9,))
+        self.assertEqual(self.days("Next week? Wednesday or Thursday afternoon works."), (9, 10))
+        self.assertEqual(self.days("Wednesday this week?"), (2,))
+        self.assertEqual(self.days("Any time next week. Mornings, ideally Wednesday."), (9,))
+
+    def test_a_weekday_keeps_its_own_week_when_it_says_so_or_the_week_is_far_off(self):
+        self.assertEqual(self.days("This Wednesday, or any day next week?"), (2, 7, 8, 9, 10, 11, 12, 13))
+        self.assertEqual(self.days("Next week is our offsite. I will send notes after. Could we talk Wednesday?"),
+                         (7, 8, 9, 10, 11, 12, 13, 2))
+        # this week's Monday is gone: the coming Monday, then what is left of this week
+        self.assertEqual(self.days("Monday this week?"), (7, 1, 2, 3, 4, 5, 6))
+
+    def test_a_time_on_a_weekday_inside_a_week_is_read_on_that_day(self):
+        r = self.offer("Can we meet next week? Wednesday at 2pm PT works for me.", first=u(2026, 12, 9, 22))
+        self.assertEqual([x.start_utc for x in r.readings if x.start_utc is not None], [u(2026, 12, 9, 22)])
+        r = self.offer("Tuesday next week at 10am PT?", first=u(2026, 12, 8, 18))
+        self.assertEqual([x.start_utc for x in r.readings if x.kept and x.start_utc is not None],
+                         [u(2026, 12, 8, 18)])
+        r = self.offer("Next week, Tuesday at 10am PT or Wednesday at 2pm PT.")
+        self.assertEqual(parser.preferred_starts(r, CLOCK, bookable=fake_bookable),
+                         [u(2026, 12, 8, 18), u(2026, 12, 9, 22)])
+
+    # --- every day the sender named, in the order written ---
+    def test_every_named_day_steers(self):
+        self.assertEqual(self.days("Wednesday or Thursday?"), (2, 3))
+        self.assertEqual(self.days("December 3 or 4, afternoon?"), (3, 4))
+        self.assertEqual(self.days("Next Thursday?"), (3, 10))
+        self.assertEqual(self.days("Friday, or failing that Wednesday?"), (4, 2))
+        self.assertEqual(P("Thursday?").steer_day, dt.date(2026, 12, 3))
+        self.assertIsNone(P("Soon?").steer_day)
+        self.assertIsNone(P("Hello there.").steer_day)
+
+    # --- a day the sender rules out ---
+    def test_a_day_ruled_out_does_not_steer(self):
+        self.assertEqual(self.days("I can't do Tuesday. Wednesday or Thursday?"), (2, 3))
+        self.assertEqual(self.days("Friday doesn't work for me. Thursday?"), (3,))
+        self.assertEqual(self.days("I can't do Monday, Tuesday works."), (8,))
+        self.assertEqual(self.days("Wednesday is out, but Thursday or Friday would be great."), (3, 4))
+        self.assertEqual(self.days("We're booked Wednesday and Thursday. Friday?"), (4,))
+        self.assertEqual(self.days("Thursday I'm traveling. Friday?"), (4,))
+
+    def test_more_ways_to_rule_a_day_out(self):
+        self.assertEqual(self.days("I'm not in the office Thursday. Friday?"), (4,))
+        self.assertEqual(self.days("Thursday is tough for me, Friday is better."), (4,))
+        self.assertEqual(self.days("Thursday looks tricky. Friday?"), (4,))
+        # an "if" earlier in the sentence, before a comma or a "but", does not reach the day
+        self.assertEqual(self.days("Should be fine, but I can't do Thursday. Friday?"), (4,))
+        self.assertEqual(self.days("If it helps, I can't do Thursday; Friday is open."), (4,))
+
+    def test_a_day_ruled_out_with_a_part_of_day_is_ruled_out(self):
+        for text in ("I can't do the morning on Thursday.", "I can't do mornings on Thursday.",
+                     "Thursday mornings don't work.", "Thursday afternoon doesn't work.", "I can't do Thursday afternoon."):
+            with self.subTest(text=text):
+                d = self.days(text)
+                self.assertNotIn(3, d)
+                self.assertEqual(d[:2], (1, 2))
+                self.assertIsNone(P(text).steer_window)
+
+    def test_a_part_of_day_ruled_out_does_not_steer(self):
+        r = P("Thursday works, just not the afternoon.")
+        self.assertEqual((r.steer_day, r.steer_window), (dt.date(2026, 12, 3), None))
+        r = P("Not the morning, the afternoon is better. Thursday?")
+        self.assertEqual((r.steer_day, r.steer_window), (dt.date(2026, 12, 3), AFTERNOON))
+        r = P("Not Thursday. Friday afternoon?")
+        self.assertEqual((r.steer_day, r.steer_window), (dt.date(2026, 12, 4), AFTERNOON))
+        r = P("If the morning doesn't work, Thursday afternoon?")
+        self.assertEqual(r.steer_window, (dt.time(9, 0), dt.time(12, 0)))
+
+    def test_a_day_ruled_out_is_taken_out_of_its_week(self):
+        self.assertEqual(self.days("Any day next week except Wednesday."), (7, 8, 10, 11, 12, 13))
+        self.assertEqual(self.days("I'm out Monday and Tuesday, but free the rest of next week."), (9, 10, 11, 12, 13))
+        self.assertEqual(self.days("Anything but Friday this week."), (1, 2, 3, 5, 6))
+        self.assertEqual(self.days("Next week works, just not Monday or Friday."), (8, 9, 10, 12, 13))
+
+    def test_with_only_days_ruled_out_every_other_day_steers(self):
+        d = self.days("Not Wednesday.")
+        self.assertEqual(d[:4], (1, 3, 4, 5))
+        self.assertNotIn(2, d)
+        d = self.days("I can't do Monday, Tuesday or Wednesday.")
+        self.assertEqual(d[:3], (1, 3, 4))
+        for day in (2, 7, 8):
+            self.assertNotIn(day, d)
+        d = self.days("I'm out next week.")
+        self.assertEqual(d[:7], (1, 2, 3, 4, 5, 6, 14))
+
+    def test_a_day_is_not_ruled_out_by_an_if_or_a_why_not(self):
+        self.assertEqual(self.days("If Friday doesn't work, how about Monday?"), (4, 7))
+        self.assertEqual(self.days("Monday, if you can't do Tuesday."), (7, 8))
+        self.assertEqual(self.days("Why not Thursday?"), (3,))
+        self.assertEqual(self.days("If not Thursday, Friday."), (3, 4))
+        self.assertEqual(self.days("I'm not sure about my week yet, maybe Thursday?"), (3,))
+        self.assertEqual(self.days("Thursday isn't a problem."), (3,))
+
+    def test_the_full_stop_after_a_weekday_still_ends_its_sentence(self):
+        self.assertEqual(self.days("Thursday. Doesn't work for me any earlier."), (3,))
+        self.assertEqual(self.days("Could we do Wednesday. The 9th is fine too."), (2, 9))
+        self.assertEqual(self.days("I can't do Tuesday. Wednesday or Thursday?"), (2, 3))
+
+    def test_a_date_that_is_not_the_meeting_does_not_steer(self):
+        self.assertEqual(self.days("Our contract ends December 15. Can we talk?"), ())
+        self.assertEqual(self.days("The proposal is due Friday. Could we talk Thursday?"), (3,))
+
+    def test_a_time_the_sender_cannot_do_names_no_day(self):
+        for text in ("I can't do Thursday at 10am PT.", "Thursday at 10am PT doesn't work for me.",
+                     "I can't do 10am PT on Thursday.", "I can't do Thursday at 10am PT or Friday at 2pm PT."):
+            with self.subTest(text=text):
+                r = P(text)
+                self.assertIsNone(r.steer_day)
+                self.assertIn(DEC3_10, r.excluded_utc)
+
+    def test_a_stray_not_in_the_sentence_still_leaves_the_day(self):
+        r = P("Not sure you saw my note, but could we do Thursday at 10am PT?")
+        self.assertEqual(r.steer_day, dt.date(2026, 12, 3))
+        self.assertEqual(r.excluded_utc, [DEC3_10])       # row Q5 still leaves the time itself out
+        r = P("I can't do Tuesday at 10am PT next week, but Wednesday at 10am PT works.")
+        self.assertEqual(r.steer_day, dt.date(2026, 12, 9))
+
+    def test_a_weekday_ruled_out_with_its_week_leaves_the_rest_of_the_week(self):
+        for text in ("Tuesday next week doesn't work.", "I can't do Tuesday next week.",
+                     "I can't do next week Tuesday.", "Next week, Tuesday is out."):
+            with self.subTest(text=text):
+                self.assertEqual(self.days(text), (7, 9, 10, 11, 12, 13))
+        self.assertEqual(self.days("Tuesday or Wednesday next week doesn't work."), (7, 10, 11, 12, 13))
+
+    def test_a_date_inside_the_week_it_is_written_with_stands_for_the_week(self):
+        self.assertEqual(self.days("Next week, Tuesday the 8th?"), (8,))
+        self.assertEqual(self.days("Next week, the 8th?"), (8,))
+        self.assertEqual(self.days("Next week? December 8 or 9."), (8, 9))
+        self.assertEqual(self.days("Next week works, next Thursday ideally."), (10,))
+        self.assertEqual(self.days("The week of December 7? Tuesday the 8th works, or Wednesday."), (8, 9))
+        # a date outside the week is one more ask
+        self.assertEqual(self.days("Next week, Tuesday the 15th?"), (7, 8, 9, 10, 11, 12, 13, 15))
+        self.assertEqual(self.days("Next week is our offsite, back on December 14. Wednesday?"),
+                         (7, 8, 9, 10, 11, 12, 13, 14, 2))
+
+    def test_a_weekday_or_a_week_is_two_asks(self):
+        # "Friday or next week" is this Friday, or any day of next week: a week frames no weekday
+        # it is listed with.
+        self.assertEqual(self.days("Friday or next week?"), (4, 7, 8, 9, 10, 11, 12, 13))
+        self.assertEqual(self.days("Next week or Friday?"), (7, 8, 9, 10, 11, 12, 13, 4))
+        self.assertEqual(self.days("Next week, or on Friday if that is too late."), (7, 8, 9, 10, 11, 12, 13, 4))
+
+    def test_a_week_ruled_out_frames_no_weekday(self):
+        self.assertEqual(self.days("Not next week. Friday?"), (4,))
+        self.assertEqual(self.days("I can't do next week. Thursday?"), (3,))
+        self.assertEqual(self.days("Next week is out. How about Wednesday?"), (2,))
+
+    def test_a_weekday_written_with_its_day_number_is_one_day(self):
+        self.assertEqual(self.days("Tuesday the 8th works, or Wednesday the 9th."), (8, 9))
+        self.assertEqual(self.days("Wednesday, the 9th?"), (9,))
+        self.assertEqual(self.days("Wednesday the 8th?"), (2, 8))      # the 8th is a Tuesday: both stand
+        self.assertEqual(self.days("Next Thursday the 10th?"), (10,))
+        d = self.days("I can't do Wednesday the 9th.")
+        self.assertNotIn(9, d)
+        self.assertEqual(d[:3], (1, 2, 3))
+
+    def test_a_time_on_a_weekday_written_with_its_day_number_is_read_on_that_day(self):
+        for text in ("Could we do 10am PT on Wednesday the 9th?", "Wednesday the 9th at 10am PT?",
+                     "Wednesday, the 9th, 10am PT."):
+            with self.subTest(text=text):
+                r = self.offer(text, first=u(2026, 12, 9, 18))
+                self.assertEqual([x.start_utc for x in r.readings if x.kept and x.start_utc is not None],
+                                 [u(2026, 12, 9, 18)])
+                self.assertEqual(r.steer_day, dt.date(2026, 12, 9))
+
+    def test_a_numeric_date_steers_by_the_reading_its_weekday_picks(self):
+        now = u(2027, 2, 1, 17)         # Mon Feb 1, 2027: 2/3 is Feb 3 (a Wednesday) or Mar 2 (a Tuesday)
+        self.assertEqual(P("Wednesday 2/3?", now).steer_day, dt.date(2027, 2, 3))
+        self.assertEqual(P("2/3?", now).steer_day, (dt.date(2027, 2, 3), dt.date(2027, 3, 2)))
+
+    # --- a day written with a time steers too, whether or not she can give that time ---
+    def test_a_day_written_with_a_time_steers(self):
+        r = self.offer("Thursday at 10am PT?", "B5", first=DEC3_10)
+        self.assertEqual(r.steer_day, dt.date(2026, 12, 3))
+        r = self.book("Can Shane do Friday Dec 4 at 2:00 PM Pacific?", u(2026, 12, 4, 22))
+        self.assertEqual(r.steer_day, dt.date(2026, 12, 4))
+        self.assertEqual(self.days("Thursday at 10am PT, or Friday afternoon?"), (3, 4))
+        self.assertEqual(self.days("December 3 at 10am PT or December 4 at 7pm PT."), (3, 4))
+        self.assertEqual(self.days("How about Saturday, December 5 at 10:00 AM Pacific?"), (5,))
+        self.assertEqual(self.days("Thursday at 7pm PT?"), (3,))
+        self.assertEqual(self.days("Today at 4pm PT?"), (1,))
+        self.assertEqual(self.days("December 3 at 4pm CET."), (3,))
+        self.assertEqual(self.days("Next week at 10am PT?"), (7, 8, 9, 10, 11, 12, 13))
+
+    # --- the part of day, and the zone it is read in ---
+    def test_the_part_of_day_written_first_steers(self):
+        self.assertEqual(P("Thursday afternoon or Friday morning?").steer_window, AFTERNOON)
+        self.assertEqual(P("Thursday morning or Friday afternoon?").steer_window, (dt.time(9, 0), dt.time(12, 0)))
+
+    def test_a_part_of_day_is_read_in_the_zone_written_right_after_it(self):
+        for text in ("Thursday afternoon Eastern?", "Thursday afternoon ET?", "Thursday afternoon (ET)?",
+                     "Thursday afternoon, Eastern time.", "Thursday afternoon EST works."):
+            with self.subTest(text=text):
+                r = P(text)
+                self.assertEqual(r.steer_window, AFTERNOON)
+                self.assertEqual(r.zone, "Eastern")
+                self.assertEqual(r.steer_day, dt.date(2026, 12, 3))
+        self.assertEqual(P("Thursday afternoon your time?").zone, "Pacific")
+        r = P("Thursday afternoon Eastern Europe?")
+        self.assertEqual((r.steer_window, r.zone), (AFTERNOON, None))
+        r = P("Thursday afternoon et al.")          # lower case: not the abbreviation
+        self.assertEqual((r.steer_window, r.zone), (AFTERNOON, None))
+
+    def test_a_part_of_day_in_a_zone_she_has_no_rule_for_is_not_placed(self):
+        for text in ("Thursday morning my time?", "Thursday afternoon London time?", "Thursday afternoon CET?",
+                     "Thursday afternoon (CET)?", "Thursday afternoon (UK)?", "Thursday afternoon, our time.",
+                     "Thursday afternoon (UK time) works.", "Thursday afternoon Central European Time?",
+                     "Thursday afternoon works. I'm on Central European Time."):
+            with self.subTest(text=text):
+                r = P(text)
+                self.assertIsNone(r.steer_window)
+                self.assertIsNone(r.zone)
+                self.assertEqual(r.steer_day, dt.date(2026, 12, 3))
+
+    def test_ordinary_words_after_a_part_of_day_are_not_a_zone(self):
+        for text in ("Thursday afternoon, what time works?", "Thursday afternoon works this time.",
+                     "Thursday afternoon (if possible)?", "Thursday afternoon. Next time we can meet in person.",
+                     "Thursday afternoon is the best time for me."):
+            with self.subTest(text=text):
+                r = P(text)
+                self.assertEqual(r.steer_window, AFTERNOON)
+                self.assertIsNone(r.zone)
+
+    def test_a_part_of_day_in_another_zone_than_the_time_written_is_not_placed(self):
+        r = P("Thursday at 10am PT or Friday afternoon ET?")
+        self.assertEqual(r.zone, "Pacific")
+        self.assertIsNone(r.steer_window)
+
+    def test_an_offset_written_apart_from_the_time_is_the_zone_it_is_read_in(self):
+        # Row Z10: a zone elsewhere in the email steers the offer. "GMT+1" is one hour ahead of GMT.
+        r = self.offer("I'm on GMT+1. Does December 3 at 7pm work?", "B4", first=DEC3_10)
+        self.assertEqual(r.zone, "UTC+01:00")
+        r = self.offer("Does December 3 at 10am work? (All times UTC-8.)", "B4", first=DEC3_10)
+        self.assertEqual(r.zone, "UTC-08:00")
+        r = self.offer("I'm on GMT. Does December 3 at 6pm work?", "B4", first=DEC3_10)
+        self.assertEqual(r.zone, "UTC")
+
+    def test_a_part_of_day_next_to_a_time_in_a_zone_she_has_no_rule_for_is_not_placed(self):
+        # Row Z12 does not place the time, so the part of day written with it is not Pacific's either.
+        for text in ("Thursday afternoon, 2pm UK time?", "Thursday afternoon, around 2pm London time.",
+                     "Thursday afternoon, say 14:00 CET?", "Thursday afternoon, 2pm (BST)?",
+                     "Thursday afternoon at 2pm my time?"):
+            with self.subTest(text=text):
+                r = P(text)
+                self.assertIsNone(r.steer_window)
+                self.assertIsNone(r.zone)
+                self.assertEqual(r.steer_day, dt.date(2026, 12, 3))
+        # ordinary words after the time are no zone
+        for text in ("Thursday afternoon, 2pm works this time.", "Thursday afternoon, 2pm is the best time."):
+            with self.subTest(text=text):
+                self.assertEqual(P(text).steer_window, AFTERNOON)
+
+    # --- the one time asked for (ruling 6: when it is taken, the nearest to it) ---
+    def test_the_one_time_asked_for_is_what_the_offer_stays_near(self):
+        r = P("Can Shane do Friday Dec 4 at 2:00 PM Pacific?")
+        self.assertEqual((r.steer_day, r.steer_window), (dt.date(2026, 12, 4), (dt.time(14, 0), dt.time(14, 30))))
+        r = P("Could we move to Thursday December 3 at 4:00 PM Central instead?")
+        self.assertEqual((r.zone, r.steer_window), ("Central", (dt.time(16, 0), dt.time(16, 30))))
+        r = P("Could Shane do Monday, December 7 at 10:15 AM Pacific for 45 minutes?")
+        self.assertEqual(r.steer_window, (dt.time(10, 15), dt.time(11, 0)))
+        r = P("Does December 3 at 10am work?")                  # no zone written: read in Pacific
+        self.assertEqual((r.zone, r.steer_window), (None, (dt.time(10, 0), dt.time(10, 30))))
+        r = P("I'm on Eastern time. Does December 3 at 1pm work?")
+        self.assertEqual((r.zone, r.steer_window), ("Eastern", (dt.time(13, 0), dt.time(13, 30))))
+
+    def test_one_time_of_day_on_several_days_is_still_one_time(self):
+        r = P("Does next Thursday at 2pm PT work?")             # row L3: two Thursdays, one hour
+        self.assertEqual(r.steer_day, (dt.date(2026, 12, 3), dt.date(2026, 12, 10)))
+        self.assertEqual(r.steer_window, (dt.time(14, 0), dt.time(14, 30)))
+
+    def test_a_part_of_day_written_wins_over_the_time(self):
+        self.assertEqual(P("Thursday afternoon, say December 3 at 2pm PT?").steer_window, AFTERNOON)
+
+    def test_no_one_time_no_part_of_day(self):
+        for text in ("December 3 at 10am PT or December 4 at 2pm PT?",          # two times
+                     "I can't do December 3 at 10am PT.",                       # ruled out (row Q5)
+                     "The webinar starts December 3 at 10am PT. Can we talk after?",    # not the meeting (row Q10)
+                     "Does December 3 at 2pm CET work?",                        # a zone she has no rule for
+                     "Does December 3 at 10am PT work, for two hours?",         # longer than she books
+                     "I can't do Thursday. Friday at 10:15 AM Pacific works.",  # a day ruled out
+                     "Could we talk on December 3?"):                           # no time at all
+            with self.subTest(text=text):
+                self.assertIsNone(P(text).steer_window)
+        self.assertIsNone(self.offer("I'm on UTC+15. Does December 3 at 6pm work?", "B4").zone)
+
+    def test_a_wall_of_dates_and_times_gets_the_earliest_slots(self):
+        # Past 100 dates, times and parts of day a mail is no request with an order to it: no time
+        # is put first and no day steers, and the reading stays cheap. It never booked (B2).
+        r = P("Monday or Tuesday or Wednesday. " * 34)
+        self.assertEqual((r.verdict, r.failed_condition, r.steer_day, r.steer_window), ("offer", "B2", None, None))
+        self.assertEqual(r.readings, [])
+        r = P("Thursday at 10am PT. " * 51)
+        self.assertEqual((r.verdict, r.failed_condition, r.readings, r.excluded_utc), ("offer", "B2", [], []))
+        self.assertEqual(r.zone, "Pacific")
+        r = P("Monday or Tuesday or Wednesday. " * 33)       # 99: still read
+        self.assertEqual(r.steer_day, (dt.date(2026, 12, 7), dt.date(2026, 12, 8), dt.date(2026, 12, 2)))
+        self.assertEqual(len(r.readings), 99)
+
+    def test_the_steer_is_quick_on_the_longest_mail(self):
+        # caps.MAX_TEXT_CHARS of spaces, or of words, around one day: a few hundredths of a second
+        # (the first of these took three seconds before the words read around a day were bounded)
+        for text in ("Thursday" + " " * 19990, "Thursday afternoon " + "A. " * 6600 + "time",
+                     "I can't do " + "the " * 4990 + "Thursday", "Thursday " + "at " * 6600,
+                     "Next week" + " " * 19980 + "Thursday"):
+            with self.subTest(text=text[:30]):
+                started = time.perf_counter()
+                r = P(text)
+                self.assertLess(time.perf_counter() - started, 1.5)
+                self.assertEqual(r.verdict, "offer")
+        started = time.perf_counter()       # 20,000 characters of "Thu 1pm": 14 seconds before, about one now
+        r = P("Thu 1pm " * 2500)
+        self.assertLess(time.perf_counter() - started, 8)
+        self.assertEqual((r.verdict, r.failed_condition, r.steer_day, r.steer_window), ("offer", "B2", None, None))
+
+    def test_the_steer_never_changes_the_verdict(self):
+        # The steer only orders an offer. With both of its steps failing outright, what books, when,
+        # in which zone and why not are what they are with it.
+        def fails(*args, **kwargs):
+            raise RuntimeError("the steer failed")
+
+        booked = 0
+        for text in ("December 3 at 10am PT.", "Thursday, December 3 at 10am PT works. Not Friday.",
+                     "December 3 at 10am Pacific next week?", "Thursday, December 3 at 2pm Eastern works.",
+                     "Could Shane do December 3 at 10am Pacific about planning?",
+                     "Tuesday or Wednesday afternoon (UK time) next week.", "Next week? Tuesday at 10am PT.",
+                     "Could we talk Thursday next week at 2pm Eastern?", "Any day except Monday works for me.",
+                     "I'm on GMT+1. December 3 at 6pm works.", "Friday afternoon Eastern, or December 3 at 10am PT."):
+            with self.subTest(text=text):
+                r = P(text)
+                with mock.patch.object(parser, "_frame_days", fails), mock.patch.object(parser, "_steer", fails):
+                    bare = P(text)
+                self.assertEqual((bare.steer_day, bare.steer_window), (None, None))
+                self.assertEqual((r.verdict, r.failed_condition, r.instant_utc, r.conditions, r.length_min),
+                                 (bare.verdict, bare.failed_condition, bare.instant_utc, bare.conditions,
+                                  bare.length_min))
+                if r.verdict == "book":
+                    booked += 1
+                    self.assertEqual((r.zone, r.zone_pair), (bare.zone, bare.zone_pair))
+        self.assertGreaterEqual(booked, 3)
 
 
 # ---------------------------------------------------------------------------------------
@@ -972,6 +1365,41 @@ class ZonesRowsTest(Base):
         self.book("December 3 at 1 Central if that suits.", u(2026, 12, 3, 19))
         self.offer("December 3 at 10am Mountain View.", "B4")
         self.offer("December 3 at 10am Eastern Europe.", "B4")
+
+    def test_zone_bare_region_before_what_the_meeting_is_about(self):
+        # Row Z3's list also holds about, regarding, re and concerning (decision 120).
+        for word in ("about", "regarding", "re", "concerning"):
+            with self.subTest(word=word):
+                self.book("Could Shane do December 3 at 10am Pacific %s planning?" % word, DEC3_10)
+        self.book("December 3 at 1pm Eastern re: the renewal.", DEC3_10)
+        # the email from the live loop that she answered with an offer
+        self.book("Can we talk on Wednesday, December 2, 2026 at 10:00 AM Pacific about planning for January?",
+                  u(2026, 12, 2, 18))
+
+    def test_zone_bare_region_counts_those_words_only_right_after_it(self):
+        self.offer("Could we talk about planning on December 3 at 10am Pacific Heights?", "B4")
+        self.offer("December 3 at 10am Pacific Heights about planning.", "B4")
+        self.offer("Regarding the renewal, December 3 at 10am Mountain View.", "B4")
+        self.offer("December 3 at 10am Eastern Europe, concerning the renewal.", "B4")
+        self.offer("Re the renewal: December 3 at 10am Central Station works.", "B4")
+        self.offer("December 3 at 10am Pacific re-planning the launch.", "B4")      # "re-" is not the word "re"
+
+    def test_zone_bare_region_before_a_weekday_or_tomorrow(self):
+        # Row Z3 lets a date follow the region word, and "Thursday" or "tomorrow" is one. Such a date
+        # never books (B5), so only the offer changes: the time is read in the zone written.
+        for text in ("1pm Eastern Thursday?", "1 PM Eastern this Thursday works.", "Thursday? 1pm Eastern on Thursday.",
+                     "1pm Eastern, Thursday"):
+            with self.subTest(text=text):
+                r = self.offer(text, first=DEC3_10)
+                self.assertEqual(r.zone, "Eastern")
+                self.assertTrue(r.conditions["B4"])
+        r = self.offer("1pm Eastern tomorrow?", "B5", first=u(2026, 12, 2, 18))
+        self.assertEqual(r.zone, "Eastern")
+        r = self.offer("11am Mountain next Thursday?", "B5", first=DEC3_10)
+        self.assertEqual(r.zone, "Mountain")
+        r = self.offer("1pm Eastern Europe Thursday?", first=u(2026, 12, 3, 21))       # no zone: read as Pacific
+        self.assertIsNone(r.zone)
+        self.assertFalse(r.conditions["B4"])
 
     def test_zone_utc(self):
         self.book("December 3 at 6pm UTC.", DEC3_10)
@@ -1225,7 +1653,7 @@ class MatchPickTest(unittest.TestCase):
     def test_by_number(self):
         for text, i in (("Option 2 works.", 1), ("option 1 please", 0), ("#3", 2), ("The second one, please.", 1),
                         ("the third", 2), ("Slot 1 is great", 0), ("Number 3.", 2), ("1", 0), ("3 works", 2),
-                        ("Let's go with the 2nd.", 1), ("I'll take the first", 0)):
+                        ("Let's go with the 1st.", 0), ("I'll take the first", 0)):
             with self.subTest(text=text):
                 self.assertEqual(self.pick(text), ("matched_slot", i))
 
@@ -1256,6 +1684,26 @@ class MatchPickTest(unittest.TestCase):
         self.assertEqual(self.pick("Thursday at 2pm Pacific works"), ("matched_slot", 1))
         self.assertEqual(self.pick("10:30 is good"), ("matched_slot", 2))
         self.assertEqual(self.pick("Friday 10:30am PT"), ("matched_slot", 2))
+
+    def test_a_pick_reads_the_region_before_what_the_meeting_is_about(self):
+        # 2 PM is on offer in both zones shown (slot 2 in Pacific, slot 1 in Eastern): the region written
+        # says which, and row Z3 counts it before these four words (decision 120).
+        for word in ("about", "regarding", "re", "concerning"):
+            with self.subTest(word=word):
+                self.assertEqual(self.pick("2pm Pacific %s the plan" % word), ("matched_slot", 1))
+                self.assertEqual(self.pick("2pm Eastern %s the plan" % word), ("matched_slot", 0))
+        self.assertEqual(self.pick("2pm Pacific Heights, about the plan"), ("ambiguous", None))
+        self.assertEqual(self.pick("2pm Pacific re-planning"), ("ambiguous", None))     # "re-" is not the word "re"
+
+    def test_a_pick_reads_the_region_before_a_weekday(self):
+        # Thursday's slot is 2 PM Pacific. "2pm Eastern Thursday" names another time, one not on offer:
+        # read without its zone it would book Thursday at 2 PM Pacific.
+        self.assertEqual(self.pick("2pm Eastern Thursday"), ("near_miss", None))
+        self.assertEqual(self.pick("2pm Eastern Thursday works"), ("near_miss", None))
+        self.assertEqual(self.pick("None of those. How about 2pm Eastern Thursday?"), ("near_miss", None))
+        self.assertEqual(self.pick("2pm Eastern tomorrow"), ("matched_slot", 0))
+        self.assertEqual(self.pick("2pm Pacific Thursday"), ("matched_slot", 1))
+        self.assertEqual(self.pick("5pm Eastern Thursday"), ("matched_slot", 1))
 
     def test_by_time_sender_zone(self):
         self.assertEqual(self.pick("5pm Eastern on Thursday"), ("matched_slot", 1))
@@ -1304,6 +1752,118 @@ class MatchPickTest(unittest.TestCase):
         self.assertEqual(self.pick(""), ("none", None))
         self.assertEqual(self.pick(None), ("none", None))
         self.assertEqual(self.pick("2", slots=[]), ("none", None))
+
+    def test_the_end_of_a_range_names_no_slot(self):
+        # "10-11am" is the hour that ends at 11:00. Read as the 11:00 AM slot, she would book the half
+        # hour after the time the sender said they had. The same offer goes out again (ruling 6).
+        for text in ("10-11am works", "10 to 11am works for me.", "from 10 until 11am", "between 10 and 11am works",
+                     "Thursday 1-2pm works.", "I'm free 1-2pm on Thursday", "between 1pm and 2pm Thursday",
+                     "Thursday from 1pm until 2pm", "Thursday 1pm-2pm", "10:00 - 10:30 AM Pacific on Friday"):
+            for zone in (None, "Eastern"):
+                with self.subTest(text=text, zone=zone):
+                    self.assertEqual(self.pick(text, zone=zone), ("near_miss", None))
+
+    def test_the_start_of_a_range_still_names_its_slot(self):
+        for text, i in (("Thursday 2:00 PM - 2:30 PM Pacific works.", 1), ("11am-noon Pacific works.", 0),
+                        ("11am - 11:30am Pacific", 0), ("Friday 10:30-11am PT", 2), ("Thursday at 2-3pm Pacific works", 1),
+                        ("between 11am and noon on Wednesday", 0)):
+            for zone in (None, "Eastern"):
+                with self.subTest(text=text, zone=zone):
+                    self.assertEqual(self.pick(text, zone=zone), ("matched_slot", i))
+
+    def test_the_start_of_a_range_is_read_in_the_zone_and_the_half_of_the_day_of_its_end(self):
+        # With no zone known for the sender she shows UTC, and Thursday's 2:00 PM Pacific slot is 22:00 UTC.
+        # The "10" of "10-11am Eastern" is 10:00 AM Eastern, never 22:00 UTC.
+        for text in ("at 10-11am Eastern.", "at 10-11am Eastern works", "at 10-11am.", "at 10 - 11 a.m. works",
+                     "How about sometime soon at 10-11am Eastern re: the plan."):
+            with self.subTest(text=text):
+                self.assertEqual(self.pick(text, slots=OFFER[1:2], zone=None), ("near_miss", None))
+        self.assertEqual(self.pick("at 10-11am Eastern.", zone=None), ("near_miss", None))
+        self.assertEqual(self.pick("at 10-11pm UTC works", slots=OFFER[1:2], zone=None), ("matched_slot", 0))
+        self.assertEqual(self.pick("at 2-3pm works", slots=OFFER[1:2], zone=None), ("matched_slot", 0))
+
+    def test_a_number_that_starts_a_range_is_not_a_slot_number(self):
+        # Monday 10:00 AM, Tuesday 11:00 AM, Wednesday 2:00 PM Pacific: "from 1 to 2pm" is not option 1.
+        offer = [Slot(u(2026, 12, 7, 18), u(2026, 12, 7, 18, 30)), Slot(u(2026, 12, 8, 19), u(2026, 12, 8, 19, 30)),
+                 Slot(u(2026, 12, 9, 22), u(2026, 12, 9, 22, 30))]
+        for text in ("Thursday from 1 to 2pm works", "Thursday between 1 and 2pm works", "1 to 2pm on Thursday",
+                     "3 until 4pm Thursday?"):
+            with self.subTest(text=text):
+                self.assertEqual(self.pick(text, slots=offer, zone=None), ("near_miss", None))
+        self.assertEqual(self.pick("1 works", slots=offer, zone=None), ("matched_slot", 0))
+        self.assertEqual(self.pick("Option 1, from 10 to 10:30am", slots=offer, zone=None), ("matched_slot", 0))
+        self.assertEqual(self.pick("Option 1, Monday from 10am to 10:30am", slots=offer, zone=None), ("matched_slot", 0))
+
+    def test_a_reply_is_read_in_the_zone_the_reply_itself_gives(self):
+        # The loop reads a reply in the zone the reply's own text gives (ParseResult.zone). A zone
+        # written after a part of day, or an offset written on its own, is that zone: "at 11" is
+        # 11:00 AM Central, the first slot, and no longer the slot shown as 23:00 UTC.
+        three = [Slot(u(2026, 12, 2, 17), u(2026, 12, 2, 17, 30)), Slot(u(2026, 12, 2, 21), u(2026, 12, 2, 21, 30)),
+                 Slot(u(2026, 12, 3, 23), u(2026, 12, 3, 23, 30))]
+        one = [Slot(u(2026, 12, 3, 19), u(2026, 12, 3, 19, 30))]
+        for text, slots, zone, found in (
+                ("late afternoon Central. at 11 please", three, "Central", ("matched_slot", 0)),
+                ("tomorrow first thing (Central) - at 11?", three, "Central", ("matched_slot", 0)),
+                ("I'm on UTC+2. at 9 works", one, "UTC+02:00", ("matched_slot", 0)),
+                ("at 11 please", three, None, ("matched_slot", 2)),         # no zone written: as shown, in UTC
+                ("at 9 works", one, None, ("none", None))):
+            with self.subTest(text=text):
+                self.assertEqual(P(text).zone, zone)
+                self.assertEqual(self.pick(text, slots=slots, zone=zone), found)
+
+    def test_a_number_that_ends_a_range_is_not_a_slot_number(self):
+        # Monday 10:00 AM, Tuesday 11:00 AM, Wednesday 3:00 PM Pacific: "1pm to 2" is not option 2.
+        offer = [Slot(u(2026, 12, 7, 18), u(2026, 12, 7, 18, 30)), Slot(u(2026, 12, 8, 19), u(2026, 12, 8, 19, 30)),
+                 Slot(u(2026, 12, 9, 23), u(2026, 12, 9, 23, 30))]
+        for text in ("1pm to 2 works", "between 1pm and 2 works", "Thursday 1pm to 2 works", "1pm - 2",
+                     "How about 12:30 to 1?", "11:30 to 1 works", "1pm to 2. Thanks"):
+            with self.subTest(text=text):
+                self.assertEqual(self.pick(text, slots=offer, zone=None), ("near_miss", None))
+        self.assertEqual(self.pick("2 works", slots=offer, zone=None), ("matched_slot", 1))
+        self.assertEqual(self.pick("2. Thanks", slots=offer, zone=None), ("matched_slot", 1))
+
+    def test_the_third_after_a_weekday_or_beside_a_month_is_a_day_not_the_third_option(self):
+        # Wednesday Dec 2, Thursday Dec 3, Friday Dec 4: "Thursday the third" is not Friday.
+        for text in ("Thursday the third works", "Thursday (the 3rd) works", "Thursday (the third) works",
+                     "December the 3rd works better", "the 3rd of December works", "December the third works"):
+            with self.subTest(text=text):
+                self.assertEqual(self.pick(text), ("near_miss", None))
+        # Monday Nov 30, Tuesday Dec 1, Wednesday Dec 2: no slot is on the 3rd, and the month says it is a date.
+        early = [Slot(u(2026, 11, 30, 18), u(2026, 11, 30, 18, 30)), Slot(u(2026, 12, 1, 19), u(2026, 12, 1, 19, 30)),
+                 Slot(u(2026, 12, 2, 23), u(2026, 12, 2, 23, 30))]
+        for text in ("Thursday (the 3rd) works", "December the 3rd works better", "the 3rd of December works"):
+            with self.subTest(text=text, slots="early"):
+                self.assertEqual(self.pick(text, slots=early, zone=None), ("near_miss", None))
+        # With no weekday and no month, the word is the option.
+        self.assertEqual(self.pick("the third works", slots=early, zone=None), ("matched_slot", 2))
+        self.assertEqual(self.pick("Friday, the third option", zone="Eastern"), ("matched_slot", 2))
+
+    def test_the_3rd_after_a_weekday_or_on_an_offered_day_is_not_the_third_option(self):
+        # Wednesday Dec 2, Thursday Dec 3, Friday Dec 4. Read as the third option, "Thursday the 3rd"
+        # would book Friday. A day with no time is not a pick: the same offer goes out again.
+        for text in ("Thursday the 3rd works", "Thursday, the 3rd.", "the 3rd works", "on the 3rd", "I'll take the 3rd",
+                     "Wednesday the 2nd works for me", "Let's go with the 2nd."):
+            with self.subTest(text=text):
+                self.assertEqual(self.pick(text), ("near_miss", None))
+        # The option spelled out or said to be one is the option, and so is an ordinal no offered day carries.
+        for text, i in (("the third works", 2), ("Let's go with the second.", 1), ("the 3rd one works", 2),
+                        ("the 2nd option, please", 1), ("the 1st works", 0)):
+            with self.subTest(text=text):
+                self.assertEqual(self.pick(text), ("matched_slot", i))
+        later = [Slot(u(2026, 12, 7, 18), u(2026, 12, 7, 18, 30)), Slot(u(2026, 12, 8, 19), u(2026, 12, 8, 19, 30)),
+                 Slot(u(2026, 12, 9, 22), u(2026, 12, 9, 22, 30))]
+        self.assertEqual(self.pick("Let's go with the 2nd.", slots=later), ("matched_slot", 1))
+        self.assertEqual(self.pick("Thursday the 3rd works", slots=later), ("near_miss", None))
+
+    def test_a_time_on_the_3rd_does_not_name_a_slot_on_another_day(self):
+        # "the 3rd at 10:30" is Thursday Dec 3 at 10:30, a time not on offer: Friday's 10:30 AM slot is
+        # the third option, and it is not what the sender named.
+        for text in ("the 3rd at 10:30 works", "on the 3rd at 10:30am Pacific", "on the 2nd at 2pm Pacific",
+                     "the 2nd, 2pm Pacific works"):
+            with self.subTest(text=text):
+                self.assertEqual(self.pick(text), ("near_miss", None))
+        self.assertEqual(self.pick("the 3rd at 2pm Pacific works"), ("ambiguous", None))
+        self.assertEqual(self.pick("the 3rd one, 10:30am Pacific"), ("matched_slot", 2))
 
     def test_kinds_are_rule_words(self):
         from doris import why

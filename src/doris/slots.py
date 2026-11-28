@@ -1,25 +1,19 @@
 """Where a slot can sit (G9), what counts as busy (ruling 3) and which slots she offers (ruling 6).
 
-Times are aware UTC. Pacific exists only inside these functions, through zones.py, which is
-imported where it is used (another builder owns it). Every rule returned is a word from
-why.RULE_WORDS: length, not_quarter_hour, outside_hours, holiday, under_24h, over_30d, and
-overlap for a busy span.
+Times are aware UTC. Pacific exists only inside these functions, through zones.py. Every rule
+returned is a word from why.RULE_WORDS: length, not_quarter_hour, outside_hours, holiday,
+under_24h, over_30d, and overlap for a busy span.
 """
 
 import datetime as _dt
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple, Union
 
-from . import caps
-from .shapes import Event, Slot
+from . import caps, zones
+from .shapes import UTC, Event, Slot
 
-UTC = _dt.timezone.utc
 _DAY = _dt.timedelta(days=1)
+_NO_TIME = _dt.timedelta(0)
 PACIFIC = "Pacific"
-
-
-def _zones():
-    from . import zones
-    return zones
 
 
 def _aware(value, what):
@@ -29,7 +23,7 @@ def _aware(value, what):
 
 
 def _pacific_midnight(day):
-    return _zones().to_utc(_dt.datetime.combine(day, _dt.time(0)), PACIFIC)
+    return zones.to_utc(_dt.datetime.combine(day, _dt.time(0)), PACIFIC)
 
 
 # ---------------------------------------------------------------------------------------
@@ -50,7 +44,6 @@ def bookable(slot: Slot, now: _dt.datetime, written: bool) -> Tuple[bool, Option
     if rest or not (caps.MIN_LENGTH_MIN <= minutes <= caps.MAX_LENGTH_MIN):
         return False, "length"
 
-    zones = _zones()
     local_start = zones.to_local(start, PACIFIC)
     local_end = zones.to_local(end, PACIFIC)
     grid = caps.WRITTEN_START_MINUTES if written else caps.OFFERED_START_MINUTES
@@ -74,7 +67,7 @@ def bookable(slot: Slot, now: _dt.datetime, written: bool) -> Tuple[bool, Option
 # ---------------------------------------------------------------------------------------
 # Ruling 3: what counts as busy
 # ---------------------------------------------------------------------------------------
-def _busy_window(ev: Event) -> Optional[Tuple[_dt.datetime, _dt.datetime]]:
+def busy_window(ev: Event) -> Optional[Tuple[_dt.datetime, _dt.datetime]]:
     """The UTC span an event makes busy, or None when it cannot be placed (then it is busy
     everywhere: fail closed)."""
     if ev.kind == "timed":
@@ -91,7 +84,7 @@ def _busy_window(ev: Event) -> Optional[Tuple[_dt.datetime, _dt.datetime]]:
             if ev.kind == "all_day" and ev.end_utc is not None:
                 return _aware(ev.start_utc, "event start"), _aware(ev.end_utc, "event end")
             # unknown_zone: the whole Pacific day (or days) its times touch.
-            pacific_date = _zones().pacific_date
+            pacific_date = zones.pacific_date
             first_day = pacific_date(_aware(ev.start_utc, "event start"))
             last = ev.end_utc if ev.end_utc is not None else ev.start_utc
             end_day = pacific_date(_aware(last, "event end")) + _DAY
@@ -100,6 +93,9 @@ def _busy_window(ev: Event) -> Optional[Tuple[_dt.datetime, _dt.datetime]]:
         return _pacific_midnight(first_day), _pacific_midnight(end_day)
 
     return None
+
+
+_busy_window = busy_window      # the name the adapters still call
 
 
 def overlapping(events: Iterable[Event], slot: Slot) -> List[Event]:
@@ -113,7 +109,7 @@ def overlapping(events: Iterable[Event], slot: Slot) -> List[Event]:
     for ev in events:
         if (ev.status or "").upper() == "CANCELLED":
             continue
-        window = _busy_window(ev)
+        window = busy_window(ev)
         if window is None or (window[0] < end and window[1] > start):
             hits.append(ev)
     return hits
@@ -140,7 +136,6 @@ def available(events: Iterable[Event], slot: Slot, now: _dt.datetime, written: b
 def _grid(now, length):
     """Every offered-grid slot (hour and half hour) inside business hours, from the first day
     24 hours out to the last day 30 days out, in time order. bookable() still checks each."""
-    zones = _zones()
     day = zones.pacific_date(now + caps.MIN_NOTICE)
     last = zones.pacific_date(now + caps.MAX_HORIZON)
     while day <= last:
@@ -169,8 +164,20 @@ def _start_of(candidate, what):
     return _aware(candidate, what)
 
 
+def _one_time(window, length):
+    """The window holds one slot at most: it is the one time the sender asked for, not a part of day."""
+    if window is None:
+        return False
+    opens = _dt.datetime.combine(_dt.date(2000, 1, 3), window[0])
+    closes = _dt.datetime.combine(_dt.date(2000, 1, 3), window[1])
+    if closes < opens:               # it runs past midnight
+        closes += _DAY
+    return closes - opens <= length
+
+
 def find_slots(events: Sequence[Event], now: _dt.datetime, length_min: int, count: int = 3,
-               exclude_starts: Iterable = (), first: Iterable = (), steer_day: Optional[_dt.date] = None,
+               exclude_starts: Iterable = (), first: Iterable = (),
+               steer_day: Union[_dt.date, Iterable[_dt.date], None] = None,
                steer_window: Optional[Tuple[_dt.time, _dt.time]] = None,
                steer_zone: Optional[str] = PACIFIC, derived: Iterable = ()) -> List[Slot]:
     """Up to `count` slots of `length_min` minutes, each bookable and not busy, in offer order:
@@ -179,13 +186,22 @@ def find_slots(events: Sequence[Event], now: _dt.datetime, length_min: int, coun
        available; a written time may sit on any quarter hour; then, only once one of those
        is offered, the `derived` candidates (D5 moving a time onto a weekday written apart
        from it), on the hour or half hour only: no time the sender wrote, so never first;
-    2. with `steer_day`, slots on that day (inside `steer_window` when one is given);
-    3. then the earliest available slots on the hour or half hour, at most one per Pacific day
-       where possible (inside `steer_window` first), in time order.
+    2. the days the sender named (`steer_day`: one date, or several in the order to offer
+       them): a slot on each before a second on any, inside `steer_window` (the part of the
+       day they wrote) when one is given; a named day with nothing free inside it still gets
+       its slot nearest to it;
+    3. then the earliest available slots, at most one per Pacific day where possible: other
+       days inside `steer_window`; what is left of the named days, nearest the window first;
+       each other day's slot nearest the window; and last any slot at all. When `steer_window`
+       is the one time they asked for (it holds one slot at most), the other days come nearest
+       the named days first, not earliest first: that time on each, else each day's slot
+       nearest it, before a second slot on a named day.
 
-    A start in `exclude_starts` (her earlier offers on the thread) is never offered again.
-    `steer_day` and `steer_window` are read in `steer_zone` (the sender's zone, else Pacific).
-    An empty list means no available slot in the next 30 days: a hold.
+    Her own slots (2 and 3) start on the hour or half hour. A start in `exclude_starts` (her
+    earlier offers on the thread) is never offered again. `steer_day` and `steer_window` are
+    read in `steer_zone` (the sender's zone, else Pacific). The list is the sender's own times,
+    then the named days' slots in time order, then the rest in time order. An empty list means
+    no available slot in the next 30 days: a hold.
     """
     now = _aware(now, "now")
     if isinstance(length_min, bool) or not isinstance(length_min, int) or \
@@ -197,7 +213,6 @@ def find_slots(events: Sequence[Event], now: _dt.datetime, length_min: int, coun
     events = list(events)
     length = _dt.timedelta(minutes=length_min)
     taken = {_start_of(s, "excluded start") for s in exclude_starts}
-    zones = _zones()
     zone = steer_zone or PACIFIC
 
     chosen = []    # type: List[Slot]
@@ -229,39 +244,115 @@ def find_slots(events: Sequence[Event], now: _dt.datetime, length_min: int, coun
     pool = [s for s in _grid(now, length)
             if s.start_utc not in taken and available(events, s, now, written=False)[0]]
 
-    def in_window(slot):
+    def distance_outside(slot):
+        """How far the slot sits outside the part of the day the sender wrote: no time at all when
+        it is inside it, or when they wrote none."""
         if steer_window is None:
-            return True
-        local_start = zones.to_local(slot.start_utc, zone)
-        local_end = zones.to_local(slot.end_utc, zone)
-        opens = _dt.datetime.combine(local_start.date(), steer_window[0])
-        closes = _dt.datetime.combine(local_start.date(), steer_window[1])
-        return opens <= local_start and local_end <= closes
+            return _NO_TIME
+        start = zones.to_local(slot.start_utc, zone)
+        end = zones.to_local(slot.end_utc, zone)
+        nearest = None
+        for shift in (-1, 0, 1):         # that part of the day before, of this day, of the day after
+            day = start.date() + shift * _DAY
+            opens = _dt.datetime.combine(day, steer_window[0])
+            closes = _dt.datetime.combine(day, steer_window[1])
+            if closes < opens:           # it runs past midnight
+                closes += _DAY
+            distance = max(opens - start, end - closes, _NO_TIME)
+            nearest = distance if nearest is None else min(nearest, distance)
+        return nearest
 
-    # 2. The day the sender named.
-    if steer_day is not None:
-        for slot in pool:
-            if len(chosen) >= count:
+    outside = {s.start_utc: distance_outside(s) for s in pool}
+
+    def nearest_first(slot):
+        return outside[slot.start_utc], slot.start_utc
+
+    if steer_day is None:
+        days = ()
+    elif isinstance(steer_day, _dt.date):
+        days = (steer_day,)
+    else:
+        days = tuple(dict.fromkeys(steer_day))      # each day once, in the order given
+    on_day = {day: [] for day in days}
+    for slot in pool:
+        day = zones.to_local(slot.start_utc, zone).date()
+        if day in on_day:
+            on_day[day].append(slot)
+    for day in days:
+        on_day[day].sort(key=nearest_first)
+
+    named = []      # type: List[Slot]    # her slots on the days the sender named
+    others = []     # type: List[Slot]    # her slots on other days
+
+    def room():
+        return count - len(chosen) - len(named) - len(others)
+
+    def pick(slot, group):
+        group.append(slot)
+        taken.add(slot.start_utc)
+
+    def one_more_on_each_named_day(inside_only):
+        """A round over the named days, in the order given. False when no day had a slot left."""
+        any_taken = False
+        for day in days:
+            if room() <= 0:
                 break
-            if zones.to_local(slot.start_utc, zone).date() == steer_day and in_window(slot):
-                take(slot)
+            for slot in on_day[day]:
+                if slot.start_utc in taken:
+                    continue
+                if inside_only and outside[slot.start_utc]:
+                    break                # nearest first: nothing after this one is inside either
+                pick(slot, named)
+                any_taken = True
+                break
+        return any_taken
+
+    # 2. The days the sender named: inside the part of the day they wrote, a slot on each day
+    #    before a second on any; then a day that got nothing takes its slot nearest that part.
+    while room() > 0 and one_more_on_each_named_day(inside_only=True):
+        pass
+    for day in days:
+        if room() <= 0:
+            break
+        if not any(zones.to_local(s.start_utc, zone).date() == day for s in chosen + named):
+            for slot in on_day[day]:
+                if slot.start_utc not in taken:
+                    pick(slot, named)
+                    break
 
     # 3. The earliest available, one per Pacific day where possible.
-    used_days = {zones.pacific_date(s.start_utc) for s in chosen}
-    inside = [s for s in pool if in_window(s)]
-    outside = [s for s in pool if not in_window(s)]
-    picked = []
-    for group, new_day_only in ((inside, True), (outside, True), (inside, False), (outside, False)):
-        for slot in group:
-            if len(chosen) + len(picked) >= count:
+    used_days = {zones.pacific_date(s.start_utc) for s in chosen + named}
+
+    def fill(in_order, new_day_only):
+        for slot in in_order:
+            if room() <= 0:
                 break
             if slot.start_utc in taken:
                 continue
             day = zones.pacific_date(slot.start_utc)
             if new_day_only and day in used_days:
                 continue
-            picked.append(slot)
-            taken.add(slot.start_utc)
+            pick(slot, others)
             used_days.add(day)
-    picked.sort(key=lambda s: s.start_utc)
-    return chosen + picked
+
+    if days and _one_time(steer_window, length):
+        # The one time they asked for (ruling 6): that time on the days nearest the day they named,
+        # then each of those days' slot nearest it, before a second slot on the day itself.
+        def days_away(slot):
+            day = zones.to_local(slot.start_utc, zone).date()
+            return min(abs((day - named_day).days) for named_day in days)
+
+        fill(sorted((s for s in pool if not outside[s.start_utc]), key=lambda s: (days_away(s), s.start_utc)),
+             new_day_only=True)
+        fill(sorted(pool, key=lambda s: (days_away(s), zones.pacific_date(s.start_utc)) + nearest_first(s)),
+             new_day_only=True)
+    else:
+        fill([s for s in pool if not outside[s.start_utc]], new_day_only=True)  # other days, inside the window
+    while room() > 0 and one_more_on_each_named_day(inside_only=False):     # what is left of the named days
+        pass
+    fill(sorted(pool, key=lambda s: (zones.pacific_date(s.start_utc),) + nearest_first(s)),
+         new_day_only=True)                                                 # each other day's nearest slot
+    fill(sorted(pool, key=nearest_first), new_day_only=False)               # any day at all
+    named.sort(key=lambda s: s.start_utc)
+    others.sort(key=lambda s: s.start_utc)
+    return chosen + named + others
