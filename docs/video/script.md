@@ -64,7 +64,7 @@ Use the first that exists:
 | Beat | One line to know |
 |---|---|
 | Live | Mail to whizz@ is forwarded to Doris's own mailbox; she reads it over IMAP, books over CalDAV and replies through Fastmail JMAP. Her event has no attendees, so the calendar server emails nobody. |
-| Book | She books straight away only when a plain date parser and the model agree on one date, time and zone, and the slot is open. Anything vaguer gets 1 to 3 offered times. |
+| Book | She books straight away only when a plain date parser and the model agree on one date, time and zone, and the slot is open. Anything vaguer gets 1 to 3 offered times, on the days and in the part of day the sender named. A clear time that is taken gets the nearest free times: that day's slot nearest to it, then the same time on the nearest other days. |
 | Read back | After every write she reads the calendar again; if anything else overlaps, she removes her own event and offers new times. |
 | Hold | Money, legal, complaints, anything outside her classes, or unsure: held for me with the reason and a draft. Nothing goes to the sender. |
 | Templates | Every sentence she sends is a fixed template I approved. The model classifies; code picks the action and fills the template. |

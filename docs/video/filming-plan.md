@@ -75,11 +75,13 @@ The feature freeze comes first. Everything is filmed on the frozen commit.
 
 | Take | Rae asks for | Free on whizz@ first? |
 |---|---|---|
-| Sat dry run | Thu Dec 3, 10:00 AM Pacific | check |
-| Sat recorded | Thu Dec 3, 11:00 AM Pacific | check |
-| Sun take 1 | Thu Dec 3, 2:00 PM Pacific | check |
-| Sun take 2 | Thu Dec 3, 3:00 PM Pacific | check |
-| Sun take 3 | Fri Dec 4, 10:00 AM Pacific | check |
+| Sat dry run | Thu Dec 3, 9:00 AM Pacific | free at 12:27 PM Sat; check again |
+| Sat recorded | Thu Dec 3, 12:00 PM Pacific | free at 12:27 PM Sat; check again |
+| Sun take 1 | Thu Dec 3, 2:00 PM Pacific | free at 12:27 PM Sat; check again |
+| Sun take 2 | Thu Dec 3, 3:00 PM Pacific | free at 12:27 PM Sat; check again |
+| Sun take 3 | Fri Dec 4, 10:00 AM Pacific | free at 12:27 PM Sat; check again |
+
+Saturday's two times were Thu Dec 3 at 10:00 and 11:00 AM. Both are busy on whizz@ (Thursday is busy 10:00 AM to 12:00 PM and 1:00 to 2:00 PM Pacific; Friday 9:00 to 10:00 AM and 1:00 to 5:00 PM), so they moved. A time that is taken does not book: Rae gets an offer of the nearest free times (that day's slot nearest to it, then the same time on the nearest other days), and the take no longer tells the booking story.
 
 The script is written for Sunday take 1 (Thursday at two). On any other take, Shane says the time Rae actually asked for.
 
