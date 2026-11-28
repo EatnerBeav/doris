@@ -35,11 +35,12 @@ jobs:
       # test_demo_sandbox's git check, which skips where git cannot answer; here it cannot skip.
       - name: Git tracks only the committed sandbox
         run: python -m tests.unit.demo_sandbox
-      # A judge's order on one leg: the demo and the Trap Pack first, their output left in the
-      # checkout, then the suite. The condition keeps every leg's name and the other legs as they were.
+      # A judge's order on every leg: the demo and the Trap Pack from the fresh checkout, run from src/
+      # as the README says, their output left in the checkout, then the suite. bash on every system
+      # (Git Bash on Windows): the default pwsh would pass the step on traps' exit code alone.
       - name: Demo and Trap Pack before the suite
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.x'
         working-directory: src
+        shell: bash
         run: |
           python -m doris demo
           python -m doris traps
