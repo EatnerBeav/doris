@@ -27,7 +27,7 @@ Every `python3 -m doris` command in this README runs from `src/`. The demo uses 
 
 The demo replays one working day for the owner, Shane Bornstein. It is a Tuesday in a sandbox: a folder of real `.eml` files is the inbox, `.ics` files are the calendar, and the clock is the sandbox's own.
 
-Fifteen emails arrive between 8 AM and 3 PM Pacific. Each line of output is one email: the time, the sender, what she did, the reply she sent, and why, in the words of the rule that decided it. The day includes:
+Fifteen emails arrive between 8 AM and 3 PM Pacific. Each line of output is one email: the time, the sender, what she did, the reply she sent (its template code and name), and why, in the words of the rule that decided it. The day includes:
 
 - a clear request that is booked;
 - vague requests that get offers of times;
@@ -44,11 +44,11 @@ Two failures are staged on purpose, and the output labels them:
 - The calendar times out once. That is the pause of about 10 seconds; she then retries and succeeds.
 - Another event lands on the calendar in the middle of a booking. She removes her own booking and offers fresh times.
 
-At 5 PM she sends the owner the digest. The run ends with a summary of what she did for the owner, from the receipts. The last line verifies the receipt chain.
+At 5 PM she sends the owner the digest. The run ends with **What Doris did for Shane**: the owner's day told from her receipts (what needs the owner and why, the meetings on the calendar, each thread in plain words, the digest, the cost), then the receipt chain verified.
 
 The banner on the first line says what read the mail. With no key, recorded answers from a real model run are replayed if `sandbox/answers.jsonl` is present; otherwise a built-in keyword stand-in reads the mail, and every receipt says `stub`. With `ANTHROPIC_API_KEY` set, the model is called live (see [With a key](#with-a-key)).
 
-**The codes in the output.** Every sentence she sends is a fixed, approved template filled in by code; the model never writes a word that goes out.
+**The codes.** Every sentence she sends is a fixed, approved template filled in by code; the model never writes a word that goes out.
 
 | Code | What it is |
 |---|---|
