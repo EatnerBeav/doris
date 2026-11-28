@@ -142,6 +142,31 @@ class _Tmp(unittest.TestCase):
                                        "--results", os.path.join(root, "tests", "redteam", "RESULTS.md")]}
 
 
+class ManifestTest(_Tmp):
+    """What the trace's manifest says about the code it ran on."""
+
+    def test_the_commit_is_read_through_a_worktrees_git_file(self):
+        t = self.tmp()
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        common = os.path.join(t["root"], "main", ".git")
+        os.makedirs(os.path.join(common, "worktrees", "wt"))
+        os.makedirs(os.path.join(common, "refs", "heads"))
+        for path, text in (("refs/heads/redteam", sha), ("worktrees/wt/HEAD", "ref: refs/heads/redteam"),
+                           ("worktrees/wt/commondir", "../..")):
+            with open(os.path.join(common, *path.split("/")), "w", encoding="utf-8") as fh:
+                fh.write(text + "\n")
+        wt = os.path.join(t["root"], "wt")
+        os.makedirs(wt)
+        with open(os.path.join(wt, ".git"), "w", encoding="utf-8") as fh:
+            fh.write("gitdir: %s\n" % os.path.join(common, "worktrees", "wt"))
+        with mock.patch.object(paths, "REPO", wt):
+            code, out = run_main(t["argv"] + ["--case", "cap-writes-run"])
+        self.assertEqual(code, 0, out)
+        (run,) = os.listdir(os.path.join(t["root"], "traces"))
+        with open(os.path.join(t["root"], "traces", run, "manifest.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["commit"], sha)
+
+
 class FullRunTest(_Tmp):
     """The whole proof once, as a judge runs it (in temp folders)."""
 

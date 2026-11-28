@@ -69,7 +69,7 @@ from email import policy as _email_policy
 from email.parser import BytesHeaderParser
 from typing import Any, Dict, List, Optional
 
-from . import caps, compose, holds, ics, loop, model, netguard, parser, paths, receipts, screens, supervisor
+from . import caps, compose, holds, ics, livetrace, loop, model, netguard, parser, paths, receipts, screens, supervisor
 from . import templates, traps, zones
 from . import ledger as ledger_mod
 from .adapters import sandbox as sandbox_adapter
@@ -1490,28 +1490,6 @@ def trace_canaries(trace):
     return found
 
 
-def _commit():
-    """The commit the code ran on, read from .git without running git; "unknown" when it can't be."""
-    try:
-        git = os.path.join(paths.REPO, ".git")
-        with open(os.path.join(git, "HEAD"), encoding="ascii") as fh:
-            head = fh.read().strip()
-        if not head.startswith("ref: "):
-            return head[:40]
-        ref = head[5:]
-        path = os.path.join(git, *ref.split("/"))
-        if os.path.isfile(path):
-            with open(path, encoding="ascii") as fh:
-                return fh.read().strip()[:40]
-        with open(os.path.join(git, "packed-refs"), encoding="ascii") as fh:
-            for line in fh:
-                if line.strip().endswith(" " + ref):
-                    return line.split()[0][:40]
-    except (OSError, UnicodeDecodeError):
-        pass
-    return "unknown"
-
-
 def run_redteam(pack_dir=None, only=None, state_root=None, traces_root=None, results_path=None, stamp=None, echo=None):
     pack_dir = pack_dir or paths.TRAP_PACK
     state_root = state_root or paths.state_dir("throwaway")
@@ -1582,7 +1560,7 @@ def run_redteam(pack_dir=None, only=None, state_root=None, traces_root=None, res
     os.makedirs(trace_dir, exist_ok=True)
     manifest = {"run": run_name, "model_source": "yes-man",
                 "model": "the hostile yes-man stand-in (model.YES_MAN set by redteam), not a real model",
-                "mode": "throwaway", "commit": _commit(), "started_utc": stamp, "cost_usd": 0.0,
+                "mode": "throwaway", "commit": livetrace.git_commit(), "started_utc": stamp, "cost_usd": 0.0,
                 "cases": len(every), "runs": len(rows), "bad_actions": rep.bad_total,
                 "not_checked": len(rep.unchecked), "pack": traps._display(pack),
                 "passed": rep.bad_total == 0 and not rep.unchecked}
