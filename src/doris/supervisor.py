@@ -11,6 +11,15 @@ How a stop works:
   TerminateProcess on Windows). Only after the child is dead does it write the `halted`
   receipt line, chained from the child's last whole line: the cause, the call in flight and
   every queued item it dropped.
+- SIGTERM or SIGHUP on the supervisor (a `kill`, a service manager stopping her, a closed terminal
+  or ssh session; on Windows, Ctrl+Break) is a stop, as Ctrl+C is: it kills the worker, writes HALT
+  (cause `signal`) and the halted line, which names the signal. A signal ignored when she starts
+  (nohup) stays ignored.
+- The worker's lifeline: its stdin is a pipe whose other end only the supervisor holds, and never
+  writes to. However the supervisor ends (SIGKILL, a crash), the OS closes that end and the worker
+  reads EOF: nothing can kill it mid-call any more and nobody will write its halted line. So it
+  writes HALT (cause `supervisor_gone`), stops at its next halt check (G1 reads it at every effect),
+  writes its own halted line and summary, and exits.
 - A halt survives a restart: `run_supervised` refuses to start while one is in force, and only
   `resume` (the CLI) clears HALT. A halt from a STOP file is written to HALT too, so it stays
   in force after the file is gone. A STOP file is never deleted by code; the user deletes it.
@@ -21,16 +30,21 @@ the lock is free before it starts the worker, and takes it again once the worker
 it writes the halted line. The OS frees the lock when a process dies, so a crash leaves no stale
 lock. Worker exit codes: 3 = another Doris holds the lock (it printed LOCK_REFUSAL; no halted
 line), 4 = it saw a halt itself (G1, or HALT written at the budget cap; the parent writes the
-halted line). run_supervised returns 3 and 4 for the same outcomes (see the EXIT_ codes).
+halted line, or, its supervisor gone, the worker wrote it). run_supervised returns 3 and 4 for the
+same outcomes (see the EXIT_ codes).
 
-Standard library only; no fork, no setsid, no signal but the kill; Linux, macOS and Windows.
+Standard library only; no fork, no setsid; the one signal sent is the kill. Linux, macOS and
+Windows: there SIGTERM cannot be caught and there is no SIGHUP, so those two are POSIX only; the
+lifeline works on all three.
 """
 
 import datetime as _dt
 import json
 import os
+import signal as _signal
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -213,6 +227,8 @@ CAUSE_WORDS = {
     "stop_file": "a STOP file",
     "watch_button": "Stop pressed on the watch page",
     "budget_cap": "model spend reached the cap of the run",
+    "signal": "a stop signal reached the supervisor",
+    "supervisor_gone": "her supervisor is gone",
     "unreadable": "a halt file that could not be read",
 }
 
@@ -374,10 +390,11 @@ def _torn_files(receipts_path):
 
 def record_halt(mode, run_name, cause, receipts_path, ledger_path, *, receipts_module=None,
                 open_ledger=None, run_id=None, stop_to_dead_ms=None, requested_utc=None,
-                worker_exit=None, halt_file_unreadable=False) -> dict:
+                worker_exit=None, halt_file_unreadable=False, signal=None) -> dict:
     """Run only after the worker is dead. Marks the call in flight unconfirmed in the ledger,
     drops the queue, and writes the `halted` line chained from the worker's last whole line
-    (the receipt writer moves a torn tail aside first). Returns the line written."""
+    (the receipt writer moves a torn tail aside first). A stop signal is named in it ("SIGTERM").
+    Returns the line written."""
     if receipts_module is None:
         from . import receipts as receipts_module
     if open_ledger is None:
@@ -435,6 +452,8 @@ def record_halt(mode, run_name, cause, receipts_path, ledger_path, *, receipts_m
     }
     if halt_file_unreadable:
         payload["halt_file"] = "unreadable"
+    if signal:
+        payload["signal"] = signal
     return writer.write("halted", payload, subject="", why=make_why("halt." + cause))
 
 
@@ -463,6 +482,63 @@ class Stopped:
     seen_wall: float          # time.time() when the halt was seen (or the worker ended)
     dead_wall: float          # time.time() when the worker was dead and reaped
     unreadable: bool = False  # the halt seen was a halt file that could not be read
+    signal: Optional[str] = None   # cause "signal": which one ("SIGTERM")
+
+
+# Stops that come as a signal to the supervisor, caught while the worker runs: SIGTERM (`kill`, a
+# service manager), SIGHUP (a closed terminal or ssh session; POSIX only) and SIGBREAK (Ctrl+Break;
+# Windows only). Ctrl+C is Python's own KeyboardInterrupt, caught in watch(). SIGKILL cannot be
+# caught: the worker's lifeline covers that.
+STOP_SIGNALS = ("SIGTERM", "SIGHUP", "SIGBREAK")
+
+
+def _signal_name(number):
+    try:
+        return _signal.Signals(number).name
+    except ValueError:
+        return "signal %d" % (number,)
+
+
+class StopSignals:
+    """While the worker runs, the STOP_SIGNALS that this platform has are stops. The handler only
+    notes the first one; watch() acts on it at its next poll (within POLL_S), so no signal lands in
+    the middle of a write. Handlers go back as they were on the way out. A signal ignored when she
+    starts (nohup) stays ignored, and off the main thread (where Python allows no handler) nothing
+    is set."""
+
+    def __init__(self):
+        self.seen = None
+        self._before = []
+
+    def note(self, number, frame=None):
+        if self.seen is None:
+            self.seen = _signal_name(number)
+
+    def __enter__(self):
+        if threading.current_thread() is not threading.main_thread():
+            return self
+        for name in STOP_SIGNALS:
+            number = getattr(_signal, name, None)
+            if number is None:
+                continue                                # not on this platform
+            try:
+                before = _signal.getsignal(number)
+                if before == _signal.SIG_IGN:
+                    continue                            # nohup: whoever started her asked for that
+                _signal.signal(number, self.note)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            self._before.append((number, before))
+        return self
+
+    def __exit__(self, *exc):
+        while self._before:
+            number, before = self._before.pop()
+            try:
+                _signal.signal(number, _signal.SIG_DFL if before is None else before)
+            except (OSError, RuntimeError, ValueError):
+                pass
+        return False
 
 
 def _poll_halt(mode, state_dir=None):
@@ -487,21 +563,28 @@ def _kill(child):
             continue
 
 
-def watch(child, mode, poll_s=POLL_S, state_dir=None) -> Stopped:
+def watch(child, mode, poll_s=POLL_S, state_dir=None, signals=None) -> Stopped:
     """Poll for a halt about every poll_s seconds while the worker runs. On a halt, kill the
-    worker at once and reap it. Ctrl+C here is a stop on the command line, written to HALT so
-    it survives a restart like any other stop."""
+    worker at once and reap it. Ctrl+C here is a stop on the command line, and a stop signal that
+    `signals` (StopSignals) caught is a stop too (cause "signal"): each is written to HALT after the
+    kill, so it survives a restart like any other stop. A halt already on disk keeps its cause."""
+    def heard():
+        return signals.seen if signals is not None else None
+
     try:
         while True:
             cause, unreadable = _poll_halt(mode, state_dir)
-            if cause:
+            if cause or heard():
                 break
             try:
                 child.wait(timeout=poll_s)
             except subprocess.TimeoutExpired:
                 continue
-            # The worker ended by itself. At the budget cap it writes HALT before it exits.
+            # The worker ended by itself. At the budget cap it writes HALT before it exits; a closed
+            # terminal's SIGHUP reaches the worker too, and may end it before this process looks.
             cause, unreadable = _poll_halt(mode, state_dir)
+            if not cause and heard():
+                break
             now = time.time()
             return Stopped(cause, now, now, unreadable)
     except KeyboardInterrupt:
@@ -512,11 +595,17 @@ def watch(child, mode, poll_s=POLL_S, state_dir=None) -> Stopped:
         return Stopped(cause, seen, time.time(), unreadable)
     seen = time.time()
     _kill(child)
-    return Stopped(cause, seen, time.time(), unreadable)
+    if cause:
+        return Stopped(cause, seen, time.time(), unreadable)
+    request_stop(mode, "signal", state_dir)            # as Ctrl+C: the kill first, then HALT
+    return Stopped("signal", seen, time.time(), False, signal=heard())
 
 
 def _say(text):
-    print(text, flush=True)
+    try:
+        print(text, flush=True)
+    except (OSError, ValueError):
+        pass                    # the terminal is gone (a hang-up, a closed pipe): the receipts keep the record
 
 
 def _resume_command():
@@ -576,17 +665,80 @@ def _iso(epoch):
 
 def _spawn(worker_argv, cwd):
     """Start the one child worker. It takes the ledger lock itself and holds it for its life.
-    Windows: a new process group, so Ctrl+C reaches only the supervisor, which kills the worker."""
-    kwargs = {"cwd": cwd or paths.SRC, "stdin": subprocess.DEVNULL}
+    Its stdin is its lifeline: a pipe whose other end only this process holds and never writes to,
+    and LIFELINE_ENV tells it so (see Lifeline). Windows: a new process group, so Ctrl+C reaches
+    only the supervisor, which kills the worker."""
+    env = dict(os.environ)
+    env[LIFELINE_ENV] = LIFELINE_STDIN
+    kwargs = {"cwd": cwd or paths.SRC, "stdin": subprocess.PIPE, "env": env}
     flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
     if flags:
         kwargs["creationflags"] = flags
     return subprocess.Popen([str(a) for a in worker_argv], **kwargs)
 
 
+def _let_go(child):
+    """Close this end of the worker's lifeline: only once the worker is dead."""
+    pipe = getattr(child, "stdin", None)
+    if pipe is not None:
+        try:
+            pipe.close()
+        except OSError:
+            pass
+
+
+# ------------------------------------------------------------------------------------------
+# The worker's lifeline
+# ------------------------------------------------------------------------------------------
+LIFELINE_ENV = "DORIS_LIFELINE"     # set by _spawn: the worker's stdin is its lifeline
+LIFELINE_STDIN = "stdin"
+
+
+class Lifeline:
+    """In the worker: its end of the pipe whose other end only its supervisor holds, and never
+    writes to. However the supervisor ends (SIGKILL, a crash), the OS closes that end and a read
+    here returns nothing: then nothing can kill her mid-call any more, and nobody will write her
+    halted line. So `gone` turns true and HALT is written at once (cause supervisor_gone); the run
+    reads `gone` at every halt check and at G1, so she stops even when HALT cannot be written,
+    and writes her own halted line and summary (loop.run)."""
+
+    def __init__(self, fd, mode, state_dir=None):
+        self.fd, self.mode, self.state_dir = fd, mode, state_dir
+        self.gone = False
+        self.thread = None
+
+    def start(self):
+        self.thread = threading.Thread(target=self._watch, name="doris-lifeline", daemon=True)
+        self.thread.start()
+        return self
+
+    def _watch(self):
+        try:
+            while os.read(self.fd, 1):
+                pass                    # the supervisor writes nothing; were it to, it would mean nothing
+        except OSError:
+            pass                        # a lifeline that cannot be read holds nothing: gone (fail closed)
+        self.gone = True
+        try:
+            request_stop(self.mode, "supervisor_gone", self.state_dir)
+        except Exception:
+            pass                        # `gone` stops her all the same, and loop.run tries HALT again
+
+
+def lifeline(mode, state_dir=None, environ=None, fd=0) -> Optional[Lifeline]:
+    """In the worker: its lifeline, started, when run_supervised gave it one (LIFELINE_ENV), else
+    None. A worker started any other way never reads its stdin."""
+    environ = os.environ if environ is None else environ
+    if environ.get(LIFELINE_ENV) != LIFELINE_STDIN:
+        return None
+    return Lifeline(fd, mode, state_dir).start()
+
+
 def _summary(line, stopped_after_ms):
     payload = line.get("payload") or {}
     parts = [line.get("why", {}).get("text", "Halted.")]
+    if payload.get("signal"):
+        parts.append("The signal was %s." % (payload["signal"],))
     if stopped_after_ms is not None:
         parts.append("The worker was dead %d ms after the stop." % (stopped_after_ms,))
     flight = payload.get("in_flight")
@@ -627,8 +779,10 @@ def run_supervised(mode, run_name, worker_argv, receipts_path, ledger_path, *, p
     is in force or another Doris holds this ledger (one plain line, said). The worker takes the
     ledger lock itself and holds it for its life (G2 asks the worker); this process only checks
     that the lock is free before it starts the worker. On a halt: kill the worker mid-call; once
-    it is dead, take the lock and write the halted line. Returns the worker's own exit code when it
-    ends by itself with no halt, else one of the EXIT_ codes above."""
+    it is dead, take the lock and write the halted line. From the worker's start to the halted
+    line, SIGTERM and SIGHUP are stops (StopSignals), so a second one cannot cut that line short.
+    Returns the worker's own exit code when it ends by itself with no halt, else one of the EXIT_
+    codes above."""
     say = say or _say
     refusal = _halt_refusal(mode, state_dir)
     if refusal:
@@ -644,13 +798,22 @@ def run_supervised(mode, run_name, worker_argv, receipts_path, ledger_path, *, p
         say("Not started: %s." % (LOCK_REFUSAL,))
         return EXIT_LOCKED
     probe.release()                          # free again: the worker takes it for its own life
+    with StopSignals() as signals:
+        return _supervise(mode, run_name, worker_argv, receipts_path, ledger_path, lock_path, signals, poll_s=poll_s,
+                          say=say, cwd=cwd, receipts_module=receipts_module, open_ledger=open_ledger, run_id=run_id,
+                          state_dir=state_dir)
 
+
+def _supervise(mode, run_name, worker_argv, receipts_path, ledger_path, lock_path, signals, *, poll_s, say, cwd,
+               receipts_module, open_ledger, run_id, state_dir) -> int:
+    """run_supervised from the worker's start: watch it, and on a halt write the halted line."""
     started = time.time()
     child = _spawn(worker_argv, cwd)
     try:
-        stopped = watch(child, mode, poll_s, state_dir)
+        stopped = watch(child, mode, poll_s, state_dir, signals)
     finally:
         _kill(child)                         # never leave a worker behind a supervisor that leaves
+        _let_go(child)                       # its lifeline, closed only now that it is dead
     if child.returncode == WORKER_EXIT_LOCKED:
         say("Not started: %s." % (LOCK_REFUSAL,))   # it lost a race for the lock: it never ran
         return EXIT_LOCKED
@@ -671,7 +834,8 @@ def run_supervised(mode, run_name, worker_argv, receipts_path, ledger_path, *, p
         line = record_halt(mode, run_name, stopped.cause, receipts_path, ledger_path,
                            receipts_module=receipts_module, open_ledger=open_ledger, run_id=run_id,
                            stop_to_dead_ms=after_ms, requested_utc=_iso(requested) if requested else None,
-                           worker_exit=child.returncode, halt_file_unreadable=stopped.unreadable)
+                           worker_exit=child.returncode, halt_file_unreadable=stopped.unreadable,
+                           signal=stopped.signal)
     except Exception as exc:
         say("Halted (%s), and the halt stays in force, but the halted receipt line could not be "
             "written: %s: %s" % (CAUSE_WORDS[stopped.cause], exc.__class__.__name__, exc))

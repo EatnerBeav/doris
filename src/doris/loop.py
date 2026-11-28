@@ -102,6 +102,8 @@ class RunConfig:
     fresh: bool = False                     # live only: start a new live ledger, reading mail from now on
     cycles: Optional[int] = 1               # passes over the inbox; None: until stopped (`run`)
     cycle_s: Optional[float] = None         # the wall-clock grid her waits keep; None: CYCLE, ten minutes
+    lifeline: Optional[object] = None       # the worker's tie to its supervisor (supervisor.Lifeline): once it
+                                            # is gone she halts herself and writes her own halted line
 
 
 @dataclass
@@ -133,7 +135,8 @@ class Refused(Exception):
 
 
 class Halted(Exception):
-    """A halt was found mid-run (G1, or the budget cap). The worker exits; the parent writes the line."""
+    """A halt was found mid-run (G1, or the budget cap). The worker exits; the parent writes the line
+    (unless the worker's supervisor is gone: then she writes it herself)."""
 
     def __init__(self, cause):
         Exception.__init__(self, cause)
@@ -519,7 +522,17 @@ class _Run:
         return self.t
 
     def halt_cause(self):
-        return supervisor.halt_cause(self.mode, state_dir=self.cfg.state_dir)
+        """The halt in force, read from disk now (G1 asks this at every effect). A worker whose
+        supervisor is gone is halted even before HALT is down, or when it cannot be written."""
+        cause = supervisor.halt_cause(self.mode, state_dir=self.cfg.state_dir)
+        if cause is None and self.supervisor_gone():
+            return "supervisor_gone"
+        return cause
+
+    def supervisor_gone(self):
+        """True once the worker's lifeline to its supervisor has closed (supervisor.Lifeline)."""
+        line = self.cfg.lifeline
+        return bool(line is not None and line.gone)
 
     def check_halt(self):
         try:
@@ -693,7 +706,15 @@ class _Run:
         s.verify_ok = receipts.verify(self.receipts_path, finished=True).ok
 
     def write_halted(self, cause):
-        """Unsupervised runs (traps, tests) write their own halted line; under the kill switch the parent does."""
+        """Unsupervised runs (traps, tests) write their own halted line, and so does a worker whose
+        supervisor is gone, HALT first so the halt survives a restart (when even that cannot be
+        written, the line says so); under the kill switch the supervisor writes it."""
+        kept = {}
+        if self.supervisor_gone():
+            try:
+                supervisor.request_stop(self.mode, "supervisor_gone", state_dir=self.cfg.state_dir)
+            except Exception:
+                kept = {"halt_file": "unwritten"}      # she stops all the same; a restart is not refused
         lines = receipts.read_lines(self.receipts_path)
         flight = receipts.in_flight(lines)
         dropped = []
@@ -706,8 +727,8 @@ class _Run:
             dropped.append({"kind": "message", "message": m["key"], "thread": m["thread_key"],
                             "template": None, "booking_id": None})
         why_code = "halt." + cause if ("halt." + cause) in why_mod.CODES else "halt.unreadable"
-        self.write("halted", {"cause": cause, "in_flight": flight or "none", "dropped": dropped,
-                              "summary": "follows"},       # cut the summary and verify fails
+        self.write("halted", dict({"cause": cause, "in_flight": flight or "none", "dropped": dropped,
+                                   "summary": "follows"}, **kept),       # cut the summary and verify fails
                    why=why_mod.why(why_code))
 
     # --- read ---------------------------------------------------------------------------------
@@ -1801,7 +1822,8 @@ class _Run:
 
 def run(cfg):
     """One run in this process: cfg.cycles passes over the inbox (None: until stopped). Raises
-    Refused when it cannot start, and Halted under the kill switch (the parent writes the halted line)."""
+    Refused when it cannot start, and Halted under the kill switch (the parent writes the halted line);
+    a worker whose supervisor is gone writes that line and its summary itself and returns."""
     r = _Run(cfg)
     try:
         r.open()
@@ -1812,9 +1834,9 @@ def run(cfg):
                 r.end_of_run_digest()
         except Halted as h:
             r.summary.halted = h.cause
-            if cfg.supervised:
-                raise
-            r.write_halted(h.cause)
+            if cfg.supervised and not r.supervisor_gone():
+                raise                       # the supervisor writes the halted line once she is dead
+            r.write_halted(h.cause)         # unsupervised, or her supervisor is gone: nobody else will
         except MailError as exc:
             r.error(None, "fetch", exc)     # a finite run's one refused read ends it, and the summary says so
             r.summary.read_failed = True

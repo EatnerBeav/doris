@@ -8,9 +8,12 @@ in tests/process/test_killswitch.py run the whole kill against a real child proc
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -67,6 +70,15 @@ class HaltCauseTest(StateDirTest):
         supervisor.request_stop(self.mode, "budget_cap")
         supervisor.request_stop(self.mode, "cli")
         self.assertEqual(supervisor.halt_cause(self.mode), "budget_cap")
+
+    def test_a_stop_signal_and_a_supervisor_gone_are_causes_that_survive_like_the_rest(self):
+        for cause in ("signal", "supervisor_gone"):
+            with self.subTest(cause=cause):
+                supervisor.request_stop(self.mode, cause)
+                self.assertEqual(supervisor.halt_cause(self.mode), cause)
+                res = supervisor.resume(self.mode)
+                self.assertEqual((res.ok, res.cleared), (True, cause))
+                self.assertIn(supervisor.CAUSE_WORDS[cause], res.message)
 
     def test_halt_goes_through_a_temp_file_and_replace(self):
         # A write in place would leave a HALT (maybe half written) when the replace fails.
@@ -526,6 +538,17 @@ class RecordHaltTest(StateDirTest):
         out = self.record("stop_file", FakeReceipts(), FakeLedger(), halt_file_unreadable=True)
         self.assertEqual(out["payload"]["halt_file"], "unreadable")
 
+    def test_a_stop_signal_is_named_in_the_line(self):
+        rec = FakeReceipts([line(3, "called", call="calendar_create", target="doris-b1")])
+        led = FakeLedger()
+        out = self.record("signal", rec, led, signal="SIGTERM")
+        self.assertEqual(out["payload"]["cause"], "signal")
+        self.assertEqual(out["payload"]["signal"], "SIGTERM")
+        self.assertEqual(out["why"], {"code": "halt.signal",
+                                      "text": "Halted: a stop signal (SIGTERM, SIGHUP or Ctrl+Break) reached the supervisor."})
+        self.assertIn(("set_booking_state", "doris-b1", "unconfirmed"), led.calls)
+        self.assertNotIn("signal", self.record("cli", FakeReceipts(), FakeLedger())["payload"])
+
 
 # ------------------------------------------------------------------------------------------
 # The poll loop, driven with a fake child (the process tests use a real one)
@@ -610,6 +633,38 @@ class WatchTest(StateDirTest):
         self.assertEqual(stopped.cause, "cli")
         self.assertGreaterEqual(child.kills, 1)
         self.assertEqual(supervisor.halt_cause(self.mode), "cli")
+
+    def test_a_stop_signal_kills_the_worker_and_is_a_stop_that_survives_a_restart(self):
+        signals = supervisor.StopSignals()            # not entered: the test plays the handler
+        child = FakeChild(on_wait_number(2, lambda c: signals.note(signal.SIGTERM)))
+        stopped = supervisor.watch(child, self.mode, poll_s=0.01, signals=signals)
+        self.assertEqual((stopped.cause, stopped.signal), ("signal", "SIGTERM"))
+        self.assertGreaterEqual(child.kills, 1)
+        self.assertEqual(child.waits, 3)            # acted on at the very next poll
+        self.assertEqual(supervisor.halt_cause(self.mode), "signal")
+
+    @unittest.skipUnless(hasattr(signal, "SIGHUP"), "no SIGHUP on this platform")
+    def test_a_hang_up_that_ended_the_worker_too_is_still_a_stop(self):
+        # A closed terminal sends SIGHUP to the worker as well: it may be dead before the next poll.
+        signals = supervisor.StopSignals()
+
+        def hang_up(c):
+            signals.note(signal.SIGHUP)
+            c.returncode = -1
+        stopped = supervisor.watch(FakeChild(on_wait_number(2, hang_up)), self.mode, poll_s=0.01, signals=signals)
+        self.assertEqual((stopped.cause, stopped.signal), ("signal", "SIGHUP"))
+        self.assertEqual(supervisor.halt_cause(self.mode), "signal")
+
+    def test_a_halt_already_on_disk_keeps_its_cause_when_a_signal_comes_too(self):
+        signals = supervisor.StopSignals()
+
+        def both(c):
+            supervisor.request_stop(self.mode, "watch_button")
+            signals.note(signal.SIGTERM)
+        stopped = supervisor.watch(FakeChild(on_wait_number(2, both)), self.mode, poll_s=0.01, signals=signals)
+        self.assertEqual(stopped.cause, "watch_button")
+        self.assertIsNone(stopped.signal)
+        self.assertEqual(supervisor.halt_cause(self.mode), "watch_button")
 
 
 # ------------------------------------------------------------------------------------------
@@ -768,6 +823,175 @@ class RelockTest(StateDirTest):
     def test_the_lock_file_sits_next_to_the_ledger(self):
         self.assertEqual(supervisor.lock_path_for(os.path.join(self.sdir, "ledger.sqlite")),
                          os.path.join(self.sdir, "ledger.lock"))
+
+
+# ------------------------------------------------------------------------------------------
+# A stop signal on the supervisor, and a supervisor that is gone
+# ------------------------------------------------------------------------------------------
+@unittest.skipIf(os.name == "nt", "SIGTERM cannot be caught on Windows, and it has no SIGHUP")
+class StopSignalsTest(unittest.TestCase):
+    """While the worker runs, SIGTERM and SIGHUP on the supervisor are stops, as Ctrl+C is; the
+    handlers before are put back after. (The process tests send real ones to a real supervisor.)"""
+
+    def caught(self, number, before):
+        handler = signal.getsignal(number)
+        self.assertNotIn(handler, (signal.SIG_DFL, signal.SIG_IGN, None, before), "not caught: never raise it")
+        return handler
+
+    def test_term_and_hang_up_are_caught_while_the_worker_runs_and_put_back_after(self):
+        numbers = (signal.SIGTERM, signal.SIGHUP)
+        before = {n: signal.getsignal(n) for n in numbers}
+        with supervisor.StopSignals() as signals:
+            for n in numbers:
+                self.caught(n, before[n])
+            self.assertIsNone(signals.seen)
+            signal.raise_signal(signal.SIGHUP)
+            self.assertEqual(signals.seen, "SIGHUP")
+            signal.raise_signal(signal.SIGTERM)
+            self.assertEqual(signals.seen, "SIGHUP")      # the first one is the one named
+        for n in numbers:
+            self.assertEqual(signal.getsignal(n), before[n])
+
+    def test_a_hang_up_ignored_at_start_stays_ignored(self):
+        # Started under nohup: whoever started her asked for her to outlive the terminal.
+        before = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        self.addCleanup(signal.signal, signal.SIGHUP, signal.SIG_DFL if before is None else before)
+        with supervisor.StopSignals():
+            self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+            self.caught(signal.SIGTERM, None)
+        self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+
+    def test_off_the_main_thread_nothing_is_set_and_nothing_fails(self):
+        before = signal.getsignal(signal.SIGTERM)
+        seen = {}
+
+        def target():
+            with supervisor.StopSignals() as signals:
+                seen["handler"], seen["seen"] = signal.getsignal(signal.SIGTERM), signals.seen
+        thread = threading.Thread(target=target)
+        thread.start()
+        thread.join(5)
+        self.assertEqual(seen, {"handler": before, "seen": None})
+
+
+class LifelineTest(StateDirTest):
+    """The worker's tie to its supervisor: a pipe whose write end only the supervisor holds and
+    never writes to. However the supervisor ends, the OS closes that end and the worker reads EOF."""
+
+    def pipe(self):
+        self.ends = dict(zip(("r", "w"), os.pipe()))
+        self.addCleanup(self.close_ends)
+        return self.ends["r"]
+
+    def close_ends(self):
+        for key in ("w", "r"):                    # the write end first: it wakes a reader still waiting
+            fd = self.ends.pop(key, None)
+            if fd is not None:
+                os.close(fd)
+
+    def supervisor_dies(self):
+        os.close(self.ends.pop("w"))
+
+    def watched(self, line):
+        line.thread.join(5)
+        self.assertFalse(line.thread.is_alive(), "the lifeline never saw its end close")
+        return line
+
+    def test_while_the_supervisor_holds_its_end_nothing_happens(self):
+        line = supervisor.Lifeline(self.pipe(), self.mode).start()
+        line.thread.join(0.2)
+        self.assertTrue(line.thread.is_alive())
+        self.assertFalse(line.gone)
+        self.assertIsNone(supervisor.halt_cause(self.mode))
+
+    def test_when_the_supervisor_is_gone_she_writes_halt(self):
+        line = supervisor.Lifeline(self.pipe(), self.mode).start()
+        self.supervisor_dies()
+        self.assertTrue(self.watched(line).gone)
+        self.assertEqual(supervisor.halt_cause(self.mode), "supervisor_gone")
+
+    def test_a_halt_already_in_force_keeps_its_cause(self):
+        supervisor.request_stop(self.mode, "watch_button")
+        line = supervisor.Lifeline(self.pipe(), self.mode).start()
+        self.supervisor_dies()
+        self.assertTrue(self.watched(line).gone)
+        self.assertEqual(supervisor.halt_cause(self.mode), "watch_button")
+
+    def test_a_halt_that_cannot_be_written_still_leaves_her_knowing(self):
+        with mock.patch.object(supervisor, "request_stop", side_effect=OSError(28, "No space left on device")):
+            line = supervisor.Lifeline(self.pipe(), self.mode).start()
+            self.supervisor_dies()
+            self.watched(line)
+        self.assertTrue(line.gone)                  # the run reads it too (G1 and every halt check)
+        self.assertIsNone(supervisor.halt_cause(self.mode))
+
+    def test_a_state_folder_of_her_own(self):
+        own = os.path.join(self.tmp, "own")
+        line = supervisor.Lifeline(self.pipe(), "throwaway", own).start()
+        self.supervisor_dies()
+        self.watched(line)
+        self.assertEqual(supervisor.halt_cause("throwaway", state_dir=own), "supervisor_gone")
+        self.assertIsNone(supervisor.halt_cause(self.mode))
+
+    def test_only_a_worker_its_supervisor_gave_one_watches_its_stdin(self):
+        self.assertIsNone(supervisor.lifeline(self.mode, environ={}))
+        self.assertIsNone(supervisor.lifeline(self.mode, environ={supervisor.LIFELINE_ENV: "1"}))
+        line = supervisor.lifeline(self.mode, environ={supervisor.LIFELINE_ENV: supervisor.LIFELINE_STDIN},
+                                   fd=self.pipe())
+        self.assertIsInstance(line, supervisor.Lifeline)
+        self.supervisor_dies()
+        self.watched(line)
+        self.assertEqual(supervisor.halt_cause(self.mode), "supervisor_gone")
+
+    def test_the_worker_is_started_with_its_lifeline_on_stdin_and_told_so(self):
+        seen = os.path.join(self.tmp, "seen.json")
+        code = ("import json, os, stat; json.dump({'env': os.environ.get(%r), 'pipe': stat.S_ISFIFO(os.fstat(0).st_mode)},"
+                " open(%r, 'w'))" % (supervisor.LIFELINE_ENV, seen))
+        child = supervisor._spawn([sys.executable, "-c", code], self.tmp)
+        try:
+            self.assertEqual(child.wait(20), 0)
+        finally:
+            supervisor._kill(child)
+            supervisor._let_go(child)
+        self.assertTrue(child.stdin.closed)
+        with open(seen, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"env": supervisor.LIFELINE_STDIN, "pipe": True})
+        self.assertNotIn(supervisor.LIFELINE_ENV, os.environ)    # the supervisor's own environment is untouched
+
+    def test_run_supervised_lets_go_of_its_end_once_the_worker_is_dead(self):
+        children, real = [], supervisor._spawn
+
+        def spawn(argv, cwd):
+            children.append(real(argv, cwd))
+            return children[-1]
+        with mock.patch.object(supervisor, "_spawn", spawn):
+            code = supervisor.run_supervised(self.mode, RUN, [sys.executable, "-c", "pass"],
+                                             os.path.join(self.sdir, "r.jsonl"), os.path.join(self.sdir, "l.sqlite"),
+                                             say=[].append, poll_s=0.01)
+        self.assertEqual(code, 0)
+        self.assertTrue(children[0].stdin.closed)
+
+
+class SayTest(unittest.TestCase):
+    def test_the_line_said_after_a_signal_names_it(self):
+        line = {"why": {"code": "halt.signal",
+                        "text": "Halted: a stop signal (SIGTERM, SIGHUP or Ctrl+Break) reached the supervisor."},
+                "payload": {"cause": "signal", "signal": "SIGHUP", "in_flight": None, "dropped": []}}
+        said = supervisor._summary(line, 3)
+        self.assertTrue(said.startswith("Halted: a stop signal (SIGTERM, SIGHUP or Ctrl+Break) reached the supervisor. "
+                                        "The signal was SIGHUP. The worker was dead 3 ms after the stop."), said)
+
+
+    def test_a_line_to_a_terminal_that_is_gone_is_no_error(self):
+        # A hang-up closes the terminal before the supervisor's last line: the receipts keep the record.
+        class Gone:
+            def write(self, text):
+                raise OSError(5, "Input/output error")
+
+            def flush(self):
+                raise BrokenPipeError(32, "Broken pipe")
+        with mock.patch.object(sys, "stdout", Gone()):
+            supervisor._say("Halted: a stop signal (SIGTERM, SIGHUP or Ctrl+Break) reached the supervisor.")
 
 
 if __name__ == "__main__":

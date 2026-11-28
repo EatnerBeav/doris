@@ -362,6 +362,14 @@ class G1ToG3Test(GateTest):
                 self.assertEqual(result.why, {"code": "gate.g1_halted",
                                               "text": "Blocked by G1: a halt is in force (%s)." % cause})
 
+    def test_g1_blocks_on_a_stop_signal_and_on_a_supervisor_that_is_gone(self):
+        for cause in ("signal", "supervisor_gone"):
+            with self.subTest(cause=cause):
+                result = self.check(reply("T2"), halt=cause)
+                self.assertBlocked(result, "G1")
+                self.assertEqual(result.halt_cause, cause)
+                self.assertEqual(result.why["text"], "Blocked by G1: a halt is in force (%s)." % cause)
+
     def test_g1_rereads_the_halt_state_at_every_check(self):
         ctx = FakeCtx()
         self.assertTrue(gate.check(reply("T2"), ctx).passed)

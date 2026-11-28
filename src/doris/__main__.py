@@ -183,16 +183,25 @@ def worker(argv):
     """The child the kill switch watches: one run from its config file. Exit 0 done, 1 the run
     failed (the inbox could not be read: once in a finite run, caps.MAIL_READ_FAILURES_IN_A_ROW
     cycles running in a run until stopped; or the chain failed its own check), 3 another Doris
-    holds the ledger, 4 halted (the parent writes that line)."""
+    holds the ledger, 4 halted (the parent writes that line; when her supervisor is gone, she has
+    written it herself). Under run_supervised her stdin is her lifeline to it (supervisor.Lifeline)."""
     with open(argv[0], encoding="utf-8") as fh:
         fields = json.load(fh)
-    cfg = loop.RunConfig(supervised=True, say=_say, **fields)
+    lifeline = supervisor.lifeline(fields.get("mode"), fields.get("state_dir"))
+    cfg = loop.RunConfig(supervised=True, say=_say, lifeline=lifeline, **fields)
     try:
         s = loop.run(cfg)
     except loop.Refused as refused:
         _say(str(refused))
         return refused.exit_code
     except loop.Halted:
+        return supervisor.WORKER_EXIT_HALTED
+    if s.halted:                    # her supervisor is gone: she wrote the halted line and the summary
+        why = ("Halted: her supervisor is gone, so she stopped herself" if s.halted == "supervisor_gone" else
+               "Halted (%s), and her supervisor is gone, so she stopped" % (supervisor.CAUSE_WORDS.get(s.halted, s.halted),))
+        _say("%s and wrote the halted line. %d handled, %d held before it. Receipts %s: %s. Run `%s` to go on."
+             % (why, s.handled, s.held, _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN",
+                supervisor._resume_command()))
         return supervisor.WORKER_EXIT_HALTED
     if s.read_failed:
         times = "" if cfg.cycles is not None else " %d times in a row" % caps.MAIL_READ_FAILURES_IN_A_ROW
@@ -276,8 +285,11 @@ def later(name):
 
 
 def _say(text):
-    print(text)
-    sys.stdout.flush()
+    try:
+        print(text)
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        pass        # no terminal left to say it to (a hang-up, a closed pipe): the receipts keep the record
 
 
 def _display(path):

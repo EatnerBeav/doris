@@ -1,15 +1,19 @@
 """Process tests for the kill switch: a real supervisor, a real child worker, a real kill.
 
 Covers A3's `kill-names-in-flight` and `halt-lists-dropped`, ruling 8's one Doris per ledger,
-a STOP file, the worker's budget-cap halt, and a restart refused until `resume`.
+a STOP file, the worker's budget-cap halt, and a restart refused until `resume`; SIGTERM and SIGHUP
+on the supervisor (a stop, as Ctrl+C is), and a supervisor killed outright (its real worker stops
+itself and writes its own halted line).
 The worker is tests/process/fake_worker.py; it holds a "life" lock that the OS releases the
 instant it dies, which is how these tests time stop-to-dead independently of the supervisor.
 
 Each test runs twice: against the contract fakes in fake_worker.py, and against the real
 doris.receipts and doris.ledger.
 """
+import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -18,8 +22,9 @@ import time
 import unittest
 from unittest import mock
 
-from doris import paths, supervisor
+from doris import paths, receipts, supervisor
 from tests.process import fake_worker
+from tests.unit.test_restart import mini_sandbox
 
 RUN = "model-stub-sandbox-20261127T1900Z"
 WAIT_S = 20.0           # generous: a slow CI machine starting Python
@@ -358,6 +363,171 @@ class BudgetCapTest(Base):
         self.assertEqual(halted["why"]["code"], "halt.budget_cap")
         self.assertIsNone(halted["payload"]["in_flight"])
         self.assertEqual(self.run_now("quick")[0], supervisor.EXIT_REFUSED_HALT)
+
+
+# A wrapper that starts what follows the way nohup does: SIGHUP ignored, then exec.
+NOHUP = "import os, signal, sys; signal.signal(signal.SIGHUP, signal.SIG_IGN); os.execv(sys.argv[1], sys.argv[1:])"
+
+
+@unittest.skipIf(os.name == "nt", "no SIGHUP on Windows, and SIGTERM there is TerminateProcess: nothing can catch it")
+class SignalTest(Base):
+    """SIGTERM or SIGHUP on the supervisor stops her the way Ctrl+C does: the worker is killed
+    mid-call, the halted line names the signal, and the halt survives a restart until resume."""
+
+    def start_supervisor(self, prefix=()):
+        sup = subprocess.Popen(list(prefix) + [sys.executable, fake_worker.THIS_SCRIPT, "supervise"]
+                               + self.opts("midcall"), start_new_session=True)   # a group of its own
+        self.addCleanup(self.end_group, sup)
+        self.wait_for(self.marker)
+        return sup, self.life
+
+    def end_group(self, sup):
+        try:
+            os.killpg(sup.pid, signal.SIGKILL)           # whatever of the group is left, a worker included
+        except OSError:
+            pass
+        sup.wait()
+
+    def assert_stopped_by(self, name, code, life):
+        self.assertEqual(code, supervisor.EXIT_HALTED)
+        self.wait_dead(life)
+        halted = self.lines()[-1]
+        self.assertEqual((halted["kind"], halted["payload"]["cause"], halted["payload"]["signal"]),
+                         ("halted", "signal", name))
+        self.assertEqual(halted["why"]["code"], "halt.signal")
+        self.assertEqual(halted["payload"]["in_flight"]["target"], "doris-b2")
+        self.assertTrue(halted["payload"]["in_flight"]["unconfirmed"])
+        self.assertTrue(self.receipts_mod().verify(self.receipts).ok)
+        self.assertEqual(supervisor.halt_cause(self.mode), "signal")
+        code, said = self.run_now("quick")
+        self.assertEqual(code, supervisor.EXIT_REFUSED_HALT)
+        self.assertIn("halted (a stop signal reached the supervisor)", said[0])
+
+    def test_sigterm_on_the_supervisor_kills_the_worker_and_is_a_stop_that_survives(self):
+        sup, life = self.start_supervisor()
+        os.kill(sup.pid, signal.SIGTERM)                 # `kill`, or a service manager stopping her
+        self.assert_stopped_by("SIGTERM", sup.wait(WAIT_S), life)
+
+    def test_sighup_on_the_supervisor_is_the_same_stop(self):
+        sup, life = self.start_supervisor()
+        os.kill(sup.pid, signal.SIGHUP)
+        self.assert_stopped_by("SIGHUP", sup.wait(WAIT_S), life)
+
+    def test_a_closed_terminal_hangs_up_the_whole_group_and_the_stop_is_still_written(self):
+        sup, life = self.start_supervisor()
+        os.killpg(sup.pid, signal.SIGHUP)                # the worker gets it too, and may die of it first
+        self.assert_stopped_by("SIGHUP", sup.wait(WAIT_S), life)
+
+    def test_a_hang_up_ignored_at_start_stays_ignored(self):
+        sup, life = self.start_supervisor(prefix=[sys.executable, "-c", NOHUP])
+        os.killpg(sup.pid, signal.SIGHUP)
+        time.sleep(0.5)
+        self.assertIsNone(sup.poll(), "started under nohup, she outlives the terminal")
+        supervisor.request_stop(self.mode, "cli")
+        self.assertEqual(sup.wait(WAIT_S), supervisor.EXIT_HALTED)
+        self.wait_dead(life)
+        self.assertEqual(self.lines()[-1]["payload"]["cause"], "cli")
+
+
+def whole_lines(path):
+    """The receipt lines written so far, read while the worker writes: whole lines only."""
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except (OSError, TypeError):
+        return []
+    lines = []
+    for raw in data.split(b"\n")[:-1]:
+        try:
+            lines.append(json.loads(raw.decode("utf-8")))
+        except ValueError:
+            pass
+    return lines
+
+
+class SupervisorGoneTest(unittest.TestCase):
+    """The supervisor itself is killed outright (SIGKILL, TerminateProcess: nothing of it runs) while
+    her real worker waits for its next cycle. Nothing can kill the worker mid-call any more, so it
+    stops itself: its lifeline closes, it writes HALT and its own halted line, and it exits."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="doris-gone-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.root = mini_sandbox(self.tmp, ("01-priya-request.eml",))
+        self.state = os.path.join(self.tmp, "state")
+        self.sdir = os.path.join(self.state, "sandbox")
+        self.pidfile = os.path.join(self.tmp, "worker.pid")
+        self.log = os.path.join(self.tmp, "terminal.log")
+
+    def doris_run(self):
+        """`python -m doris run` in a process of its own, its terminal a file: no key, so no model call."""
+        env = dict(os.environ, ANTHROPIC_API_KEY="")
+        with open(self.log, "ab") as out:
+            return subprocess.Popen([sys.executable, fake_worker.THIS_SCRIPT, "doris-run", "--sandbox", self.root,
+                                     "--state", self.state, "--cycle-s", "3600", "--marker", self.pidfile],
+                                    stdout=out, stderr=subprocess.STDOUT, env=env)
+
+    def receipts_path(self):
+        runs = os.path.join(self.sdir, "runs")
+        names = sorted(os.listdir(runs)) if os.path.isdir(runs) else []
+        return os.path.join(runs, names[0], "receipts.jsonl") if names else None
+
+    def worker_alive(self):
+        """The real worker holds the ledger lock for its life; the OS lets go of it when it dies."""
+        held = supervisor.acquire_lock(os.path.join(self.sdir, "ledger.lock"))
+        if held is None:
+            return True
+        held.release()
+        return False
+
+    def wait_until(self, done, what):
+        deadline = time.monotonic() + WAIT_S
+        while not done():
+            if time.monotonic() > deadline:
+                with open(self.log, encoding="utf-8", errors="replace") as fh:
+                    self.fail("timed out waiting for %s; the terminal said:\n%s" % (what, fh.read()))
+            time.sleep(0.02)
+
+    def leave_nothing_running(self, sup):
+        if sup.poll() is None:
+            sup.kill()
+            sup.wait()
+        if os.path.exists(self.pidfile) and self.worker_alive():
+            with open(self.pidfile) as fh:
+                pid = int(fh.read())
+            try:
+                os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            except OSError:
+                pass
+
+    def test_a_killed_supervisor_leaves_a_worker_that_halts_itself_and_writes_its_own_halted_line(self):
+        sup = self.doris_run()
+        self.addCleanup(self.leave_nothing_running, sup)
+        # Her first pass closes Priya's request; then she waits an hour for her next cycle.
+        self.wait_until(lambda: any(l["kind"] in ("decided", "held") and "outcome" in l["payload"]
+                                    for l in whole_lines(self.receipts_path())), "her first pass")
+        self.assertTrue(self.worker_alive())
+        sup.kill()                                       # nothing of the supervisor runs: no handler, no finally
+        sup.wait(WAIT_S)
+        self.wait_until(lambda: not self.worker_alive(), "the worker to stop itself")
+
+        path = self.receipts_path()
+        self.assertTrue(receipts.verify(path, finished=True).ok)
+        lines = receipts.read_lines(path)
+        halted, summary = lines[-2], lines[-1]
+        self.assertEqual((halted["kind"], halted["payload"]["cause"]), ("halted", "supervisor_gone"))
+        self.assertEqual(halted["why"]["code"], "halt.supervisor_gone")
+        self.assertEqual((halted["payload"]["in_flight"], halted["payload"]["dropped"]), ("none", []))
+        self.assertEqual((summary["kind"], summary["payload"]["halted"], summary["payload"]["handled"]),
+                         ("summary", "supervisor_gone", 1))
+        self.assertEqual(supervisor.halt_cause("sandbox", state_dir=self.sdir), "supervisor_gone")
+        with open(self.log, encoding="utf-8") as fh:
+            said = fh.read()
+        self.assertIn("Halted: her supervisor is gone, so she stopped herself", said)
+
+        again = self.doris_run()                          # she stays halted until the command line resumes her
+        self.addCleanup(self.leave_nothing_running, again)
+        self.assertEqual(again.wait(WAIT_S), supervisor.EXIT_REFUSED_HALT)
 
 
 class KillMidCallRealTest(KillMidCallTest):

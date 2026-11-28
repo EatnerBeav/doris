@@ -179,8 +179,10 @@ def _fail(**detail):
 
 # --- G1 to G3: everything -----------------------------------------------------------------
 def _g1_not_halted(action, ctx):
-    """G1. Not halted: no halt is in force (cli, stop_file, watch_button or budget_cap).
-    Nothing in mail halts her. Re-read from disk at this moment, never cached (ruling 1)."""
+    """G1. Not halted: no halt is in force (cli, stop_file, watch_button, budget_cap, or the kill
+    switch's own: signal, supervisor_gone). Nothing in mail halts her. Re-read from disk at this
+    moment, never cached (ruling 1); a worker whose supervisor is gone counts as halted even before
+    its HALT is down."""
     cause = _need(ctx, "halt_cause")()
     if cause is None:
         return _pass(halt="none")
