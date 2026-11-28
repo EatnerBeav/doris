@@ -141,7 +141,9 @@ class ACopyOfASandboxWhoseFactsDoNotParse(unittest.TestCase):
 
 
 def git(*args):
-    return subprocess.run(["git"] + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    # No line-ending conversion (Git for Windows turns it on), as the repository's `* -text` has it.
+    return subprocess.run(["git", "-c", "core.autocrlf=false"] + list(args), stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, check=True)
 
 
 class GitTracksTheCommittedSandboxAndNothingElse(unittest.TestCase):
@@ -170,7 +172,7 @@ class GitTracksTheCommittedSandboxAndNothingElse(unittest.TestCase):
         self.assertEqual(demo_sandbox.sandbox_drift(demo_sandbox.git_sandbox_files(tmp)),
                          "committed under sandbox/ but not in demo_sandbox.committed_files(), so no test "
                          "reads it: inbox/" + JUDGE_NAME)
-        git("-C", tmp, "rm", "-q", "--cached", os.path.join("sandbox", "clock.txt"))
+        git("-C", tmp, "rm", "-q", "--cached", "sandbox/clock.txt")
         self.assertIn("in demo_sandbox.committed_files() but not committed: clock.txt",
                       demo_sandbox.sandbox_drift(demo_sandbox.git_sandbox_files(tmp)))
         # An archive copy unpacked inside some other checkout: git answers for that checkout, not this.
