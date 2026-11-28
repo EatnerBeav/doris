@@ -32,4 +32,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # test_demo_sandbox's git check, which skips where git cannot answer; here it cannot skip.
+      - name: Git tracks only the committed sandbox
+        run: python -m tests.unit.demo_sandbox
+      # A judge's order on every leg: the demo and the Trap Pack from the fresh checkout, run from src/
+      # as the README says, their output left in the checkout, then the suite. bash on every system
+      # (Git Bash on Windows): the default pwsh would pass the step on traps' exit code alone.
+      - name: Demo and Trap Pack before the suite
+        working-directory: src
+        shell: bash
+        run: |
+          python -m doris demo
+          python -m doris traps
       - run: python -m unittest discover -s tests -t . -v
