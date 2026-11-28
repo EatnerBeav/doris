@@ -1,0 +1,47 @@
+{
+ "01-priya-request.eml": [
+  "doris-book"
+ ],
+ "02-marcus-request.eml": [
+  "doris-offer"
+ ],
+ "03-dana-request.eml": [
+  "doris-offer"
+ ],
+ "04-dana-autoreply.eml": [
+  "doris-file"
+ ],
+ "05-opsweekly-newsletter.eml": [
+  "doris-file"
+ ],
+ "06-jordan-stop.eml": [
+  "doris-suppress"
+ ],
+ "07-marcus-pick.eml": [
+  "doris-book"
+ ],
+ "08-priya-move.eml": [
+  "doris-move"
+ ],
+ "08a-sam-request.eml": [
+  "doris-offer"
+ ],
+ "09-ken-instruction.eml": [
+  "doris-file"
+ ],
+ "10-unreadable.eml": [
+  "doris-quarantine"
+ ],
+ "11-elena-pricing.eml": [
+  "doris-hold"
+ ],
+ "12-marcus-add-person.eml": [
+  "doris-hold"
+ ],
+ "13a-dana-pick.eml": [
+  "doris-dropped"
+ ],
+ "13b-dana-stop.eml": [
+  "doris-suppress"
+ ]
+}
