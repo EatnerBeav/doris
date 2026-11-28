@@ -619,6 +619,19 @@ class SetupTest(SmokeFixture):
         self.assertEqual(self.lines, ["config: ConfigError (DORIS_CALDAV_URL is not set)"])
         self.assertEqual((self.imap.commands, self.jmap.requests, self.dav.requests), ([], [], []))
 
+    def test_a_jmap_token_missing_or_malformed_exits_2_naming_it_never_its_value(self):
+        for line, said in (("", "DORIS_JMAP_TOKEN is not set"),
+                           ("DORIS_JMAP_TOKEN=dummy-short-token\n", "DORIS_JMAP_TOKEN is too short to be an API token"),
+                           ("DORIS_JMAP_TOKEN='%s x'\n" % TOKEN, "DORIS_JMAP_TOKEN has a space")):
+            self.lines.clear()
+            self.write_env(ENV_TEXT.replace("DORIS_JMAP_TOKEN=" + TOKEN + "\n", line))
+            self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 2)
+            (only,) = self.lines
+            self.assertTrue(only.startswith("config: ConfigError (" + said), only)
+            self.assertNotIn(TOKEN, only)
+            self.assertNotIn("dummy-short-token", only)
+        self.assertEqual((self.imap.commands, self.jmap.requests, self.dav.requests), ([], [], []))
+
     def test_every_connection_goes_through_the_guard_allowing_only_the_adapters_hosts(self):
         installed = []
         real_install = netguard.install

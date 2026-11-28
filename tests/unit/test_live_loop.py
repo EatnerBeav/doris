@@ -94,7 +94,9 @@ class LiveSettingsTest(EnvFolder):
                  ("DORIS_MEETING_LINK", "http://meet.example/" + "plain-room"),
                  ("DORIS_MEETING_LINK", "https://meet.example/" + "café-room"),
                  ("DORIS_MEETING_LINK", "https://meet.example/" + "two words"),
-                 ("ANTHROPIC_API_KEY", None), ("DORIS_MODEL", "claude-without-a-price")]
+                 ("ANTHROPIC_API_KEY", None), ("DORIS_MODEL", "claude-without-a-price"),
+                 ("DORIS_JMAP_TOKEN", None), ("DORIS_JMAP_TOKEN", "dummy-short-token"),
+                 ("DORIS_JMAP_TOKEN", TOKEN[:20] + " " + TOKEN[20:]), ("DORIS_JMAP_TOKEN", TOKEN + "\u00e9")]
         for name, value in cases:
             with self.subTest(name=name, value=value):
                 with self.assertRaises(loop.Refused) as cm:
@@ -1355,6 +1357,12 @@ class RunCommandTest(LiveFixture):
         def no_key():
             return ["--env", self.write_env(ANTHROPIC_API_KEY=None), "--fresh"]
 
+        def no_token():
+            return ["--env", self.write_env(DORIS_JMAP_TOKEN=None), "--fresh"]
+
+        def bad_token():
+            return ["--env", self.write_env(DORIS_JMAP_TOKEN="dummy-" + "\u00e9" * 40), "--fresh"]
+
         def no_proof():
             self.prove_smoke(None)
             return ["--env", self.write_env(), "--fresh"]
@@ -1375,6 +1383,7 @@ class RunCommandTest(LiveFixture):
             return ["--env", self.write_env(), "--fresh"]
 
         cases = ((no_env, "absent.env"), (no_owner, "DORIS_OWNER_ADDRESS"), (no_key, "ANTHROPIC_API_KEY"),
+                 (no_token, "DORIS_JMAP_TOKEN"), (bad_token, "DORIS_JMAP_TOKEN"),
                  (no_proof, loop.SMOKE_REFUSAL),
                  (loose_proof, "Not started: the smoke check's record (smoke-sent.json) is not as the smoke writes "
                                "it: its keys are not exactly look, sent_copy_found, ts, waited_s. " + loop.SMOKE_FIRST),
