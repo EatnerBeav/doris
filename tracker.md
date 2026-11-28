@@ -1,7 +1,7 @@
 # Tracker
 
 Every item the judges score, one line each: **status** · item · owner · due (Pacific).
-Updated Fri Nov 27, 10:30 PM. Re-checked against the law's Never cut, commands and Dates and the Brief check tab after the smoke. Kept current on main as items move.
+Updated Fri Nov 27, 10:35 PM. Re-checked against the law's Never cut, commands and Dates and the Brief check tab after the smoke. Kept current on main as items move.
 
 Status words: **done** (on main, tested) · **in review** (built, in a pull request) · **building** · **blocked** (says on what) · **not started**.
 
@@ -13,10 +13,12 @@ Status words: **done** (on main, tested) · **in review** (built, in a pull requ
   - Run 1 (8:29 PM) failed at the first JMAP call, nothing sent: our host check refused Fastmail's regional API host. Fixed. [Run 1 trace](https://github.com/EatnerBeav/doris/tree/traces/live-smoke-20261128T042934Z/traces/live-smoke-20261128T042934Z).
   - Run 2 (9:15 PM): the whole mail path passed live (forward to Doris in 31 s, her reply over JMAP for $0.004, read back in Sent and in wolf's inbox). Failed on the CalDAV test event (a reused test ID) and the secret scan wrongly blocked its trace on an address. Both fixed. [Run 2 trace](https://github.com/EatnerBeav/doris/tree/traces/live-smoke-20261128T051500Z/traces/live-smoke-20261128T051500Z).
   - Run 3 (9:50 PM) passed, every step: calendar write and read-back, the forward in 31 s, her reply over JMAP with the live model for $0.004, read back in her Sent and in wolf's inbox. 0 human approvals. [Run 3 trace](https://github.com/EatnerBeav/doris/tree/traces/live-smoke-20261128T055002Z/traces/live-smoke-20261128T055002Z).
-- **not started** · Live booking · Wolf · Sat 2:00 PM
-  - Unblocked: PR #2 is merged and the smoke passed.
+- **building** · Live booking: wolf asks for a meeting at an exact time, Doris books it on the owner's calendar and replies · Wolf · pulled forward to Fri night
+  - After PR #11 merges: the test sender tool is being built; her first pass of `run --live` does the booking.
+- **not started** · Short overnight soak tonight, the same live run left going, trace committed in the morning (extra evidence) · Wolf · Fri night to Sat morning
+  - Only if the booking checks out.
 - **blocked** · Overnight run, under 60 emails (never cut; a sandbox run is the fallback) · Wolf · Sat 8:00 PM start
-  - On the live booking.
+  - On the live booking (tonight). Stays the main overnight run.
 - **not started** · Recorded answers from a real keyed demo run, so `demo` replays a real model · Wolf · Sat 12:00 PM, again at the freeze
   - Unblocked. Today the demo falls back to the keyword stand-in and says so.
 - **not started** · Fresh live-model Trap Pack run on merged main, RESULTS.md and RUNS.md to match · Wolf · Sat 12:00 PM
@@ -41,8 +43,8 @@ Status words: **done** (on main, tested) · **in review** (built, in a pull requ
 - **done** · Sensitive-mail screen before the model: filed unread, no reply, a sender-only digest line · Wolf
 - **done** · The digest: once a day, the ratio first, only what needs the owner · Wolf
 - **not started** · Model bill capped at the provider too, by a spend limit Shane sets on the key (the code cap is done) · Shane · Sat 12:00 PM
-- **blocked** · The never-mention list checked on trace commits from our server · Wolf · on Shane's yes
-  - Found tonight: the server's secret scan had no private terms file, so runs 1 to 3 were checked for keys and .env values only.
+- **done** · The never-mention list checked on trace commits from our server · Wolf
+  - Found tonight: the server's scan had no private terms file. Added (Shane's yes); the whole repo and Trap Pack run 2's trace re-scanned clean.
 - **in review** · SAFETY.md: the five verbs (send, delete, overwrite, pay, deploy) · docs thread · Sun final
   - PR #7, landing in PR #11.
 - **in review** · Only the supervisor starts a process (a test for SAFETY's deploy row) · docs thread
