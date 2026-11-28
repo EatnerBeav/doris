@@ -26,13 +26,13 @@ For the live take, tile them: the watch page on the left half, Rae's Gmail top r
 - For the sandbox beats only: load the model key into the shell from the env file with one line that reads only `ANTHROPIC_API_KEY`, then `clear`. The Stop beat needs it: with recorded answers in the repo, a new email has no recorded answer, is held, and never reaches the calendar.
 - **`stop` halts the sandbox and live together.** Film the live take first. Stop the live run before the sandbox beats, unless the build thread wants it running, and run `resume` after every Stop take.
 
-**The Stop beat's email.** Copy [`stop-beat/14-aisha-request.eml`](stop-beat/14-aisha-request.eml) into `sandbox/inbox/` after one full `demo` has run, and add this line to `sandbox/inbox/facts.json`:
+**The Stop beat's email.** Copy [`stop-beat/14-aisha-request.eml`](stop-beat/14-aisha-request.eml) into `sandbox/inbox/` and add this line to `sandbox/inbox/facts.json`:
 
 ```
 "14-aisha-request.eml": {"forwarded": "yes", "fault": "slow-calendar", "fault_seconds": "8"}
 ```
 
-The next `demo` runs only her, and every calendar call waits 8 seconds. Click Stop while the current step reads "no answer yet". Afterwards remove the file, put `facts.json` back with `git checkout sandbox/inbox/facts.json`, and `resume`.
+With the key loaded, `demo` starts a fresh day: the fifteen sample emails run first, then her at 3:20 PM, and every calendar call for her waits 8 seconds. Click Stop while the current step reads "no answer yet". Afterwards remove the file, put `facts.json` back with `git checkout sandbox/inbox/facts.json`, and `resume`.
 
 Checked in the cloud on main 2804e08: the halted receipt reads "Cause watch_button; calendar_query span (line 31) was in flight; dropped 1: book. Worker dead 80 ms after the stop." Nothing new was sent or booked, and a second `demo` refused: "Not started: Doris is halted".
 
@@ -64,7 +64,7 @@ The feature freeze comes first. Everything is filmed on the frozen commit.
 | 5:18 | Take 2 if needed, for the 5:20 pass. A third at 5:28. |
 | 5:45 | Stop the live run unless the build thread wants it running; check its receipts verify; `resume`. |
 | 6:00 | A judge's day on Windows: fresh clone, `py -m doris demo`. |
-| 6:15 | The Trap Pack on the server, model live, one run (about $0.07). If the build thread agrees, it is also the freeze run for `tests/trap-pack/RESULTS.md`. |
+| 6:15 | The Trap Pack on the same Windows clone, no key: `py -m doris traps` replays Claude's own answers from our graded Trap Pack run, and its first line names that run. |
 | 6:30 | The Stop beat, two or three takes. |
 | 6:45 | `verify` and the closing cards. |
 | 7:00 | Voice: Shane reads each beat over the cut, two takes per beat, in a quiet room. |
