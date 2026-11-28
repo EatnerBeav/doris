@@ -161,11 +161,6 @@ class _CalendarDown(Exception):
         self.code = code
 
 
-class _ReadsFailed(Exception):
-    """A run until stopped: her inbox could not be read at caps.MAIL_READ_FAILURES_IN_A_ROW cycles
-    running. Each failure has its error line; the run ends on its summary, read_failed."""
-
-
 class _ReadOnlyCalendar(object):
     """The smoke's run: the owner's calendar for reads only. A create or a delete is refused as a
     CalendarError, which the loop holds on (calendar_down): a test booking never reaches his calendar."""
@@ -317,6 +312,14 @@ def next_cycle(t):
     base = t.replace(minute=0, second=0, microsecond=0)
     steps = -(-(t - base) // CYCLE)
     return base + steps * CYCLE
+
+
+def wait_words(seconds):
+    """A wait as the terminal says it after "every": "10 minutes", "minute", "90 seconds"."""
+    if seconds >= 60 and seconds % 60 == 0:
+        minutes = int(seconds // 60)
+        return "minute" if minutes == 1 else "%d minutes" % minutes
+    return "%g seconds" % seconds
 
 
 def booking_id(message_key, slot):
@@ -489,7 +492,7 @@ class _Run:
         self.clean_readbacks = set()
         self.redo = set()
         self.batch_keys = set()
-        self.read_failures = 0              # a run until stopped: her failed inbox reads in a row
+        self.read_failures = 0              # a run until stopped: her failed inbox reads in a row (pass_every_s)
 
     # --- opening and closing ---------------------------------------------------------------
     def open(self):
@@ -730,9 +733,10 @@ class _Run:
 
     def one_pass(self, first=False):
         """One pass over the inbox, then the day's digest when due. A read that fails is never an
-        empty inbox (Contract 7). A finite run (the demo, traps) ends on it. A run until stopped
-        writes an error line and reads again at her next cycle; caps.MAIL_READ_FAILURES_IN_A_ROW
-        failures running end it on its summary (read_failed). One good read starts the count again."""
+        empty inbox (Contract 7). A finite run (the demo, traps) ends on it. A run until stopped never
+        does (decision 89): an error line for each failed read, nothing sent until a read goes (not
+        the digest either: fail closed), and she reads again at her next pass (pass_every_s). Only a
+        stop or a halt ends it. One good read starts the count again."""
         try:
             if not first and self.cfg.clock_mode == "advance":
                 self.t = next_cycle(self.t + _dt.timedelta(seconds=1))
@@ -742,21 +746,30 @@ class _Run:
             if self.cfg.cycles is not None:
                 raise
             self.read_failures += 1
-            limit = caps.MAIL_READ_FAILURES_IN_A_ROW
-            self.error(None, "fetch", exc, failed_in_a_row=self.read_failures, ends_after=limit)
-            if self.read_failures >= limit:
-                raise _ReadsFailed() from None
-            self.say("%s  Inbox not read: %s (error line written). She tries again at her next cycle (%d failed "
-                     "in a row; the run ends at %d)." % (templates.fmt_pacific(self.now()), type(exc).__name__,
-                                                         self.read_failures, limit))
-        else:
-            self.read_failures = 0
+            every = self.pass_every_s()
+            self.error(None, "fetch", exc, failed_in_a_row=self.read_failures, tries_every_s=every)
+            when = ("at her next cycle" if self.read_failures < caps.MAIL_READ_FAILURES_IN_A_ROW else
+                    "every %s until it does or she is stopped" % wait_words(every))
+            self.say("%s  Inbox not read: %s (error line written). She sends nothing until it reads again, and "
+                     "tries again %s (%d failed in a row)." % (templates.fmt_pacific(self.now()),
+                                                               type(exc).__name__, when, self.read_failures))
+            return
+        self.read_failures = 0
         self.daily_digest()
 
+    def pass_every_s(self):
+        """Seconds between her passes: her cycle, and from caps.MAIL_READ_FAILURES_IN_A_ROW failed
+        reads in a row caps.MAIL_READ_RETRY_S, never more often than her cycle (decision 89)."""
+        if self.read_failures < caps.MAIL_READ_FAILURES_IN_A_ROW:
+            return self.cycle_s
+        return max(self.cycle_s, caps.MAIL_READ_RETRY_S)
+
     def wait_for_cycle(self):
-        """Until her next cycle: the next point on a wall-clock grid of cycle_s seconds. She looks for
-        a halt at least every HALT_POLL_S; under the kill switch the parent kills her sooner."""
-        end = (math.floor(_time() / self.cycle_s) + 1) * self.cycle_s
+        """Until her next pass: the next point on a wall-clock grid of pass_every_s() seconds (her
+        cycle, unless her reads keep failing). She looks for a halt at least every HALT_POLL_S; under
+        the kill switch the parent kills her sooner."""
+        every = self.pass_every_s()
+        end = (math.floor(_time() / every) + 1) * every
         while True:
             self.check_halt()
             left = end - _time()
@@ -814,7 +827,8 @@ class _Run:
         except MailError as exc:
             self.result(seq, ok=False, error=type(exc).__name__)
             raise                          # a refused login is loud: never read as an empty inbox
-        self.result(seq, ok=True, count=len(items))
+        left_out = getattr(self.mail, "smoke_left_out", 0)     # live: the smoke's own requests it left out
+        self.result(seq, ok=True, count=len(items), **({"smoke_left_out": left_out} if left_out else {}))
         return items
 
     def is_new(self, item):
@@ -979,7 +993,9 @@ class _Run:
         link in its bytes becomes "[meeting link]" (copy_redacted), and a copy that would still show
         the link once a part or header is decoded (base64, an encoded word) is not kept at all
         (copy_withheld), nor one the check could not run on. A mail without the link is kept byte
-        for byte. Should another mail's copy already hold the short name, this one takes the whole hash."""
+        for byte. Should another mail's copy already hold the short name, this one takes the short
+        name and the first free number (<hex>-2.eml, -3, ...), which fits the path budget as the whole
+        hash would not (test_path_lengths)."""
         data, replaced = templates.redact_link_bytes(e.item.raw)
         try:
             left = any(templates.has_link(view) for view in mail.decoded_views(data))
@@ -987,11 +1003,13 @@ class _Run:
             return {"copy_withheld": "link_check_failed"}
         if left:
             return {"copy_withheld": "meeting_link"}
-        name = os.path.join("messages", e.raw_sha256[:COPY_NAME_HEX] + ".eml")
-        path = os.path.join(self.run_dir, name)
-        if os.path.exists(path) and _file_bytes(path) != data:
-            name = os.path.join("messages", e.raw_sha256 + ".eml")
+        short, n = e.raw_sha256[:COPY_NAME_HEX], 1
+        while True:
+            name = os.path.join("messages", short + ("-%d" % n if n > 1 else "") + ".eml")
             path = os.path.join(self.run_dir, name)
+            if not os.path.exists(path) or _file_bytes(path) == data:
+                break
+            n += 1
         if not os.path.exists(path):
             with open(path, "wb") as fh:
                 fh.write(data)
@@ -1971,8 +1989,6 @@ def run(cfg):
         except MailError as exc:
             r.error(None, "fetch", exc)     # a finite run's one refused read ends it, and the summary says so
             r.summary.read_failed = True
-        except _ReadsFailed:
-            r.summary.read_failed = True    # a run until stopped: each failure already has its error line
         r.finish()
     finally:
         r.close_handles()

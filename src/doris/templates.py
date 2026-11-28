@@ -565,14 +565,15 @@ def _s1(s):
 
 
 S2_KEYS = ("date", "handled", "held", "approvals", "holds", "offered_to", "suspicious", "quarantined",
-           "also_asked", "opted_out", "not_addressed", "sensitive", "model_calls", "cost_usd", "verified")
+           "also_asked", "opted_out", "not_addressed", "sensitive", "read_failures", "model_calls", "cost_usd",
+           "verified")
 
 
 def empty_digest(now):
     """S2 slots with every count at zero (digest.build fills them from receipts)."""
     return {"date": now, "handled": 0, "held": 0, "approvals": 0, "holds": [], "offered_to": [],
             "suspicious": [], "quarantined": 0, "also_asked": [], "opted_out": [], "not_addressed": 0,
-            "sensitive": [], "model_calls": 0, "cost_usd": 0.0, "verified": False}
+            "sensitive": [], "read_failures": 0, "model_calls": 0, "cost_usd": 0.0, "verified": False}
 
 
 def _names(v, what, check=_line):
@@ -627,6 +628,9 @@ def _s2(s):
     sensitive = _names(s["sensitive"], "sensitive", _shown_addr)
     if sensitive:
         lines.append("Sensitive mail skipped: " + ", ".join(sensitive))
+    failed = _int(s["read_failures"], 0, 10 ** 6, "read_failures")
+    if failed:
+        lines.append("Failed inbox reads: %d." % failed)     # decision 89: a run until stopped keeps trying
     c = _int(s["model_calls"], 0, 10 ** 6, "model_calls")
     cost = s["cost_usd"]
     if isinstance(cost, bool) or not isinstance(cost, (int, float)) or cost < 0:

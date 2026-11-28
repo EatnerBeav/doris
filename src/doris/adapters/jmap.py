@@ -102,7 +102,24 @@ _NEVER_HEADERS = ("bcc", "resent-bcc")             # the owner's copy rides on t
 _MIME_HEADERS = ("Content-Type", "Content-Transfer-Encoding", "Content-Disposition")
 _TOKEN = re.compile(r"^[!-~]+\Z")                   # visible ASCII: no space, control or non-ASCII character
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,255}\Z")        # a JMAP Id (RFC 8620 1.2)
-_ERROR_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,63}\Z")      # a JMAP error type is a plain name
+# The error types RFC 8620 (core) and RFC 8621 (mail) name: said by name. Any other word a server
+# answers with is said as a fixed phrase, so no text of the server's reaches the terminal or a trace.
+KNOWN_ERROR_TYPES = frozenset((
+    # RFC 8620 3.6.1, request-level
+    "unknownCapability", "notJSON", "notRequest", "limit",
+    # RFC 8620 3.6.2, method-level
+    "serverUnavailable", "serverFail", "serverPartialFail", "unknownMethod", "invalidArguments",
+    "invalidResultReference", "forbidden", "accountNotFound", "accountNotSupportedByMethod", "accountReadOnly",
+    # RFC 8620 5.1 to 5.6, the standard methods
+    "requestTooLarge", "cannotCalculateChanges", "stateMismatch", "fromAccountNotFound",
+    "fromAccountNotSupportedByMethod", "anchorNotFound", "unsupportedSort", "unsupportedFilter", "tooManyChanges",
+    # RFC 8620 5.3 and 5.4, SetError
+    "overQuota", "tooLarge", "rateLimit", "notFound", "invalidPatch", "willDestroy", "invalidProperties",
+    "singleton", "alreadyExists",
+    # RFC 8621: Mailbox/set, Email/set and Email/import, Identity/set, EmailSubmission/set
+    "mailboxHasChild", "mailboxHasEmail", "blobNotFound", "tooManyKeywords", "tooManyMailboxes",
+    "invalidEmail", "tooManyRecipients", "noRecipients", "invalidRecipients", "forbiddenMailFrom",
+    "forbiddenFrom", "forbiddenToSend", "cannotUnsend"))
 _URL_PATH = re.compile(r"^/[A-Za-z0-9._~%!$&'()*+,;=:@/-]*\Z")  # RFC 3986 path characters
 _LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")  # one DNS label (RFC 1123), as urlsplit lowercases it
 _HTTP_FAILURES = (http.client.HTTPException, OSError, ValueError)
@@ -345,9 +362,9 @@ def _json(data):
 
 
 def _error_type(args):
-    """A JMAP error's type when it is a plain name, else a fixed phrase: never the server's text."""
+    """A JMAP error's type when RFC 8620 or 8621 names it, else a fixed phrase: never the server's text."""
     kind = args.get("type") if isinstance(args, dict) else None
-    return kind if isinstance(kind, str) and _ERROR_TYPE.match(kind) else "an error it did not name plainly"
+    return kind if isinstance(kind, str) and kind in KNOWN_ERROR_TYPES else "an error type it does not know"
 
 
 def _is_response(item):

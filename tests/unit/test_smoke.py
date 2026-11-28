@@ -293,11 +293,19 @@ class SmokeTest(SmokeFixture):
         self.assertEqual((len(puts), len(set(puts)), len(kept)), (2, 2, 2))
         self.assertEqual(self.dav.resources, {})
 
-    def leftover(self, booking_id="doris-smoke-20261127T042934Z"):
-        """A test event an earlier smoke left: under its own ID (that run's stamp) by default."""
-        start = u(2027, 12, 1, 11)
+    def leftover(self, booking_id="doris-smoke-20261127T042934Z", start=None, minutes=30):
+        """A test event an earlier smoke left: under its own ID (that run's stamp) by default, at the
+        slot that run gave it (400 days on, 11:00 UTC); the first runs' doris-smoke-test at theirs."""
+        if start is None and booking_id == "doris-smoke-test":
+            start = u(2028, 1, 2, 11)                    # the first runs: Nov 27 and 28, 2026 (UTC)
+        elif start is None and re.match(r"^doris-smoke-\d{8}T\d{6}Z\Z", booking_id):
+            run = dt.datetime.strptime(booking_id[len("doris-smoke-"):], "%Y%m%dT%H%M%SZ")
+            day = (run + dt.timedelta(days=400)).date()
+            start = u(day.year, day.month, day.day, 11)
+        elif start is None:
+            start = u(2027, 12, 1, 11)
         self.dav.put(booking_id + ".ics", ics.build_event(
-            booking_id, Slot(start, start + dt.timedelta(minutes=30)), templates.PLACEHOLDER_MEETING_LINK,
+            booking_id, Slot(start, start + dt.timedelta(minutes=minutes)), templates.PLACEHOLDER_MEETING_LINK,
             "CONFIRMED", 0, u(2026, 11, 27), None))
 
     def test_every_test_event_earlier_runs_left_is_removed_first_and_nothing_else(self):
@@ -312,6 +320,22 @@ class SmokeTest(SmokeFixture):
         self.assertEqual(self.result("caldav create test event"), "ok")
         self.assertEqual(sorted(self.dav.resources), ["doris-cafe-doris-smoke-1.ics", "notes.ics"])
         self.assert_no_value()
+
+    def test_an_event_under_the_prefix_not_in_the_smokes_form_is_named_and_left_alone(self):
+        """L1: the leftover step trusted the UID alone. It now deletes only an event in the smoke's own
+        form (its times at the far-ahead test slot, confirmed) under doris-smoke-<stamp> or the first
+        runs' doris-smoke-test, names anything else under the prefix in one line and goes on."""
+        self.leftover()                                                      # at its stamp's slot
+        self.leftover("doris-smoke-test")                                    # at the first runs' slot
+        self.leftover("doris-smoke-20261201T000000Z", start=u(2027, 12, 1, 11))           # not its stamp's slot
+        self.leftover("doris-smoke-20261128T055002Z", minutes=60)            # its slot, but an hour long
+        self.leftover("doris-smoke-notes", start=u(2028, 1, 1, 11))          # no stamp
+        self.assertEqual(self.run_smoke(), 0, self.lines)
+        self.assertEqual(self.result("caldav test event left by an earlier run"), "ok (removed 2)")
+        self.assertEqual(self.result("caldav events under the smoke's prefix, not its own"),
+                         "left alone: doris-smoke-20261128T055002Z, doris-smoke-20261201T000000Z, doris-smoke-notes")
+        self.assertEqual(sorted(self.dav.resources), ["doris-smoke-20261128T055002Z.ics",
+                                                      "doris-smoke-20261201T000000Z.ics", "doris-smoke-notes.ics"])
 
     def test_a_test_event_left_by_an_earlier_run_is_removed_first(self):
         self.leftover()
@@ -939,6 +963,23 @@ class EndToEndTest(SmokeFixture):
         self.assertTrue(self.result("her loop on the test request").startswith("ok ("))   # it needs no smoke keyword
         self.assertEqual(self.result("smoke"), "FAILED")
         self.assertEqual(self.manifest()["first_failing_step"], FILE)
+
+    def test_on_an_empty_inbox_the_file_step_never_touches_a_test_request_that_was_not_marked(self):
+        """L3: the file step ran on the test request even when its mark as the smoke's own had failed.
+        It runs only on a marked request; otherwise it is named as not run, with why."""
+        self.empty_inbox()
+        real, filed = live.LiveMail.file, []
+
+        def file(mail, server_id, keyword):
+            filed.append(keyword)
+            if keyword == live.SMOKE_TEST_KEYWORD:
+                raise MailError("imap file: the server did not keep the keyword")
+            return real(mail, server_id, keyword)
+        with mock.patch.object(live.LiveMail, "file", file):
+            self.assertEqual(self.run_e2e(), 1)
+        self.assertEqual(filed, [live.SMOKE_TEST_KEYWORD])                  # the smoke keyword never added
+        self.assertEqual(self.result(FILE), "not run (the test request is not marked as the smoke's own)")
+        self.assertNotIn("UID STORE", self.imap.verbs())
 
     def test_on_an_empty_inbox_with_no_end_to_end_test_after_all_the_file_step_is_named_as_not_run(self):
         self.empty_inbox()

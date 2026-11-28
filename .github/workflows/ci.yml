@@ -73,12 +73,16 @@ jobs:
       - name: Git tracks only the committed sandbox
         run: python -m tests.unit.demo_sandbox
       # A judge's order on every leg: the demo and the Trap Pack from the fresh checkout, run from src/
-      # as the README says, their output left in the checkout, then the suite. bash on every system
-      # (Git Bash on Windows): the default pwsh would pass the step on traps' exit code alone.
+      # as the README says, their output left in the checkout, then the suite. All of it lands where
+      # git ignores it (state/, the sandbox's outbox and her bookings), so the tree stays clean and the
+      # committed Trap Pack report and traces stay ours (only `traps --record` writes them). bash on
+      # every system (Git Bash on Windows): the default pwsh would pass the step on traps' exit code alone.
       - name: Demo and Trap Pack before the suite
         working-directory: src
         shell: bash
         run: |
           python -m doris demo
           python -m doris traps
+          changed="$(git status --porcelain --untracked-files=all)"
+          if [ -n "$changed" ]; then echo "The demo or the Trap Pack changed the checkout:"; echo "$changed"; exit 1; fi
       - run: python -m unittest discover -s tests -t . -v
