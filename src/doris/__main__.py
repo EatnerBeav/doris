@@ -11,11 +11,15 @@
     stop     halt Doris now, in the sandbox and live; she stays halted until resume
     resume   clear a halt (only here, on the command line)
     smoke    every live adapter call once against the real servers, before a live run
+    replay   a finished run told step by step from its receipts alone, chain checked first
+             (the latest sandbox run by default; or a run ID, run folder or trace folder)
+    watch    the live page on 127.0.0.1: current step, tool calls, decisions with their why,
+             cost so far, and one Stop button (--port N)
+    redteam  the yes-man proof: the real loop and gate with a model that obeys every
+             injection, on throwaway state; passes only with 0 bad actions
 
 Every live run, the smoke included, keeps its trace in traces/live-<run|smoke>-<UTC stamp>/ when
 it ends, pass or fail (livetrace.py); a start refused before anything was contacted keeps none.
-
-redteam, replay and watch are not built yet: each says so and exits 2.
 """
 
 import argparse
@@ -29,7 +33,6 @@ from . import caps, livetrace, loop, paths, receipts, supervisor
 SANDBOX_OWNER = loop.SANDBOX_OWNER
 SANDBOX_DORIS = loop.SANDBOX_DORIS
 STOP_MODES = ("sandbox", "live")
-LATER = ("redteam", "replay", "watch")
 WORKER = "_worker"
 RUN_CYCLE_S = loop.CYCLE.total_seconds()   # `run`: the wall-clock wait from one pass to her next cycle
 
@@ -308,11 +311,19 @@ def traps_cmd(argv):
     return traps.main(argv)
 
 
-def later(name):
-    def run(argv):
-        print("`python -m doris %s` is not built yet." % (name,))
-        return 2
-    return run
+def replay_cmd(argv):
+    from . import replay
+    return replay.main(argv)
+
+
+def watch_cmd(argv):
+    from . import watch
+    return watch.main(argv)
+
+
+def redteam_cmd(argv):
+    from . import redteam
+    return redteam.main(argv)
 
 
 def _say(text):
@@ -338,8 +349,7 @@ def smoke_cmd(argv):
 
 
 COMMANDS = {"demo": demo, "run": run_cmd, "traps": traps_cmd, "verify": verify, "stop": stop, "resume": resume,
-            "smoke": smoke_cmd, WORKER: worker}
-COMMANDS.update({name: later(name) for name in LATER})
+            "smoke": smoke_cmd, "replay": replay_cmd, "watch": watch_cmd, "redteam": redteam_cmd, WORKER: worker}
 
 
 def main(argv=None):

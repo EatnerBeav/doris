@@ -337,12 +337,30 @@ class Smoke(unittest.TestCase):
         self.assertNotIn("run (live)", out)
 
 
-class NotYet(unittest.TestCase):
-    def test_commands_not_built_yet_say_so(self):
-        for name in ("redteam", "replay", "watch"):
-            code, out = run_cli([name])
-            self.assertEqual(code, 2, (name, out))
-            self.assertIn("not built yet", out)
+class TheAuditMonitoringAndRedteamCommands(unittest.TestCase):
+    """replay (PR #8), watch (PR #9) and redteam (PR #10) are each one line in COMMANDS that hands its
+    arguments to the module's own main and returns its exit code; none says "not built yet"."""
+
+    def test_each_hands_its_arguments_to_its_modules_main_and_returns_its_code(self):
+        import importlib
+        for name, code in (("replay", 7), ("watch", 5), ("redteam", 3)):
+            module = importlib.import_module("doris." + name)
+            with self.subTest(name), mock.patch.object(module, "main", return_value=code) as main:
+                got, out = run_cli([name, "--x", "y"])
+                self.assertEqual(got, code)
+                main.assert_called_once_with(["--x", "y"])
+                self.assertNotIn("not built yet", out)
+
+    def test_watch_with_a_port_out_of_range_is_not_started(self):
+        code, out = run_cli(["watch", "--port", "70000"])
+        self.assertEqual(code, 2, out)
+        self.assertIn("Not started", out)
+
+    def test_the_help_names_all_three_and_none_is_marked_not_built(self):
+        code, out = run_cli(["--help"])
+        for name in ("replay", "watch", "redteam"):
+            self.assertIn("    %s " % name, out)
+        self.assertNotIn("not built yet", out)
 
 
 if __name__ == "__main__":
