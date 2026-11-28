@@ -3,7 +3,7 @@
 `python -m doris demo` runs on the repository's own sandbox/ and leaves its output there for a judge
 to open (.gitignore lists it): her sends in outbox/, her bookings as calendar/doris-*.ics, and the
 event a staged fault puts on the calendar as calendar/staged-*.ics. A judge who follows
-sandbox/README.md adds their own .eml to inbox/ and a line for it to inbox/facts.json. A test that
+sandbox/README.md adds their own .eml to inbox/, and may add a line for it to inbox/facts.json. A test that
 checks the committed fixtures, or runs the demo day on a copy of them, goes through here, so it sees
 the same files after any number of demos, a Trap Pack run or a judge's own mail as in a fresh clone.
 
@@ -28,7 +28,7 @@ TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
 SANDBOX = os.path.join(REPO, "sandbox")      # the repository's own, as doris.paths has it
 GENERATOR = os.path.join(TESTS, "tools", "build_demo_fixtures.py")
-HAND_WRITTEN = ("README.md",)              # committed beside the generated fixtures, not generated
+HAND_WRITTEN = ("README.md", "your-email.eml")   # committed beside the generated fixtures, not generated
 # Recorded model answers from a real keyed run of the demo day, replayed when no key is set. Committed,
 # but never copied into a test's sandbox (so every other demo test runs the stub); test_cli.RecordedAnswers
 # reads it, and fails if a change to the request or the mail leaves any of the day's calls unanswered.
