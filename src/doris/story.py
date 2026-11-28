@@ -32,6 +32,11 @@ NAME_WIDTH = 24                 # the name column on the terminal; longer names 
 WIDTH = 100                     # the terminal's width when it can't be read (a pipe, a file, CI)
 CALENDAR_CALLS = ("calendar_query", "calendar_create", "calendar_get", "calendar_delete")
 UNREADABLE = "(unreadable message)"
+SENSITIVE = "(sensitive mail, unread)"           # as the loop's own line shows it
+MAX_COST = 1e6                                   # a recorded cost past this is no cost the story adds up
+MAX_MINUTES = 24 * 60
+# S1 phrases that point at the notice's own layout, said here as the story shows it
+STORY_REASONS = {"hold.remove_failed": "I couldn't remove my booking after a clash; both events are on the calendar"}
 _TS = "%Y-%m-%dT%H:%M:%SZ"
 _UTC = _dt.timezone.utc
 _RULE = re.compile(r"\(([a-z0-9_]+)\)")
@@ -67,8 +72,10 @@ def _time(value):
     if not isinstance(value, str):
         return None
     try:
-        return _dt.datetime.strptime(value, _TS).replace(tzinfo=_UTC)
-    except ValueError:
+        t = _dt.datetime.strptime(value, _TS).replace(tzinfo=_UTC)
+        _pacific(t)                                 # a stamp that can't be shown in Pacific is no stamp
+        return t
+    except (ValueError, OverflowError):
         return None
 
 
@@ -131,6 +138,7 @@ def build(lines):
     start = next((l for l in lines if l.get("kind") == "observed" and _payload(l).get("step") == "start"), None)
     sp = _payload(start) if start else {}
     mode = sp.get("mode") if isinstance(sp.get("mode"), str) else (lines[0].get("mode") if lines else None)
+    mode = mode if isinstance(mode, str) else None
     source = sp.get("model_source")
 
     calls, results, lookups = {}, {}, {}
@@ -151,6 +159,7 @@ def build(lines):
     model_calls, cost, checks, blocked, approvals = 0, 0.0, 0, 0, 0
     digests, halted, summary, stamps = [], None, None, []
     inbox = None                        # how many messages her last inbox read saw
+    inbox_failed = False                # her last inbox read came back failed
 
     def message(subject, line=None):
         m = messages.get(subject)
@@ -177,15 +186,18 @@ def build(lines):
         elif kind == "called":
             call = p.get("call")
             res = _payload(results.get(line.get("seq"), {}))
-            if call == "mail_fetch" and res.get("ok") is True and _int(res.get("count")) is not None:
-                inbox = res["count"]
+            if call == "mail_fetch" and res:
+                inbox_failed = res.get("ok") is not True
+                if not inbox_failed and _int(res.get("count")) is not None:
+                    inbox = res["count"]
             if call == "model":
                 model_calls += 1
                 c = res.get("cost_usd")
-                if isinstance(c, (int, float)) and not isinstance(c, bool) and c > 0:
+                if isinstance(c, (int, float)) and not isinstance(c, bool) and 0 < c < MAX_COST:
                     cost += c
             elif call == "send":
-                found = lookups.get(p.get("message_id")) if res.get("ok") is True else False
+                mid = p.get("message_id")
+                found = lookups.get(mid) if isinstance(mid, str) else None
                 if p.get("target") == "S2":
                     digests.append((line, found))
                 elif subject in messages:
@@ -194,14 +206,16 @@ def build(lines):
             elif call in ("calendar_create", "calendar_get", "calendar_delete") and isinstance(p.get("target"), str):
                 bid = p["target"]
                 if res.get("ok") is True:
-                    b = bookings.setdefault(bid, {"subject": subject, "start": None, "end": None,
-                                                  "written": False, "removed": False})
+                    b = _booking(bookings, bid, subject)
                     if call == "calendar_create":
                         b["written"], b["subject"] = True, subject
                     elif call == "calendar_delete":
                         b["removed"] = True
-                    elif res.get("found") is True:
+                    elif res.get("found") is True:  # read back: there, whatever a delete said before
                         b["start"], b["end"] = _time(res.get("start")), _time(res.get("end"))
+                        b["there"], b["removed"] = True, False
+                    elif res.get("found") is False:
+                        b["there"] = False
             if call in CALENDAR_CALLS and res and res.get("ok") is not True and subject in messages:
                 messages[subject].failed.append(res.get("error") if isinstance(res.get("error"), str) else "")
         elif kind == "checked":
@@ -212,14 +226,18 @@ def build(lines):
             m = message(subject, line)
             m.close = line
             if p.get("outcome") == "book" and isinstance(p.get("booking_id"), str):
-                b = bookings.setdefault(p["booking_id"], {"subject": subject, "start": None, "end": None,
-                                                         "written": False, "removed": False})
-                b["written"] = True
+                b = _booking(bookings, p["booking_id"], subject)
+                b["written"] = b["booked"] = True
         elif kind == "halted":
             halted = line
+        elif kind == "observed" and halted is not None:   # a start after the stop: the stop is not the end
+            halted = None
         elif kind == "summary":
             summary = line
 
+    for m in messages.values():
+        if _code(m.close) == "screen.sensitive_skip":
+            m.who = SENSITIVE
     state = "halted" if halted is not None else "finished" if summary is not None else "so far"
     one_day = len({_day(t) for t in stamps}) <= 1
     when = (lambda t: _clock(t)) if one_day else _full
@@ -230,37 +248,43 @@ def build(lines):
     answered = noreply = unconfirmed = 0
     for m in closed:
         template = _payload(m.close).get("template")
-        if template in templates.PROSPECT_TEMPLATES:
+        if isinstance(template, str) and template in templates.PROSPECT_TEMPLATES:
             if any(found for _, found in m.replies) or _code(m.close) == "policy.resume_sent":
                 answered += 1
             else:
                 unconfirmed += 1
         else:
             noreply += 1
-    standing = [(bid, b) for bid, b in bookings.items() if b["written"] and not b["removed"]]
+    # a booking stands once read back there (or closed as booked with no read-back in this file), and
+    # not removed since; a read-back that found it gone, or a removal not undone by one, takes it off
+    standing = [(bid, b) for bid, b in bookings.items() if b["written"] and not b["removed"]
+                and (b["there"] is True or (b["booked"] and b["there"] is None))]
     handled = "%d handled by her (%d answered, %d needed no reply%s)" % (
         len(closed), answered, noreply, ", %d closed without a confirmed reply" % unconfirmed if unconfirmed else "")
     unfinished = len(messages) - len(closed) - len(held)
     approved = _plural(approvals, "human approval")
     if messages:
-        headline = "%s read: %s, %d held for %s%s. %s on his calendar. %s." % (
+        headline = "%s came in: %s, %d held for %s%s. %s on his calendar. %s." % (
             _plural(len(messages), "email"), handled, len(held), OWNER,
             ", %d not finished" % unfinished if unfinished else "", _plural(len(standing), "meeting"), approved)
     elif inbox:
         headline = "No new mail: the inbox held %s, none of them new to her. %s." % (_plural(inbox, "message"), approved)
     else:
-        headline = "No new mail: %s. %s." % ("the inbox was empty" if inbox == 0 else "no inbox read is recorded",
-                                            approved)
+        headline = "No new mail: %s. %s." % ("her inbox read failed" if inbox_failed else "the inbox was empty"
+                                            if inbox == 0 else "no inbox read is recorded", approved)
 
     # needs the owner
     rows, all_noticed = [], True
     for m in held:
         code = _code(m.close)
-        reason = templates.HOLD_REASONS.get(code) or _why_text(m.close)
+        reason = _hold_reason(m.close)
         if any(found for _, found in m.notices):
             pass
-        elif m.notices:
+        elif any(found is False for _, found in m.notices):
             reason += " (her notice to him was not found in Sent)"
+            all_noticed = False
+        elif m.notices:
+            reason += " (her notice to him was not confirmed in Sent)"
             all_noticed = False
         else:
             reason += " (no notice to him in this run)"
@@ -268,8 +292,8 @@ def build(lines):
         t = _time(m.close.get("ts"))
         rows.append([when(t) if t else "?", m.who, reason])
     title = "Needs %s (%d)" % (OWNER, len(held))
-    if held and not any(m.replies for m in held):
-        title += ": nothing was sent to them"
+    if held and not any(m.replies for m in held):     # these emails, not their threads: Marcus got times before
+        title += ": she sent no reply to these"
         if all_noticed:
             title += "; for each, a notice with a draft reply went to him"
         title += "."
@@ -329,7 +353,8 @@ def build(lines):
                 else "its counts are not recorded")
         digest_line = "Digest to %s%s: %s %s" % (
             OWNER, " at %s" % when(t) if t else "", said,
-            "Found in her Sent folder." if found else "Not found in her Sent folder.")
+            "Found in her Sent folder." if found else "Not found in her Sent folder." if found is False
+            else "Not confirmed in her Sent folder.")
         if len(digests) > 1:
             digest_line += " (The last of %d.)" % len(digests)
 
@@ -348,6 +373,16 @@ def build(lines):
             "digest": digest_line, "cost": cost_line, "gate": gate, "mode": mode or "", "quiet": not messages}
 
 
+def _booking(bookings, bid, subject):
+    return bookings.setdefault(bid, {"subject": subject, "start": None, "end": None, "written": False,
+                                     "removed": False, "there": None, "booked": False})
+
+
+def _hold_reason(close):
+    code = _code(close)
+    return STORY_REASONS.get(code) or templates.HOLD_REASONS.get(code) or _why_text(close)
+
+
 def _booked_slot(m):
     """A booking's start and end from her confirmation's own slots, when no read-back recorded them."""
     for line, _found in m.replies:
@@ -355,7 +390,11 @@ def _booked_slot(m):
         if isinstance(s, dict) and _payload(line).get("target") == "T1":
             start = _time(s.get("start"))
             d = _int(s.get("duration"))
-            return start, (start + _dt.timedelta(minutes=d)) if start and d else None
+            d = d if d is not None and 0 < d <= MAX_MINUTES else None
+            try:
+                return start, (start + _dt.timedelta(minutes=d)) if start and d else None
+            except OverflowError:
+                return start, None
     return None, None
 
 
@@ -401,7 +440,7 @@ def _told(m, booked):
     asked = _time(s.get("asked"))
     start = _time(s.get("start"))
     if outcome.startswith("hold:"):
-        return "Held for %s: %s" % (OWNER, templates.HOLD_REASONS.get(code) or _why_text(m.close)), booked
+        return "Held for %s: %s" % (OWNER, _hold_reason(m.close)), booked
     if outcome == "book":
         at = _full(start) if start else "the time they chose"
         head = {"policy.book_clear_time": "Asked for %s: booked", "policy.pick_books": "Picked %s from her times: booked",
@@ -468,8 +507,10 @@ def _halt_words(line, when):
     if isinstance(flight, dict):
         call = flight.get("call") if isinstance(flight.get("call"), str) else "a call"
         out.append("Cut off mid-call: %s." % call)
-    else:
+    elif flight == "none":
         out.append("Nothing was in flight.")
+    else:
+        out.append("What was in flight is not recorded.")
     dropped = p.get("dropped")
     if isinstance(dropped, list):
         out.append("%s dropped." % _plural(len(dropped), "queued item") if dropped else "Nothing queued was dropped.")
@@ -568,8 +609,12 @@ def lines(receipts_path, width=None):
                             "doris verify %s" % (result.first_bad_seq, result.reason.split(": ", 1)[-1], shown_path),
                             width or _width())
     width = width or _width()
-    s = build(good)
-    out = render(s, width)
+    try:
+        s = build(good)
+        out = render(s, width)
+    except Exception as exc:                     # noqa: BLE001 - one line, never a traceback at the demo's end
+        return [""] + _wrap("No summary: it could not be built from these receipts (%s). Check them with python "
+                            "-m doris verify and python -m doris replay." % exc.__class__.__name__, width)
     if torn:
         out += _wrap("Receipts: %d lines verified; the line after them was cut short." % len(good), width)
     else:

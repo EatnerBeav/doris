@@ -16,6 +16,8 @@ import shutil
 import tempfile
 import unittest
 
+from unittest import mock
+
 from doris import loop, receipts, story, why
 from tests.unit import demo_sandbox
 
@@ -52,12 +54,12 @@ class TheDemoDay(unittest.TestCase):
         s = self.summary
         self.assertEqual((s.handled, s.held, s.human_approvals), (13, 2, 0))
         self.assertEqual(self.story["headline"],
-                         "15 emails read: 13 handled by her (6 answered, 7 needed no reply), 2 held for Shane. "
+                         "15 emails came in: 13 handled by her (6 answered, 7 needed no reply), 2 held for Shane. "
                          "1 meeting on his calendar. 0 human approvals.")
 
     def test_needs_shane_lists_each_hold_with_its_approved_reason_and_when(self):
         needs = self.story["needs"]
-        self.assertEqual(needs["title"], "Needs Shane (2): nothing was sent to them; for each, a notice with a "
+        self.assertEqual(needs["title"], "Needs Shane (2): she sent no reply to these; for each, a notice with a "
                                          "draft reply went to him.")
         self.assertEqual(needs["rows"], [["1:10 PM", "Elena Voss", "money, legal or a complaint"],
                                          ["2:20 PM", "Marcus Lee", "asks to add or write to another person"]])
@@ -169,11 +171,12 @@ class Day:
     def model(self, subject, cost=0.0, source="stub"):
         self.call(subject, "model", source, {"ok": True, "cost_usd": cost, "source": source}, source=source)
 
-    def send(self, subject, template, slots, to="sender", found=True, mid=None, ts="2026-12-01T16:10:00Z"):
+    def send(self, subject, template, slots, to="sender", found=True, mid=None, ts="2026-12-01T16:10:00Z",
+             result=None):
         mid = mid or "<%s-%s@x>" % (subject, template)
         seq = self.add("called", {"call": "send", "target": template, "to": to, "message_id": mid, "slots": slots,
                                   "bcc": "owner" if to == "sender" else None}, subject, ts=ts)
-        self.add("result", {"call_seq": seq, "ok": True, "state": "handed_over"}, subject, ts=ts)
+        self.add("result", dict(result or {"ok": True, "state": "handed_over"}, call_seq=seq), subject, ts=ts)
         self.call(subject, "sent_lookup", template, {"ok": True, "found": found}, message_id=mid)
 
     def check(self, subject, action, passed=True):
@@ -216,7 +219,7 @@ def booked_day(found=True, name="Priya Raman", source="stub", cost=0.0):
 class SmallDays(unittest.TestCase):
     def test_a_reply_sent_is_counted_only_when_sent_found_it(self):
         s = story.build(booked_day(found=False).lines)
-        self.assertIn("1 email read: 1 handled by her (0 answered, 0 needed no reply, 1 closed without a confirmed "
+        self.assertIn("1 email came in: 1 handled by her (0 answered, 0 needed no reply, 1 closed without a confirmed "
                       "reply), 0 held for Shane.", s["headline"])
         s = story.build(booked_day(found=True).lines)
         self.assertIn("(1 answered, 0 needed no reply)", s["headline"])
@@ -289,8 +292,135 @@ class SmallDays(unittest.TestCase):
         d.send("m1", "S1", {"reason": "hold.money"}, to="owner", found=False)
         d.close("m1", "hold:money", "hold.money", held=True)
         needs = story.build(d.lines)["needs"]
-        self.assertEqual(needs["title"], "Needs Shane (1): nothing was sent to them.")
+        self.assertEqual(needs["title"], "Needs Shane (1): she sent no reply to these.")
         self.assertEqual(needs["rows"][0][2], "money, legal or a complaint (her notice to him was not found in Sent)")
+
+
+class WhatTheReceiptsBack(unittest.TestCase):
+    """Fable review of PR #18: each claim only as far as a line backs it, and no line can make it raise."""
+
+    def test_odd_values_in_a_chain_that_verifies_never_raise(self):
+        cases = {
+            "a message ID that is a list": lambda d: d.call("m1", "send", "T2", {"ok": True}, to="sender",
+                                                            message_id=["x"], slots={}),
+            "a template that is a list": lambda d: d.add("decided", {"outcome": "offer", "template": ["T1"]}, "m1",
+                                                         {"code": "policy.offer_no_clear_time", "text": "x"}),
+            "a stamp in year one": lambda d: d.add("checked", {"passed": True}, "m1", ts="0001-01-01T00:00:00Z"),
+            "a read-back in year one": lambda d: d.call("m1", "calendar_get", "doris-aaa",
+                                                        {"ok": True, "found": True, "start": "0001-01-01T00:00:00Z",
+                                                         "end": "0001-01-01T00:30:00Z"}),
+            "an asked time in year one": lambda d: (
+                d.send("m1", "T2", {"asked": "0001-01-01T00:00:00Z", "slots": ["a", "b"]}),
+                d.close("m1", "offer", "policy.offer_conflict", template="T2", slots={"rule": "overlap"})),
+            "a huge cost": lambda d: d.model("m1", cost=10 ** 400),
+        }
+        for what, add in cases.items():
+            with self.subTest(what):
+                d = booked_day()
+                add(d)
+                story.render(story.build(d.lines), 100)
+        with self.subTest("a huge duration and no read-back"):
+            d = Day()
+            d.mail("m1", "Priya Raman", "priya@northwind.example")
+            d.call("m1", "calendar_create", "doris-aaa", {"ok": True, "state": "written"})
+            d.send("m1", "T1", {"start": "2026-12-02T19:00:00Z", "duration": 10 ** 30})
+            d.close("m1", "book", "policy.book_clear_time", template="T1", booking_id="doris-aaa")
+            story.render(story.build(d.lines), 100)
+
+    def test_a_story_that_cannot_be_built_says_so_in_one_line(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "receipts.jsonl")
+        booked_day().write(path)
+        with mock.patch.object(story, "build", side_effect=RuntimeError("x")):
+            out = story.lines(path, width=1000)
+        self.assertEqual(out, ["", "No summary: it could not be built from these receipts (RuntimeError). Check "
+                                   "them with python -m doris verify and python -m doris replay."])
+
+    def test_a_send_whose_answer_was_lost_counts_once_sent_found_it(self):
+        d = Day()
+        d.mail("m1", "Priya Raman", "priya@northwind.example")
+        d.send("m1", "T2", {"slots": ["a", "b", "c"]}, result={"ok": False, "state": "unknown"})
+        d.close("m1", "offer", "policy.offer_no_clear_time", template="T2", slots={"cond": "B7"})
+        d.send("", "S2", {"handled": 1, "held": 0, "approvals": 0}, to="owner", result={"ok": False, "state": "unknown"})
+        s = story.build(d.lines)
+        self.assertIn("1 handled by her (1 answered, 0 needed no reply)", s["headline"])
+        self.assertTrue(s["digest"].endswith("Found in her Sent folder."), s["digest"])
+
+    def test_a_send_never_looked_for_is_not_called_missing(self):
+        d = Day()
+        seq = d.add("called", {"call": "send", "target": "S2", "to": "owner", "message_id": "<d@x>",
+                               "slots": {"handled": 0, "held": 0, "approvals": 0}})
+        d.add("result", {"call_seq": seq, "ok": False, "state": "unknown"})
+        self.assertTrue(story.build(d.lines)["digest"].endswith("Not confirmed in her Sent folder."))
+
+    def test_a_booking_never_read_back_is_not_on_his_calendar(self):
+        d = Day()
+        d.mail("m1", "Priya Raman", "priya@northwind.example")
+        d.call("m1", "calendar_create", "doris-aaa", {"ok": True, "state": "written"})
+        d.call("m1", "calendar_get", "doris-aaa", {"ok": True, "found": False})
+        d.close("m1", "hold:unknown_result", "hold.unknown_result", held=True)
+        s = story.build(d.lines)
+        self.assertIn("0 meetings on his calendar", s["headline"])
+        self.assertEqual(s["calendar"]["rows"], [])
+
+    def test_a_removal_that_failed_still_shows_the_meeting(self):
+        d = Day()
+        d.mail("m1", "Priya Raman", "priya@northwind.example")
+        d.call("m1", "calendar_create", "doris-aaa", {"ok": True, "state": "written"})
+        got = {"ok": True, "found": True, "start": "2026-12-02T19:00:00Z", "end": "2026-12-02T19:30:00Z"}
+        d.call("m1", "calendar_get", "doris-aaa", got)
+        d.call("m1", "calendar_delete", "doris-aaa", {"ok": True})
+        d.call("m1", "calendar_get", "doris-aaa", got)
+        d.close("m1", "hold:remove_failed", "hold.remove_failed", held=True)
+        s = story.build(d.lines)
+        self.assertIn("1 meeting on his calendar", s["headline"])
+        self.assertEqual(s["calendar"]["rows"], [["Wed Dec 2, 11:00 AM Pacific, 30 min", "Priya Raman"]])
+        self.assertNotIn("listed below", s["needs"]["rows"][0][2])
+
+    def test_the_halt_line_claims_nothing_in_flight_only_when_the_line_says_none(self):
+        for flight, words in (("none", "Nothing was in flight."), (None, "What was in flight is not recorded.")):
+            with self.subTest(flight):
+                d = booked_day()
+                payload = {"cause": "watch_button", "dropped": []}
+                if flight is not None:
+                    payload["in_flight"] = flight
+                d.add("halted", payload, "", why.why("halt.watch_button"), ts="2026-12-01T18:31:00Z")
+                self.assertIn(words, story.build(d.lines)["halt"])
+
+    def test_a_halt_followed_by_a_restart_is_not_the_end(self):
+        d = booked_day()
+        d.add("halted", {"cause": "watch_button", "in_flight": "none", "dropped": []}, "", why.why("halt.watch_button"))
+        d.add("observed", {"step": "start", "mode": "sandbox", "model_source": "stub", "clock": T0})
+        d.summary(handled=1)
+        s = story.build(d.lines)
+        self.assertEqual((s["state"], s["halt"]), ("finished", ""))
+
+    def test_sensitive_mail_shows_no_name(self):
+        d = Day()
+        d.mail("m1", "Dr Lee", "lee@clinic.example")
+        d.close("m1", "file", "screen.sensitive_skip")
+        self.assertEqual(story.build(d.lines)["threads"]["rows"][0][0], "(sensitive mail, unread)")
+
+    def test_an_inbox_read_that_failed_says_so(self):
+        d = Day()
+        d.call("", "mail_fetch", "inbox", {"ok": False, "error": "timeout"})
+        self.assertEqual(story.build(d.lines)["headline"], "No new mail: her inbox read failed. 0 human approvals.")
+
+    def test_no_reply_is_claimed_for_a_held_email_that_got_one(self):
+        d = Day()
+        d.mail("m1", "Ann Bell", "ann@bell.example")
+        d.send("m1", "T2", {"slots": ["a", "b", "c"]})
+        d.send("m1", "S1", {"reason": "hold.money"}, to="owner")
+        d.close("m1", "hold:money", "hold.money", held=True)
+        self.assertEqual(story.build(d.lines)["needs"]["title"], "Needs Shane (1)")
+
+    def test_more_than_one_digest_names_the_last(self):
+        d = Day()
+        d.send("", "S2", {"handled": 0, "held": 0, "approvals": 0}, to="owner", mid="<d1@x>")
+        d.send("", "S2", {"handled": 1, "held": 0, "approvals": 0}, to="owner", mid="<d2@x>")
+        self.assertTrue(story.build(d.lines)["digest"].startswith(
+            'Digest to Shane at 8:10 AM: "Handled 1, held 0, human approvals 0." Found in her Sent folder. (The last of 2.)'))
 
 
 class NothingNew(unittest.TestCase):
