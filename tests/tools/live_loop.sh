@@ -93,18 +93,21 @@ finish() {
   fi
   say "mix output:"; cat "$LOOP/mix.out"; mixsum
   found() { ls -d "$DORIS"/traces/live-run-* 2>/dev/null; }
-  [ -z "$(found)" ] || die "a traces/live-run-* folder already exists in $DORIS: $(found | tr '\n' ' ')"
+  # main holds earlier runs' traces (the soak's): this run's folder is the one not there before the stop
+  BEFORE=$(found)
+  newone() { for d in $(found); do printf '%s\n' "$BEFORE" | grep -qxF "$d" || echo "$d"; done; }
+  say "trace folders before the stop: $(printf '%s' "$BEFORE" | xargs -r -n1 basename | tr '\n' ' ')"
   RUN_PIDS=$(pgrep -f "doris (run|_worker)" | tr '\n' ' ')
   say "python3 -m doris stop (her processes: $RUN_PIDS)"
   ( cd src && python3 -m doris stop ); say "stop exit $?"
   for i in $(seq 1 240); do
-    T=$(found | tail -1)
+    T=$(newone | tail -1)
     if [ -n "$T" ] && [ -f "$T/terminal.log" ] && ! pgrep -f "doris (run|_worker)" >/dev/null; then break; fi
     sleep 1
   done
   pgrep -af "doris (run|_worker)" && say "WARNING: a doris process is still alive after the stop"
-  [ "$(found | wc -l)" -eq 1 ] || die "expected exactly one traces/live-run-* folder, found: $(found | tr '\n' ' ')"
-  T=$(found); NAME=$(basename "$T"); STAMP=${NAME#live-run-}
+  [ "$(newone | wc -l)" -eq 1 ] || die "expected exactly one new traces/live-run-* folder, found: $(newone | tr '\n' ' ')"
+  T=$(newone); NAME=$(basename "$T"); STAMP=${NAME#live-run-}
   say "trace folder: traces/$NAME"; ls -la "$T"
   say "her output (last 30 lines):"; tail -n 30 "$LOOP/run.out"
   say "timeline.txt (last 60 lines):"; tail -n 60 "$T/timeline.txt"
@@ -147,9 +150,9 @@ print("mix: %s emails from wolf; met %s, safe %s, wrong %s, unsent %s; answered 
   cat > /root/doris-live-loop-msg.txt <<MSG
 Live loop trace from wide: traces/$NAME and traces/live-loop-$STAMP (pass or fail, committed as kept)
 
-The full live loop, Sat Nov 28: python3 -m doris run --live on main in tmux doris-live, wolf's mix
-(tests/tools/live_mix.py) and Rae's two emails from her Gmail, stopped with python3 -m doris stop.
-run --live wrote traces/$NAME itself.
+The full live loop, Sat Nov 28: python3 -m doris run --live on main in tmux doris-live and wolf's
+mix (tests/tools/live_mix.py), stopped with python3 -m doris stop. run --live wrote traces/$NAME
+itself. Rae's Gmail emails were not sent in this run: they move to the 2:30 PM rehearsal (decision 115).
 $SUMMARY
 $TALLY
 
