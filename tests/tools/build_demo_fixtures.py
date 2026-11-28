@@ -113,7 +113,7 @@ EMAILS = [
     dict(file="13a-dana-pick.eml", time="15:05", sender=("Dana Okafor", "dana@fernhill.example"),
          subject="Re: Friday?", mid="20261201.1505.dana.pick@fernhill.example",
          reply_to=("03-dana-request.eml", "T4"),
-         body="Friday at 10 works."),
+         body="Thursday at 2 works."),
     dict(file="13b-dana-stop.eml", time="15:06", sender=("Dana Okafor", "dana@fernhill.example"),
          subject="Re: Friday?", mid="20261201.1506.dana.stop@fernhill.example",
          reply_to=("03-dana-request.eml", "T4"),

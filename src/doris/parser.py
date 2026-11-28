@@ -1,15 +1,17 @@
 """The plain date parser (ruling 2), the length reader (ruling 5), the pick matcher (ruling 6)
 and the model check (B11).
 
-Two layers. Understanding: every common way a person writes a date, a time and a zone gets
+Three layers. Understanding: every common way a person writes a date, a time and a zone gets
 its readings. Booking: a direct booking only when the sender's own words leave exactly one
-reading and it is bookable (B1-B9 here, B11 in model_agrees, B12 at the gate). Anything this
-module cannot read cleanly is an offer naming the first failed condition. A wrong parse is a
-wrong booking, so when in doubt the verdict is "offer".
+reading and it is bookable (B1-B9 here, B11 in model_agrees; the gate checks the booking
+again). Anything this module cannot read cleanly is an offer naming the first failed
+condition. A wrong parse is a wrong booking, so when in doubt the verdict is "offer". The
+offer's steer: which days, which part of day and which zone an offer looks at first (see
+_frame_days and _steer). It orders an offer and never reaches a booking condition.
 
 Pure: `now` and `sent_utc` come from the caller; nothing reads the wall clock. The bookable
-check (G9, slots.bookable from the calendar builder) is imported inside the function that
-needs it, or passed in as `bookable`.
+check (G9, slots.bookable) is imported inside the function that needs it, or passed in as
+`bookable`.
 """
 
 import bisect
@@ -19,19 +21,19 @@ import re
 import unicodedata
 from typing import Callable, Dict, List, Optional, Tuple
 
-from . import zones
-from .shapes import ModelAnswer, ParseResult, PickResult, Reading, Slot
+from . import caps, zones
+from .shapes import UTC, ModelAnswer, ParseResult, PickResult, Reading, Slot
 
-UTC = _dt.timezone.utc
 CONDITIONS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
-DEFAULT_LENGTH_MIN = 30
 
 # ---------------------------------------------------------------------------------------
 # N1-N3: folding to plain ASCII
 # ---------------------------------------------------------------------------------------
 SUB = "\x1a"          # stands in for a character that cannot be folded (row N2)
 BREAK = "\x1e"        # a blank line: ends a sentence (row N5)
-_DIRECTION = set("‎‏؜‪‫‬‭‮⁦⁧⁨⁩")
+# Direction controls (row N3), written as escapes so none sits raw in this file: LRM, RLM, ALM,
+# the embeddings and overrides U+202A to U+202E, the isolates U+2066 to U+2069.
+_DIRECTION = set("\u200e\u200f\u061c\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 _MAP = {
     "‘": "'", "’": "'", "‚": "'", "‛": "'", "′": "'", "´": "'", "`": "'",
     "“": '"', "”": '"', "„": '"', "‟": '"', "″": '"', "«": '"', "»": '"',
@@ -55,7 +57,7 @@ def fold(text) -> Tuple[str, bool, bool]:
         else:
             out.append(_MAP.get(c, c))
     s = "".join(out)
-    if s.startswith("﻿"):
+    if s.startswith("\ufeff"):       # a byte order mark
         s = s[1:]
     try:
         s = unicodedata.normalize("NFKC", s)
@@ -142,7 +144,7 @@ UNKNOWN_ABBRS = ("cet", "cest", "bst", "ist", "aest", "aedt", "acst", "acdt", "a
                  "wat", "cat", "eat", "brt", "art", "pkt", "ict", "wib", "gst", "pht")
 _Z3_FOLLOW = re.compile(
     r"\s*(?:time\b|standard\b|daylight\b|[.,;:!?()\[\]\x1e-]|$|(?:for|on|at|if|and|or|so|as|that|this|then|"
-    r"with|works|work|would|will|could|can|is|was|please|instead|to|thanks)\b)")
+    r"with|works|work|would|will|could|can|is|was|please|instead|to|thanks|about|regarding|re(?!-)|concerning)\b)")
 
 NEGATION = re.compile(
     r"\b(?:\w+n't|cant|dont|wont|didnt|doesnt|isnt|arent|wasnt|werent|couldnt|wouldnt|shouldnt|havent|hasnt|"
@@ -193,6 +195,7 @@ class _Text(object):
         self.ranges = []
         self.either = []
         self.q2 = []
+        self.flags = {}             # sentence -> (negated, not the meeting), see _sentence_flags
         self.pick_mode = False      # ruling 6: "at 2" is read whatever follows it
 
     def free(self, a, b):
@@ -226,7 +229,7 @@ def _weekday_ok_short(T, m_start, word):
     return False
 
 
-def _zone_at(T, pos, date_hint=None):
+def _zone_at(T, pos):
     """The zone written right after a time (rows Z1-Z9, Z12), or None."""
     lt = T.lt
     m = re.match(r"(?:\s*-?\s?ish\b)?(\s*(?:,|\()?\s*)", lt[pos:])
@@ -808,13 +811,26 @@ def _next_to_mention(T, a, b):
     return False
 
 
+def _zone_before_a_relative_date(T):
+    """Row Z3 lets a date follow a bare region word ("1pm Eastern Thursday"). The relative dates are
+    read after the times, so a time left with no zone is looked at once more. Such a date never
+    books (B5): this changes what is offered, and which offered slot a reply names, never a
+    direct booking."""
+    for tm in T.times:
+        if tm.zone is None:
+            z = _zone_at(T, tm.end)
+            if z is not None and z.kind == "region" and T.free(z.start, z.end):
+                tm.zone = z
+                T.take(z.start, z.end)
+
+
 def _extract_free_zones(T):
     lt = T.lt
     pats = [
         (r"\b(?:central|eastern|western)\s+european(?:\s+(?:summer|standard))?\s+time\b", None),
         (r"\b(pacific|mountain|central|eastern)\s+(?:(standard|daylight)\s+)?time\b", "region"),
         (r"\(\s*(" + "|".join(US_ABBRS) + r"|utc|gmt)\s*\)", "abbr"),
-        (r"\b(utc|gmt)\b(?:\s?[+-]\d{1,2}(?::?\d{2})?)?", "utc"),
+        (r"\b(utc|gmt)\b(?:\s?([+-])(\d{1,2})(?::?(\d{2}))?)?", "utc"),
     ]
     for pat, kind in pats:
         for m in re.finditer(pat, lt):
@@ -827,6 +843,11 @@ def _extract_free_zones(T):
                 zid = zones.abbr_zone(m.group(1).upper())
             elif kind == "utc":
                 zid = "UTC"
+                if m.group(2):          # "GMT+1" is that offset, not UTC; past 14 hours it is no zone
+                    hours, minutes = int(m.group(3)), int(m.group(4) or 0)
+                    zid = None
+                    if hours <= 14 and minutes < 60:
+                        zid = zones.offset_zone((hours * 60 + minutes) * (1 if m.group(2) == "+" else -1))
             T.zones_free.append(_M(start=m.start(), end=m.end(), zid=zid))
             T.take(m.start(), m.end())
 
@@ -837,6 +858,7 @@ def _extract(t, sent_date):
     _extract_times(T)
     _extract_ranges_into_units(T)
     _extract_relative(T)
+    _zone_before_a_relative_date(T)
     _extract_free_zones(T)
     for m in re.finditer(r"\beither\b", T.lt):
         T.either.append(m.start())
@@ -881,7 +903,7 @@ def parse_length(lt) -> Tuple[int, str, Optional[str]]:
     if re.search(r"\ban hour and a half\b", lt):
         found = [x for x in found if x != 60]
     if rule is not None:
-        n = max(found) if found else DEFAULT_LENGTH_MIN
+        n = max(found) if found else caps.DEFAULT_LENGTH_MIN
         if rule == "zero":
             n = 0
         return n, "written" if found or rule == "zero" else "default", rule
@@ -890,7 +912,7 @@ def parse_length(lt) -> Tuple[int, str, Optional[str]]:
         if n > 60:
             return n, "written", "over_60"
         return n, "written", None
-    return DEFAULT_LENGTH_MIN, "default", None
+    return caps.DEFAULT_LENGTH_MIN, "default", None
 
 
 # ---------------------------------------------------------------------------------------
@@ -921,7 +943,7 @@ def _instant(d, clock, zid):
     return zones.to_utc(local, zid)
 
 
-def _time_readings(tm, d, steer_zone, drop_override=None):
+def _time_readings(tm, d, steer_zone):
     """Readings of one time on one date: list of (instant|None, zone|None, kept_by_drop_rule, rule)."""
     zids, _, drop, zrule = _zone_ids_for(tm, d, steer_zone)
     out = []
@@ -952,11 +974,14 @@ class _Unit(object):
         self.pair = False
 
 
-def _date_for(T, pos, sentence):
-    """The date mention a time at pos belongs to: same sentence and nearest, else nearest."""
+def _date_for(T, pos, sentence, skip=()):
+    """The date mention a time at pos belongs to: same sentence and nearest, else nearest. The
+    mentions in `skip` are passed over."""
     best = None
     for d in T.dates:
         if d.kind == "dotted" and getattr(d, "as_time", False):
+            continue
+        if id(d) in skip:
             continue
         same = T.sentence(d.start) == sentence
         dist = min(abs(d.start - pos), abs(d.end - pos))
@@ -974,9 +999,14 @@ def _weekday_names(T):
     return names
 
 
-def _date_cands(T, dm, unit, steer_zone):
-    """Candidate dates of a date mention, with kept flags: [(date, kept, rule)]. P2 is applied here."""
-    out = [(c, True, dm.form) for c in dm.cands]
+def _date_cands(T, dm, for_offer=False):
+    """Candidate dates of a date mention, with kept flags: [(date, kept, rule)]. P2 is applied here.
+    With `for_offer` (the offer's readings, never the booking conditions) a weekday written with a
+    week phrase or with its day number is that one day (see _frame_days)."""
+    cands = dm.cands
+    if for_offer and getattr(dm, "offer_day", None) is not None:
+        cands = [dm.offer_day]
+    out = [(c, True, dm.form) for c in cands]
     if len(out) == 2:
         names = [w for w, _ in _weekday_names(T)]
         if names:
@@ -989,7 +1019,7 @@ def _date_cands(T, dm, unit, steer_zone):
 def _bookable_fn(bookable):
     if bookable is not None:
         return bookable
-    from . import slots   # the calendar builder's module, imported only when needed
+    from . import slots   # imported only when needed
     return slots.bookable
 
 
@@ -1063,16 +1093,19 @@ def _sentence_text(T, s):
 
 
 def _sentence_flags(T, pos):
-    text = _sentence_text(T, T.sentence(pos))
-    neg = bool(NEGATION.search(text) or NEG_BUT.search(text))
-    return neg, bool(NOT_MEETING.search(text))
+    """(negated, not the meeting) for the sentence at pos: rows Q5 and Q10. Kept per sentence."""
+    s = T.sentence(pos)
+    if s not in T.flags:
+        text = _sentence_text(T, s)
+        T.flags[s] = (bool(NEGATION.search(text) or NEG_BUT.search(text)), bool(NOT_MEETING.search(text)))
+    return T.flags[s]
 
 
 def _iso(dt_):
     return dt_.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ") if dt_ is not None else None
 
 
-def _offer(reason, h, length=(DEFAULT_LENGTH_MIN, "default", None)):
+def _offer(reason, h, length=(caps.DEFAULT_LENGTH_MIN, "default", None)):
     return ParseResult(verdict="offer", failed_condition=reason, readings=[], instant_utc=None, zone=None,
                        length_min=length[0], length_source=length[1], length_rule=length[2],
                        visible_body_hash=h, conditions={c: False for c in CONDITIONS})
@@ -1155,16 +1188,28 @@ def _parse(own_text, sent_utc, now_utc, bookable, body_hash):
     excluded = []
     vague_units = len(T.vague)
 
-    # Build readings: each unit with its date, then dates with no time.
-    unit_dates = [(u, _date_for(T, u.main.start, T.sentence(u.main.start))) for u in units]
+    # Build readings: each unit with its date, then dates with no time. For the offer a weekday
+    # written with a week phrase is read inside that week, and the week then names no day itself.
+    # A mail crowded with dates and times (it cannot book: B2) gets none of this: no time is put
+    # first and no day steers, so the longest mail still reads in a moment.
+    crowded = len(T.dates) + len(T.times) + len(T.vague) > _CROWDED
+    try:
+        stood_for = set() if crowded else _frame_days(T)
+    except Exception:           # this only orders an offer: it never costs the reading
+        stood_for = set()
+    unit_dates = [] if crowded else \
+        [(u, _date_for(T, u.main.start, T.sentence(u.main.start), stood_for)) for u in units]
     paired_dates = set(id(dm) for _, dm in unit_dates if dm is not None)
+    with_time = {}              # a date mention -> the readings of the times written with it
     for u, dm in unit_dates:
-        readings.extend(_unit_readings(T, u, dm, steer_zone, now_utc, bookable, length, excluded,
-                                       paired=paired_dates))
+        found = _unit_readings(T, u, dm, steer_zone, now_utc, bookable, length, excluded, paired=paired_dates)
+        readings.extend(found)
+        if dm is not None:
+            with_time.setdefault(id(dm), []).extend(found)
     for dm in date_mentions:
-        if id(dm) in paired_dates or getattr(dm, "as_time", False):
+        if crowded or id(dm) in paired_dates or id(dm) in stood_for or getattr(dm, "as_time", False):
             continue
-        for c in dm.cands:
+        for c in ([dm.offer_day] if getattr(dm, "offer_day", None) is not None else dm.cands):
             readings.append(Reading(start_utc=None, date=c, zone=None, kept=True, rule=dm.form))
 
     # Conditions
@@ -1208,25 +1253,364 @@ def _parse(own_text, sent_utc, now_utc, bookable, body_hash):
     zone_pair = None
     if unit is not None and unit.pair:
         zone_pair = tuple(t.zone.zid for t in unit.times[:2])
-    kept_dates = [r.date for r in readings if r.kept and not r.derived and r.date is not None]
-    any_dates = [r.date for r in readings if not r.derived and r.date is not None]     # a derived day never steers
-    steer_day = kept_dates[0] if kept_dates else (any_dates[0] if any_dates else None)
-    if steer_day is None:
-        for d in date_mentions:
-            if d.cands:
-                steer_day = d.cands[0]
-                break
-    steer_window = None
-    for v in T.vague:
-        if v.window:
-            steer_window = v.window
-            break
+    steer_day = steer_window = None
+    try:
+        if not crowded:
+            steer_day, steer_window, zone = _steer(T, with_time, stood_for, zone, now_utc, readings, length[0])
+    except Exception:           # it only orders an offer: it never costs the reading
+        steer_day = steer_window = None
     return ParseResult(
         verdict=verdict, failed_condition=failed, readings=readings,
         instant_utc=instant if verdict == "book" else None, zone=zone, zone_pair=zone_pair,
         steer_day=steer_day, steer_window=steer_window, excluded_utc=sorted(set(excluded)),
         length_min=length[0], length_source=length[1], length_rule=length[2],
         visible_body_hash=body_hash, conditions=cond)
+
+
+# ---------------------------------------------------------------------------------------
+# The offer's steer (ruling 2: "the sender's apparent time first"; the offer column of the
+# tables): the days the sender named, the part of day, and the zone both are read in. It
+# orders an offer and nothing else: no condition B1 to B9 reads anything set here.
+# ---------------------------------------------------------------------------------------
+_OWN_WEEK = re.compile(r"(?:this|coming)\b")
+_LATE_IN_WEEK = re.compile(r"(?:late|later)\b")
+_WEEK_GLUE = re.compile(r"^(?:[\s,()@-]|\b(?:of|in|during|the|at|on)\b)*$")
+_LIST_JOIN = re.compile(r"^\s*(?:(?:at|@)\s+)?(?:,\s*)?(?:(?:and|or|nor)\b|&|/)\s*(?:(?:on|the)\s+)?$")
+_LIST_COMMA = re.compile(r"^\s*,\s*$")
+_LIST_GOES_ON = re.compile(r"^\s*(?:,|(?:and|or|nor)\b|&|/|[.?!\x1e]|$)")
+_CONDITIONAL = re.compile(r"\b(?:if|unless|in case|whether|should|when)\b")
+_CLAUSE_BREAK = re.compile(r"[,;:]|\bbut\b")
+_NOT_FREE = (r"(?:out|off|away|travell?ing|on vacation|on holiday|on leave|on pto|out of (?:the )?office|"
+             r"out of town|ooo|unavailable|busy|booked|booked up|tied up|slammed|swamped)")
+_RULED_OUT_BEFORE = re.compile(
+    r"(?:(?:\b(?:i|we)\s+(?:really\s+|just\s+|simply\s+|also\s+|sadly\s+|unfortunately\s+)?|(?:^|[.?!;:,\x1e-])\s*)"
+    r"(?:can't|cannot|can not|cant|couldn't|couldnt|won't be able to|wont be able to|will not be able to|"
+    r"am unable to|'m unable to|are unable to|'re unable to|am not able to|'m not able to)\s+"
+    r"(?:(?:do|make|meet|manage|swing|attend|talk|chat|call|join)\s+)?(?:(?:it|that|this|anything|a call|a meeting)\s+)?"
+    r"|(?<!\bwhy )(?<!\bif )(?<!\bor )\bnot\s+"
+    r"|\b(?:except|except for|other than|aside from|apart from|excluding)\s+"
+    r"|\b(?:anything|any day|any time|anytime|all|all week|every day)\s+but\s+"
+    r"|\b(?:i|we)(?:'m| am|'re| are|'ll be| will be)\s+(?:not\s+(?:available|free|around|in|in the office|"
+    r"at work|working)|" + _NOT_FREE + r")\s+"
+    r"|\b(?:i|we)\s+(?:won't|wont|will not)\s+be\s+(?:available|free|around|in|in the office|at work|working)\s+"
+    r")(?:(?:on|for|the|at|in|during|all|all day|all of)\s+)*$")
+_RULED_OUT_AFTER = re.compile(
+    r"^\s*(?:(?:at|@)\s+)?(?:(?:doesn't|does not|doesnt|don't|do not|dont|won't|will not|wont|wouldn't|would not|"
+    r"wouldnt|can't|cannot|cant)\s+(?:really\s+)?(?:work|suit|fit|be possible|be good|happen)\b"
+    r"|(?:is|are|'s|looks|look|will be|would be)\s+(?:not\s+(?:possible|good|great|ideal|going to work|an option|"
+    r"available|doable|free|open)|out|bad|booked|booked up|busy|full|packed|impossible|unavailable|no good|"
+    r"tough|tricky|difficult|off the table|out of the question)\b"
+    r"|(?:isn't|isnt|aren't|arent|won't be|wont be)\s+(?:possible|good|great|ideal|going to work|an option|"
+    r"available|doable|free|open)\b"
+    r"|(?:,\s*)?(?:i|we)\s+(?:can't|cannot|cant|can not)\b"
+    r"|(?:,\s*)?(?:i|we)(?:'m| am|'re| are|'ll be| will be)\s+" + _NOT_FREE + r"\b)")
+_CAPS_US_ABBR = re.compile(r"(?:" + "|".join(US_ABBRS).upper() + r")\b")
+_CAPS_UNKNOWN_ABBR = re.compile(r"(?:" + "|".join(UNKNOWN_ABBRS).upper() + r")\b")
+_PLACE_TIME = re.compile(r"((?:[A-Z][A-Za-z.]*\s+){1,3})time\b")
+_NOT_A_PLACE = ("what", "which", "any", "some", "this", "that", "next", "last", "same", "the", "a", "no",
+                "every", "each", "more", "lunch", "dinner", "good", "best", "first")
+_PARTS_OF_DAY = re.compile(r"\b(?:mornings|afternoons|evenings)\b")
+_CROWDED = 100              # dates, times and parts of day: past this a mail gets the earliest slots
+_NEAR = 160                 # how far around a mention its words are read, in characters
+
+
+def _quiet(T, extra=()):
+    """The lower-case text with the times (and their zones), the parts of day and the free zones
+    blanked, and the spans in `extra`: the words between and around the day mentions."""
+    spans = [(v.start, v.end) for v in T.vague] + [(z.start, z.end) for z in T.zones_free]
+    spans += [(m.start(), m.end()) for m in _PARTS_OF_DAY.finditer(T.lt)]
+    spans += [(tm.start, tm.zone.end if tm.zone is not None else tm.end) for tm in T.times]
+    out = list(T.lt)
+    for start, end in spans + list(extra):
+        out[start:end] = " " * (min(end, len(out)) - start)
+    return "".join(out)
+
+
+def _frame_days(T):
+    """What each day mention means to the offer, set on the mentions. Returns the ids of the week
+    phrases a day written with them stands for, which then name no day of their own.
+
+    - Row L6: a week phrase is its days, Monday to Sunday (.week).
+    - A weekday written with its day number is that day (.offer_day): "Wednesday the 9th".
+    - A weekday alone (row L2, not "this Thursday") written with a week phrase is the one inside
+      that week (.offer_day), not the coming one. Any other day written with a week stands for
+      it when it falls inside it ("next week, the 8th"). Written with: right before the week
+      ("Tuesday or Wednesday next week"), right after it ("next week Tuesday"), or later in the
+      same or the next sentence ("next week? Tuesday or Wednesday"). "Friday or next week" is
+      two asks, a week the sender ruled out frames nothing, and neither does a date that is not
+      the meeting (row Q10).
+    - The days and weeks the sender ruled out (.out): see _rule_out.
+
+    A week whose days are all ruled out keeps its own days: "next week, but not Monday".
+    """
+    dates = [d for d in T.dates if not getattr(d, "as_time", False)]
+    quiet = _quiet(T)
+    weeks = [d for d in dates if d.form == "L6" and d.cands]
+    for w in weeks:
+        monday = w.cands[0] - _dt.timedelta(days=w.cands[0].weekday())
+        w.week = [monday + _dt.timedelta(days=i) for i in range(7)]
+        w.framed = []
+    for a, b in zip(dates, dates[1:]):
+        for day, number in ((a, b), (b, a)):
+            if day.form in ("L2", "L3") and number.form == "L4" and number.cands and \
+                    number.cands[0].weekday() == day.weekday and T.sentence(a.end - 1) == T.sentence(b.start) and \
+                    re.match(r"^[\s,(]*$", T.lt[a.end:b.start]):
+                day.offer_day, day.number = number.cands[0], number
+    is_week = set(id(w) for w in weeks)
+    bare = set(id(d) for d in dates if d.form == "L2" and getattr(d, "offer_day", None) is None
+               and not _OWN_WEEK.match(T.lt[d.start:d.end]))
+    is_day = set(id(d) for d in dates if d.form != "L6" and not _sentence_flags(T, d.start)[1])
+    framed = {}                     # a day mention -> the week it is written with
+
+    def frame(d, week):
+        if id(d) in bare:
+            if week.week[d.weekday] < T.sent_date:
+                return False        # "Monday this week", written on a Tuesday: the coming Monday
+            d.offer_day = week.week[d.weekday]
+        else:
+            fixed = getattr(d, "offer_day", None)
+            inside = [c for c in ([fixed] if fixed is not None else d.cands) if c in week.week]
+            if not inside:
+                return False        # a date outside the week is one more ask
+            if len(inside) == 1:
+                d.offer_day = inside[0]
+        week.framed.append(d)
+        framed[id(d)] = week
+        return True
+
+    # right before the week: the day next to it, and the days listed with that one
+    before_week = {}
+    for i in range(len(dates) - 2, -1, -1):
+        d, nxt = dates[i], dates[i + 1]
+        if id(d) not in is_day:
+            continue
+        if id(nxt) in is_week and T.sentence(nxt.start) == T.sentence(d.start) and \
+                _WEEK_GLUE.match(quiet[d.end:nxt.start]):
+            if frame(d, nxt):
+                before_week[id(d)] = d.week_after = nxt
+                nxt.paired = True
+        elif id(nxt) in before_week and _listed(T, d, nxt, quiet) and frame(d, before_week[id(nxt)]):
+            before_week[id(d)] = before_week[id(nxt)]
+    # right after the week
+    for prv, d in zip(dates, dates[1:]):
+        if id(d) in is_day and id(d) not in framed and id(prv) in is_week and \
+                re.match(r"^[\s,]*$", T.lt[prv.end:d.start]) and frame(d, prv):
+            d.week_before = prv
+            prv.paired = True
+    _rule_out(T, dates, quiet)
+    # later in the same or the next sentence
+    week = None
+    for prv, d in zip([None] + dates, dates):
+        if id(d) in is_week:
+            week = d
+        if week is None or id(d) not in is_day or id(d) in framed:
+            continue
+        if getattr(week, "out", False) or T.sentence(d.start) - T.sentence(week.start) > 1:
+            continue
+        if prv is not week and framed.get(id(prv)) is not week:
+            continue                # the day written before this one is not that week's either
+        if prv is week and _LIST_JOIN.match(quiet[week.end:d.start]):
+            continue                # "next week or Friday"
+        frame(d, week)
+    return set(id(w) for w in weeks if any(not getattr(d, "out", False) for d in w.framed))
+
+
+def _span(d):
+    """Where a day mention starts and ends, counting the week written with it ("Tuesday next week")."""
+    return getattr(d, "week_before", d).start, getattr(d, "week_after", d).end
+
+
+def _ruled_out_at(T, start, end, quiet):
+    """The words right before or right after T.lt[start:end] rule it out: "I can't do ...",
+    "... doesn't work", "any day except ...", "I'm out ...". Not under an "if" in the same
+    clause ("if Friday doesn't work, Monday?")."""
+    s, e = T.sentence(start), T.sentence(end - 1)       # end - 1: a weekday takes the full stop after it
+    before = quiet[max(T.ends[s - 1] + 1 if s > 0 else 0, start - _NEAR):start]
+    after = quiet[end:min(T.ends[e] if e < len(T.ends) else len(quiet), end + _NEAR)]
+    if _CONDITIONAL.search(_CLAUSE_BREAK.split(before)[-1]):
+        return False
+    return bool(_RULED_OUT_BEFORE.search(before) or _RULED_OUT_AFTER.match(after))
+
+
+def _rule_out(T, dates, quiet):
+    """Marks the days and weeks the sender rules out (.out). The words sit right before or right
+    after the day, or the list of days it is written in; a time or a part of day written with
+    the day is read past ("I can't do 10am on Thursday"). Narrower than row Q5's whole sentence,
+    so "I can't do Monday, Tuesday works" still names Tuesday. A week written with a weekday
+    ("Tuesday next week") is part of that weekday."""
+    lists = []
+    for d in dates:
+        if getattr(d, "paired", False):
+            continue
+        if lists and _listed(T, lists[-1][-1], d, quiet):
+            lists[-1].append(d)
+        else:
+            lists.append([d])
+    for days in lists:
+        if _ruled_out_at(T, _span(days[0])[0], _span(days[-1])[1], quiet):
+            for d in days:
+                d.out = True
+    for d in dates:                 # a weekday and its day number are one day
+        number = getattr(d, "number", None)
+        if number is not None and (getattr(d, "out", False) or getattr(number, "out", False)):
+            d.out = number.out = True
+
+
+def _listed(T, a, b, quiet):
+    """Two day mentions written as one list: "Monday and Tuesday", "Monday, Tuesday or Wednesday",
+    "Thursday at 10 or Friday at 2", "Wednesday the 9th"."""
+    a_end, (b_start, b_end) = _span(a)[1], _span(b)
+    if b_start - a_end > _NEAR:
+        return False
+    gap = quiet[a_end:b_start]
+    if _LIST_JOIN.match(gap):
+        return True
+    if not T.lt[a_end:b_start].strip() and "L6" not in (a.form, b.form) and \
+            T.sentence(a_end - 1) == T.sentence(b_start):
+        return True
+    e = T.sentence(b_end - 1)
+    rest = quiet[b_end:min(T.ends[e] + 1 if e < len(T.ends) else len(quiet), b_end + _NEAR)]
+    return bool(_LIST_COMMA.match(gap) and _LIST_GOES_ON.match(rest))
+
+
+def _days_of(T, d):
+    """The days one date mention names, in the order to offer them: a week from the day the mail
+    was sent, from its end backwards when it is "late" or "later" in the week."""
+    if d.form == "L6":
+        days = [x for x in getattr(d, "week", ()) if x >= T.sent_date]
+        return days[::-1] if _LATE_IN_WEEK.match(T.lt[d.start:d.end]) else days
+    return [c for c, kept, _ in _date_cands(T, d, for_offer=True) if kept]
+
+
+def _zone_after_part_of_day(T, v):
+    """The zone written right after a part of day: (zone id, True) for one she knows ("afternoon
+    Eastern", "morning (ET)", "afternoon your time"), (None, True) for one she has no rule for
+    ("afternoon (UK time)", "morning my time", "afternoon CET"), (None, False) when none is
+    written there. An abbreviation counts only in capitals or in brackets, and a place only with
+    "time" after it: "afternoon et al" and "afternoon, what time works" name no zone."""
+    m = re.match(r"\s*,?\s*(\()?\s*", T.lt[v.end:])
+    p = v.end + m.end()
+    for z in T.zones_free:      # read already: "(ET)", "Eastern time", "UTC+1", "Central European Time"
+        if z.start == p or (m.group(1) and z.start == v.end + m.start(1)):
+            return z.zid, True
+    rest, shown = T.lt[p:], T.t[p:]
+    if m.group(1):              # in brackets: the bracket holds a zone and nothing else, or it is none
+        mb = re.match(r"([^()\x1e]{1,40}?)\s*\)", rest)
+        if not mb or not T.free(p, p + mb.end(1)):
+            return None, False
+        inner = mb.group(1)
+        if inner in _REGION:
+            return _REGION[inner], True
+        if re.match(r"(?:your\s+time(?:\s*zone)?|shane'?s\s+time(?:\s*zone)?)$", inner):
+            return "Pacific", True
+        if inner in UNKNOWN_ABBRS or re.search(r"\btime(?:\s*zone)?$", inner) or \
+                re.match(r"[A-Z]{2,5}$", shown[:mb.end(1)]):
+            return None, True
+        return None, False
+    mr = re.match(r"(pacific|mountain|central|eastern)\b", rest)
+    if mr and _Z3_FOLLOW.match(rest[mr.end():]):
+        return _REGION[mr.group(1)], True
+    ma = _CAPS_US_ABBR.match(shown)
+    if ma:
+        return zones.abbr_zone(ma.group(0)), True
+    if re.match(r"(?:your\s+time(?:\s*zone)?|shane'?s\s+time(?:\s*zone)?)\b", rest):
+        return "Pacific", True
+    if re.match(r"(?:my|our|local)\s+time\b", rest) or _CAPS_UNKNOWN_ABBR.match(shown):
+        return None, True
+    mp = _PLACE_TIME.match(shown)
+    if mp and mp.group(1).split()[0].lower() not in _NOT_A_PLACE:
+        return None, True
+    return None, False
+
+
+def _steer(T, with_time, stood_for, zone, now, readings=(), length_min=0):
+    """What the offer looks at first, from what the sender wrote: (steer_day, steer_window, zone).
+
+    steer_day: the days the sender named, in the order written (one date, several in a tuple, or
+    None). A week phrase is its days (row L6), and a weekday written with a week or with its day
+    number is that one day. A day written with a time is named by the readings of that time. A
+    date marked as something other than the meeting (row Q10) names no day. A day the sender
+    ruled out is left out; with nothing else named, every other day of the booking window stands
+    in, so that day is not offered while another is free. A day ruled out together with a time
+    ("I can't do Thursday at 10") is neither asked for nor avoided.
+
+    steer_window: the first part of day the sender did not rule out (row H21), read in the zone
+    written right after it, else in the sender's zone, else in Pacific. Written in a zone she
+    has no rule for, next to a time written in one, or in another zone than the one the times
+    are read in, it is not placed. With no part of day written, the one time of day the sender
+    asked for is the window (ruling 6): when that time is taken, the offer stays near it.
+    """
+    named_by, ruled_out = {}, set()
+    for d in T.dates:
+        if getattr(d, "as_time", False):
+            continue
+        out = getattr(d, "out", False)
+        if id(d) in with_time:
+            days = [r.date for r in with_time[id(d)] if not r.derived and r.rule not in ("P2", "Q10")]
+            if days and not out:
+                named_by[id(d)] = _days_of(T, d) if d.form == "L6" else days
+        elif out:
+            ruled_out.update(_days_of(T, d))
+        elif not _sentence_flags(T, d.start)[1]:
+            named_by[id(d)] = _days_of(T, d)
+    named = []
+    for d in T.dates:
+        if id(d) in stood_for and any(named_by.get(id(x)) for x in d.framed):
+            continue                # a day written with the week, inside it, steers instead of the week
+        named.extend(named_by.get(id(d), ()))
+    named = [x for x in dict.fromkeys(named) if x not in ruled_out]
+    if not named and ruled_out:
+        first, last = zones.pacific_date(now), zones.pacific_date(now + caps.MAX_HORIZON)
+        window = (first + _dt.timedelta(days=i) for i in range((last - first).days + 1))
+        named = [x for x in window if x not in ruled_out]
+    steer_day = None if not named else (named[0] if len(named) == 1 else tuple(named))
+
+    steer_window = None
+    quiet = _quiet(T, [(d.start, d.end) for d in T.dates])
+    parts = sorted((v for v in T.vague if v.window and not _ruled_out_at(T, v.start, v.end, quiet)),
+                   key=lambda v: v.start)
+    if parts:
+        steer_window = parts[0].window
+        zid, written = _zone_after_part_of_day(T, parts[0])
+        if written and zid is not None and zone is None:
+            zone = zid
+        if (written and (zid is None or zid != zone)) or (T.zones_free and not any(z.zid for z in T.zones_free)) \
+                or any(_in_a_zone_she_has_no_rule_for(T, tm) for tm in T.times):
+            steer_window = None
+    # A part of day they wrote is never replaced, placed or not. With a day ruled out the offer keeps
+    # to the day they asked for: the days nearest it would bring the day they ruled out back.
+    if not parts and not ruled_out and not any(getattr(d, "out", False) for d in T.dates):
+        steer_window = _the_one_time(readings, zone, length_min)
+    return steer_day, steer_window, zone
+
+
+def _in_a_zone_she_has_no_rule_for(T, tm):
+    """A time written in a zone she has no rule for (row Z12): "2pm UK time", "14:00 CET", "2pm my
+    time". Ordinary words that only look like one ("2pm works this time") do not count."""
+    z = tm.zone
+    if z is None or z.kind != "unknown":
+        return False
+    shown = T.t[z.start:z.end].strip(" ()")
+    low = shown.lower()
+    if low in UNKNOWN_ABBRS or re.match(r"(?:my|our|local)\s+time$", low) or " european " in " " + low + " ":
+        return True
+    m = _PLACE_TIME.match(shown)
+    return bool(m and m.group(1).split()[0].lower() not in _NOT_A_PLACE)
+
+
+def _the_one_time(readings, zone, length_min):
+    """The one time of day the sender asked for, as a window in the zone it is read in: (start, end).
+    None when they asked for no time she could place, for more than one time of day, for a time
+    marked as something other than the meeting (row Q10), or for a length she does not book."""
+    if isinstance(length_min, bool) or not isinstance(length_min, int) or \
+            not caps.MIN_LENGTH_MIN <= length_min <= caps.MAX_LENGTH_MIN:
+        return None
+    starts = set(zones.to_local(r.start_utc, zone or "Pacific").time() for r in readings
+                 if r.kept and not r.derived and r.start_utc is not None and r.rule != "Q10")
+    if len(starts) != 1:
+        return None
+    start = _dt.datetime.combine(_dt.date(2000, 1, 3), starts.pop())
+    return start.time(), (start + _dt.timedelta(minutes=length_min)).time()
 
 
 _RANGE_START = re.compile(r"(?<![\w:.$/])(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s?m\b\.?)?\s*"
@@ -1282,9 +1666,8 @@ def _d5_weekdays(T, dm, paired):
     """D5's weekdays for one unit's date, as (weekday, the mention it was written in): the weekday
     written with that date, and a weekday written on its own (no date and no time of its own) that
     no written date falls on. A weekday written with another date, or going with another time,
-    belongs to that one only: it never moves this unit's time to its day (Fable review of PR #3,
-    finding 1). A time moved to a weekday written on its own is derived, never one the sender
-    wrote: the caller marks it (Fable review 2 of PR #3, finding A)."""
+    belongs to that one only: it never moves this unit's time to its day. A time moved to a
+    weekday written on its own is derived, never one the sender wrote: the caller marks it."""
     dated = [d for d in T.dates if not (d.kind == "relative" and d.weekday is not None)]
     out = []
     for w, d in _weekday_names(T):
@@ -1301,7 +1684,7 @@ def _unit_readings(T, unit, dm, steer_zone, now, bookable, length, excluded, own
     main = unit.main
     if dm is None:
         return out
-    dcands = _date_cands(T, dm, unit, steer_zone)
+    dcands = _date_cands(T, dm, for_offer=not own_only)
     # P2: slashes, a US zone by name, the month-first reading bookable and the day-first not.
     if len(dcands) == 2 and dm.sep == "/" and all(k for _, k, _ in dcands) and main.zone is not None and \
             main.zone.us and not main.zone.your_time:
@@ -1424,8 +1807,7 @@ def preferred_starts(parse, now_utc, bookable: Optional[Callable] = None) -> Lis
     Kept readings only, never a time the sender negated (Q5), never one marked as something
     other than the meeting (Q10). The times the sender wrote come first, on any quarter hour. A
     D5 cross-pair (a derived reading) follows them on her grid only, and never leads: with none
-    of the sender's own bookable, none is put first (Fable review 2 of PR #3, finding A). The
-    calendar's busy check is the caller's.
+    of the sender's own bookable, none is put first. The calendar's busy check is the caller's.
     """
     out = []
     try:
@@ -1554,6 +1936,80 @@ def match_pick(own_text, offer_slots, sender_zone, now) -> PickResult:
         return PickResult(kind="none")
 
 
+_RANGE_JOIN = re.compile(r"^\s*(?:-|to|until|till|thru|through)\s*$")
+_RANGE_AND = re.compile(r"^\s*and\s*$")
+_BETWEEN = re.compile(r"\bbetween\s*$")
+_RANGE_NUMBER = re.compile(r"(?<![\w:.$/])(\d{1,2})\s*(?:-|to|until|till|thru|through)\s*$"
+                           r"|\bbetween\s+(\d{1,2})\s+and\s*$")
+_RANGE_NUMBER_AFTER = re.compile(r"\s*(?:-|to|until|till|thru|through)\s*(\d{1,2})(?![\w:/-]|\.\w)")
+_AND_NUMBER_AFTER = re.compile(r"\s*and\s*(\d{1,2})(?![\w:/-]|\.\w)")
+
+
+def _pick_ranges(T):
+    """The time ranges written in a reply ("1pm-2pm", "from 1 to 2pm", "1pm to 2", "between 1 and 2pm"),
+    row Q1: ({id of a start: its end}, the ids of the ends, the spans of the bare numbers that start
+    or end one)."""
+    starts, ends, numbers = {}, set(), set()
+    times = sorted(T.times, key=lambda m: m.start)
+    for prev, tm in zip([None] + times, times):
+        if prev is not None:
+            gap = T.lt[max(prev.end, prev.zone.end if prev.zone is not None else 0):tm.start]
+            if _RANGE_JOIN.match(gap) or (_RANGE_AND.match(gap)
+                                          and _BETWEEN.search(T.lt, max(0, prev.start - _NEAR), prev.start)):
+                starts[id(prev)] = tm
+                ends.add(id(tm))
+                continue
+        m = _RANGE_NUMBER.search(T.lt, max(0, tm.start - _NEAR), tm.start)
+        g = (1 if m.group(1) else 2) if m else None
+        if m and T.free(m.start(g), m.end(g)):
+            ends.add(id(tm))
+            numbers.add((m.start(g), m.end(g)))
+    for tm in times:                # a bare number after the time: "1pm to 2", "between 1pm and 2"
+        after = max(tm.end, tm.zone.end if tm.zone is not None else 0)
+        m = _RANGE_NUMBER_AFTER.match(T.lt, after)
+        if m is None and _BETWEEN.search(T.lt, max(0, tm.start - _NEAR), tm.start):
+            m = _AND_NUMBER_AFTER.match(T.lt, after)
+        if m and T.free(m.start(1), m.end(1)):
+            numbers.add((m.start(1), m.end(1)))
+    return starts, ends, numbers
+
+
+def _range_half(start, end):
+    """The clocks of a range's start, in the half of the day its end is written in: "10-11am" starts
+    at 10:00 AM, "11-1pm" at 11:00 AM."""
+    if not (getattr(start, "two", False) and len(end.clocks) == 1 and not getattr(end, "two", False)):
+        return set((h % 24, m) for h, m in start.clocks)
+    h, mi = start.clocks[0][0] % 12, start.clocks[0][1]
+    pm = end.clocks[0][0] >= 12
+    if h > end.clocks[0][0] % 12:
+        pm = not pm
+    return {(h + (12 if pm else 0), mi)}
+
+
+_DAY_BEFORE = re.compile(r"\b" + WD + r"[\s,(]*$")
+_MONTH_BEFORE = re.compile(r"\b" + MON + r"\s*$")
+_MONTH_AFTER = re.compile(r"\s+of\s+" + MON)
+_OPTION_NOUN = re.compile(r"\s+(?:one|option|slot|time|choice)\b")
+
+
+def _is_the_option(lt, m, n, local, shown, spelled):
+    """ "the 3rd" is the third option, unless it reads as a day of the month that names another offered
+    slot, or none: "Thursday the 3rd", "Thursday the third" and "December the 3rd" are days, and so is
+    "the 3rd" when another slot is on the 3rd. Spelled out with no weekday and no month beside it
+    ("the third"), it is the option."""
+    if _OPTION_NOUN.match(lt, m.end()):
+        return True
+    near = max(0, m.start() - _NEAR)
+    day = _DAY_BEFORE.search(lt, near, m.start())
+    month = _MONTH_BEFORE.search(lt, near, m.start()) or _MONTH_AFTER.match(lt, m.end())
+    if spelled and not day and not month:
+        return True
+    wd = WEEKDAYS[day.group(1)] if day else None
+    on_that_day = set(i for i, loc in enumerate(local) for z in shown
+                      if loc[z].day == n and (wd is None or loc[z].weekday() == wd))
+    return on_that_day == {n - 1} if day or month else on_that_day <= {n - 1}
+
+
 def _match_pick(own_text, offer_slots, sender_zone, now):
     slots = list(offer_slots or [])
     if not slots or not isinstance(own_text, str):
@@ -1567,12 +2023,14 @@ def _match_pick(own_text, offer_slots, sender_zone, now):
     T.pick_mode = True
     lt = T.lt
     hits = set()
+    named = set()           # the slots the reply names when a range is read as its start (row Q1)
+    on_day = []             # "the 3rd" read as a day of the month, as day filters
     ambiguous = False
     near = False
     # By number: "option 2", "#2", "the second", "2nd"
     pats = [r"\b(?:option|slot|number|no\.?|choice)\s*#?\s*(\d{1,2})\b", r"#\s*(\d{1,2})\b",
             r"\bthe\s+(first|second|third|1st|2nd|3rd)\b", r"\b(first|second|third|1st|2nd|3rd)\s+(?:one|option|slot|time|choice)\b"]
-    for pat in pats:
+    for k, pat in enumerate(pats):
         for m in re.finditer(pat, lt):
             if not T.free(m.start(), m.end()):
                 continue
@@ -1581,13 +2039,25 @@ def _match_pick(own_text, offer_slots, sender_zone, now):
             T.take(m.start(), m.end())
             if 1 <= n <= len(slots):
                 hits.add(n - 1)
+                if k != 2 or _is_the_option(lt, m, n, local, shown, spelled=not g[0].isdigit()):
+                    named.add(n - 1)
+                else:       # a day of the month: the times written with it are times on that day
+                    on_day.append((set(loc[z].date() for loc in local for z in shown if loc[z].day == n)
+                                   | {_dt.date.min}, None))
     # Times and dates, read with the parser's own forms.
     _extract_dates(T)
     _extract_times(T)
     _extract_relative(T)
+    _zone_before_a_relative_date(T)
     day_filter = []
     for d in T.dates:
         day_filter.append((set(d.cands), d.weekday))
+
+    def fits(clocks, zs, days=day_filter):
+        return set(i for i in range(len(slots)) for z in zs if z in shown
+                   and (local[i][z].hour, local[i][z].minute) in clocks and _day_ok(local[i][z].date(), days))
+
+    range_start, range_end, range_numbers = _pick_ranges(T)
     time_hits_any = False
     for tm in T.times:
         if tm.impossible or not tm.clocks:
@@ -1595,17 +2065,21 @@ def _match_pick(own_text, offer_slots, sender_zone, now):
         clocks = set((h % 24, m) for h, m in tm.clocks)
         written_zone = tm.zone.zid if (tm.zone is not None and tm.zone.zid) else None
         zs = [written_zone] if written_zone else shown
-        matched = set()
-        for i, s in enumerate(slots):
-            for z in zs:
-                if z not in shown:
-                    continue
-                loc = local[i][z]
-                if (loc.hour, loc.minute) in clocks and _day_ok(loc.date(), day_filter):
-                    matched.add(i)
+        matched = fits(clocks, zs)
         if matched:
             hits |= matched
-            time_hits_any = True
+            # A range names the slot its start names, read in the zone and the half of the day of its
+            # end; its end names none. What fits only without that gets the same offer again.
+            if id(tm) in range_end:
+                matched = set()
+            elif id(tm) in range_start:
+                end = range_start[id(tm)]
+                zone = written_zone or (end.zone.zid if end.zone is not None else None)
+                matched = fits(_range_half(tm, end), [zone] if zone else shown, day_filter + on_day)
+            elif on_day:
+                matched = fits(clocks, zs, day_filter + on_day)
+            named |= matched
+            time_hits_any = time_hits_any or bool(matched)
             continue
         # near misses: an offered day with a time not offered, or an offered time in a zone that doesn't match
         for i, s in enumerate(slots):
@@ -1630,12 +2104,16 @@ def _match_pick(own_text, offer_slots, sender_zone, now):
             ambiguous = True
         elif is_index:
             hits.add(n - 1)
+            if (m.start(1), m.end(1)) not in range_numbers:      # "from 1 to 2pm" is not option 1
+                named.add(n - 1)
     if ambiguous or len(hits) > 1:
         return PickResult(kind="ambiguous")
     if len(hits) == 1:
+        if not hits <= named:
+            return PickResult(kind="near_miss")
         if near and not time_hits_any:
             return PickResult(kind="ambiguous")
-        # named by its time, or only by its place in the offer (Fable review 2 of PR #3, finding B)
+        # named by its time, or only by its place in the offer
         return PickResult(kind="matched_slot", slot_index=hits.pop(), by="time" if time_hits_any else "number")
     if near:
         return PickResult(kind="near_miss")
