@@ -899,6 +899,58 @@ class EndToEndTest(SmokeFixture):
         self.assertTrue(self.result("test request in her INBOX, look 2 (after another wait)").startswith("ok (found"))
         self.assertEqual(self.result("smoke"), "ok, every step passed")
 
+    def empty_inbox(self):
+        """Her INBOX as smoke run 2's fetch found it: no message of the last 7 days that it hands over
+        (the smoke's own test requests never are)."""
+        self.inbox.messages.clear()
+
+    def test_on_an_empty_inbox_the_file_step_runs_on_the_test_request_so_the_smoke_can_pass(self):
+        """Smoke run 2: the file step said "not run (no INBOX message in the last 7 days)" before wolf's
+        request came, so no smoke could ever pass. It runs on the test request once that is in her
+        INBOX and marked as the smoke's own, and passes or fails like any step."""
+        self.empty_inbox()
+        self.assertEqual(self.run_e2e(), 0, self.lines)
+        self.assertEqual(self.result(FETCH), "ok (0 messages)")
+        self.assertEqual(self.result(FILE), "ok (the test request)")
+        marked = E2E_STEPS.index("test request marked as the smoke's own") + 1
+        self.assertEqual(self.names(), [s for s in STEPS if s != FILE] + SEND_STEPS + E2E_STEPS[:marked] + [FILE]
+                         + E2E_STEPS[marked:] + ["smoke"])
+        self.assertEqual(self.result("smoke"), "ok, every step passed")
+        self.assertEqual(self.manifest()["outcome"], "pass")
+        _, _, msg = self.request()
+        (uid,) = [uid for uid, m in self.inbox.messages.items() if msg["Message-ID"].encode() in m["raw"]]
+        stores = [args for verb, args in self.imap.commands if verb == "UID STORE"]
+        self.assertEqual(stores[:2], ["%d +FLAGS (%s)" % (uid, live.SMOKE_TEST_KEYWORD),
+                                      "%d +FLAGS (%s)" % (uid, smoke.FILE_KEYWORD)])
+        self.assertIn(smoke.FILE_KEYWORD, self.inbox.messages[uid]["flags"])
+        self.assert_no_value()
+
+    def test_on_an_empty_inbox_a_file_step_failing_on_the_test_request_fails_the_smoke(self):
+        self.empty_inbox()
+        real = live.LiveMail.file
+
+        def file(mail, server_id, keyword):
+            if keyword == smoke.FILE_KEYWORD:
+                raise MailError("imap file: the server did not keep the keyword")
+            return real(mail, server_id, keyword)
+        with mock.patch.object(live.LiveMail, "file", file):
+            self.assertEqual(self.run_e2e(), 1)
+        self.assertEqual(self.result(FILE), "MailError (imap file: the server did not keep the keyword)")
+        self.assertTrue(self.result("her loop on the test request").startswith("ok ("))   # it needs no smoke keyword
+        self.assertEqual(self.result("smoke"), "FAILED")
+        self.assertEqual(self.manifest()["first_failing_step"], FILE)
+
+    def test_on_an_empty_inbox_with_no_end_to_end_test_after_all_the_file_step_is_named_as_not_run(self):
+        self.empty_inbox()
+        self.end_to_end()
+        self.jmap.on_deliver = None                     # no copy in Sent: no record, so the end-to-end test waits
+        self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 1)
+        why = "no INBOX message in the last 7 days, and the end-to-end test did not run"
+        self.assertEqual(self.result(FILE), "not run (%s)" % why)
+        self.assertEqual(self.names()[-3:], [E2E_NOT_RUN, FILE, "smoke"])
+        self.assertTrue(self.result("smoke").endswith("; %s (%s)" % (FILE, why)), self.result("smoke"))
+        self.assertNotIn("UID STORE", self.imap.verbs())
+
     def test_a_forward_that_never_comes_fails_the_smoke_and_her_loop_never_runs(self):
         self.forward_late = True
         self.assertEqual(self.run_e2e(), 1)

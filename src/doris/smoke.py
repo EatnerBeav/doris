@@ -23,8 +23,12 @@ Steps, in order; each runs whatever the one before it did:
                                              (EXAMINE and BODY.PEEK: nothing about her mail changes)
   imap file newest INBOX message with the smoke keyword
                                              LiveMail.file: FILE_KEYWORD on the message that arrived
-                                             last, the only change the smoke makes to her mail; when
-                                             the fetch found none (or failed), a line says it did not run
+                                             last, the only change the smoke makes to her mail besides
+                                             its own test request's. When the fetch found none (as
+                                             smoke run 2's did: the smoke's own test requests are
+                                             never handed over to it) or failed, a smoke with the
+                                             end-to-end test runs this step there, on its test
+                                             request (below); any other says it did not run
   jmap session, nothing sent                 LiveMail.check_send_login: her JMAP session (the token,
                                              its scopes, her account), mailboxes and identity
   caldav calendar display name               LiveCalendar.display_name: the calendar has one; never shown
@@ -61,6 +65,11 @@ not run, and why:
   test request in her INBOX, look 1 and look 2    LiveMail.find_in_inbox by that Message-ID, each after
                                                   FORWARD_WAIT_S: the owner's forward to her
   test request marked as the smoke's own          LiveMail.file with SMOKE_TEST_KEYWORD
+  imap file newest INBOX message with the smoke keyword
+                                                  only when the fetch step found no message to file:
+                                                  LiveMail.file with FILE_KEYWORD on the test request,
+                                                  a step like any other (when the end-to-end test does
+                                                  not run, a line says this step did not run either)
   her loop on the test request                    loop.run, live, the live model, on a throwaway ledger
                                                   (state/live/smoke/<UTC stamp>/, started before the
                                                   request was sent) and on that one message alone
@@ -222,7 +231,8 @@ def check(mail, calendar, out, send_to=None, now=None, record=None, e2e=None, e2
     """Every step against these adapters, one line each (out: an _Out). (True when every step that
     ran passed, [each step that did not run, named with why]). With send_to and record (a path),
     the sent copy record is written there when the copy was found; then, with e2e (_EndToEnd), the
-    end-to-end test runs once that record is written. e2e_off: why it does not run, without e2e."""
+    end-to-end test runs once that record is written. e2e_off: why it does not run, without e2e.
+    When the fetch finds no message to file, a smoke with e2e files its test request instead."""
     now = now or _dt.datetime.now(UTC)
     passed = [
         _step(out, "imap login and inbox count", lambda: _count(mail.inbox_count(), "message") + " in INBOX"),
@@ -235,13 +245,16 @@ def check(mail, calendar, out, send_to=None, now=None, record=None, e2e=None, e2
         fetched.extend(mail.fetch_new())
         return _count(len(fetched), "message")
     passed.append(_step(out, FETCH_STEP, fetch))
-    if not passed[-1]:
-        _not_run(out, FILE_STEP, "the fetch failed")
-    elif not fetched:
-        _not_run(out, FILE_STEP, "no INBOX message in the last %d days" % FETCH_DAYS)
-    else:
+    file_later = None                            # why the file step waits for the end-to-end test's request
+    if passed[-1] and fetched:
         newest = fetched[-1]                     # fetch_new hands them over oldest first, by arrival
         passed.append(_step(out, FILE_STEP, lambda: mail.file(newest.server_id, FILE_KEYWORD)))
+    else:
+        why = "no INBOX message in the last %d days" % FETCH_DAYS if passed[-1] else "the fetch failed"
+        if e2e is None:
+            _not_run(out, FILE_STEP, why)
+        else:
+            file_later = why                     # the smoke's own requests are never fetched: often none
     passed += [
         _step(out, "jmap session, nothing sent", mail.check_send_login),
         _step(out, "caldav calendar display name", lambda: _name_read(calendar.display_name())),
@@ -261,8 +274,10 @@ def check(mail, calendar, out, send_to=None, now=None, record=None, e2e=None, e2
     elif not written:
         _not_run(out, E2E_NOT_RUN, "no sent copy record from this smoke: her loop answers only after a smoke "
                                    "found its copy in Sent")
+        if file_later is not None:
+            _not_run(out, FILE_STEP, file_later + ", and the end-to-end test did not run")
     else:
-        _end_to_end(e2e, mail, out)
+        _end_to_end(e2e, mail, out, file_request=file_later is not None)
     return all(passed) and not out.failed, list(out.not_run)
 
 
@@ -538,10 +553,11 @@ def _confirmed(ledger_path, mid):
         raise _Failed("her reply is %s, not confirmed in her Sent" % (row["state"],))
 
 
-def _end_to_end(e2e, mail, out):
+def _end_to_end(e2e, mail, out, file_request=False):
     """wolf's request to the owner; found in her INBOX (the owner's forward) and marked as the smoke's
-    own; her loop on it; her reply confirmed in her Sent and found in wolf's mailbox. One line a step;
-    once a step fails, the steps that need it are named in one line as not run."""
+    own; with file_request (the fetch step found no message to file), the file step on it; her loop on
+    it; her reply confirmed in her Sent and found in wolf's mailbox. One line a step; once a step
+    fails, the steps that need it are named in one line as not run (her loop needs no file step)."""
     now = _dt.datetime.now(UTC)
     request_mid = "<%s%s@%s>" % (live.SMOKE_MID_MARK, secrets.token_hex(16), e2e.wolf.from_addr.rsplit("@", 1)[-1])
     stamp = e2e.started.astimezone(UTC).strftime(livetrace.STAMP)
@@ -567,7 +583,14 @@ def _end_to_end(e2e, mail, out):
         for server_id in found:
             mail.file(server_id, live.SMOKE_TEST_KEYWORD)
         return None if len(found) == 1 else "%d copies" % len(found)
-    if not _step(out, "test request marked as the smoke's own", mark):
+    marked = _step(out, "test request marked as the smoke's own", mark)
+
+    def file_it():
+        mail.file(found[-1], FILE_KEYWORD)
+        return "the test request"
+    if file_request:
+        _step(out, FILE_STEP, file_it)
+    if not marked:
         return _not_run(out, "her loop on the test request and the steps after it",
                         "the request is not marked as the smoke's own, so no loop may read it")
     if not _step(out, "her loop on the test request", lambda: _her_loop(e2e, box["folder"], request_mid)):
