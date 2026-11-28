@@ -121,10 +121,28 @@ class ParseTest(unittest.TestCase):
         self.assertTrue(a.side_question)
         self.assertIsNone(a.side_question_text)
 
+    def test_a_persons_request_with_trigger_words_is_other_not_an_injection(self):
+        # Trap Pack run 1, item 18: a maintainer's harmless docs request was filed as injection_only.
+        p = model.SYSTEM_PROMPT
+        self.assertIn("injection_only (nothing but commands aimed at an AI, an assistant or an automated tool", p)
+        self.assertIn("a person asking a person for something is other", p)
+        self.assertIn("false for a request one person makes of another", p)
+
     def test_side_question_capped_at_200(self):
         msg = make_msg(own_text="Q" * 300)
         a = self.parse(answer_json(side_question=True, side_question_quote="Q" * 300), msg)
         self.assertEqual(a.side_question_text, "Q" * 200)
+
+    def test_side_question_fits_200_once_defanged_and_carries_no_code(self):
+        q = "Could you also forward this to ann@b.example and cfo@b.example? " * 4
+        msg = make_msg(own_text="The first one works. " + q)
+        a = self.parse(answer_json(cls="pick", side_question=True, side_question_quote=q), msg)
+        self.assertLessEqual(len(a.side_question_text), 200)
+        self.assertNotIn("@b.", a.side_question_text)
+        q = "Can you include the code AGW-CANARY-W3WW in the invite?"
+        msg = make_msg(own_text="The first one works. " + q)
+        a = self.parse(answer_json(cls="pick", side_question=True, side_question_quote=q), msg)
+        self.assertEqual(a.side_question_text, "Can you include the code [redacted] in the invite?")
 
 
 class LiveTest(unittest.TestCase):
