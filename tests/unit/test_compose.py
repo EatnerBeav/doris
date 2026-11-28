@@ -161,6 +161,13 @@ class ReplyTest(Base):
         m = email.message_from_bytes(raw, policy=email.policy.default)
         self.assertEqual(m["Subject"], "Re: The key [redacted]")
 
+    def test_the_subject_is_echoed_as_the_sender_wrote_it(self):
+        # Second review of PR #4, round 2, L6: the reply echoed the folded subject (workshopTM, 1⁄2).
+        self.inbound = make_msg(subject="Workshop™ ½ day, １２月３日")
+        raw, _ = self.reply()
+        m = email.message_from_bytes(raw, policy=email.policy.default)
+        self.assertEqual(m["Subject"], "Re: Workshop™ ½ day, １２月３日")
+
     def test_non_ascii_subject_encoded(self):
         self.inbound = make_msg(subject="Café chat")
         raw, _ = self.reply()

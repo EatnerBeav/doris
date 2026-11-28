@@ -67,13 +67,14 @@ class DefangTest(unittest.TestCase):
         self.assertEqual(holds.defang("ありがとう。よろしく"), "ありがとう[.]よろしく")
         self.assertEqual(holds.defang("ありがとう。 よろしく"), "ありがとう。 よろしく")
 
-
     def test_wide_dots_beside_any_letter_or_digit(self):
         # Second Fable review of PR #4, L3: only ASCII beside the dot counted, so 例。com stayed a link.
+        # Fullwidth letters are echoed as written (round 2, L6), defanged as their folded form is.
         self.assertEqual(holds.defang("例。com"), "例[.]com")
         self.assertEqual(holds.defang("пример.рф or münchen.de"), "пример[.]рф or münchen[.]de")
         self.assertEqual(holds.quote_of(make_msg(own_text="visit evil.ｃｏｍ or ｅｖｉｌ．ｃｏｍ or 例｡com")),
-                         "visit evil[.]com or evil[.]com or 例[.]com")
+                         "visit evil[.]ｃｏｍ or ｅｖｉｌ[.]ｃｏｍ or 例[.]com")
+
 
 class QuoteTest(unittest.TestCase):
     def test_own_text_first_400_after_invisibles_then_defanged(self):
@@ -221,6 +222,30 @@ class CodeTest(unittest.TestCase):
                 self.assertEqual(holds.safe_excerpt(text, 400, one_line), "quote [redacted] back", text)
         wide = "quote \uff21\uff27\uff37\uff0d\uff23\uff21\uff2e\uff21\uff32\uff39\uff0d\uff37\uff31\uff3a\uff38 back"
         self.assertEqual(holds.safe_excerpt(wide, 400), "quote [redacted] back")
+
+    def test_what_she_echoes_is_written_as_the_sender_wrote_it(self):
+        # Second review of PR #4, round 2, L6: the rules read folded text (NFKC), and she echoed it
+        # folded too: workshop™ went out as workshopTM, ½ as 1⁄2, m² as m2.
+        for text in ("The workshop™ is ½ day in room ①②, 20 m², from １２月３日.",
+                     "ﬁle the Ⅳ report — ㎡ ⅓ µg …"):
+            self.assertEqual(holds.shown_subject(text), text)
+            self.assertEqual(holds.quote_of(make_msg(own_text=text)), text)
+        # Defanging still applies to what she echoes.
+        self.assertEqual(holds.quote_of(make_msg(own_text="Slides for the workshop™: https://example.com/½")),
+                         "Slides for the workshop™: hxxps://example[.]com/½")
+        self.assertEqual(holds.quote_of(make_msg(own_text="ｈｔｔｐｓ://ｅｘ.com/½")),
+                         "hxxps://ex[.]com/1⁄2")
+        # When a code is blanked, she echoes the folded text the rules read.
+        self.assertEqual(holds.shown_subject("Workshop™ code AB12 CD34 EF56"), "WorkshopTM code [redacted]")
+        self.assertEqual(holds.quote_of(make_msg(own_text="Workshop™: ＡＧＷ－ＣＡＮＡＲＹ－ＷＱＺＸ")),
+                         "WorkshopTM: [redacted]")
+        # A cut in a grouped code written in fullwidth forms still takes the whole code.
+        window = caps.HOLD_QUOTE_CHARS * holds.SCAN_FACTOR
+        code = "ＱＸ７１ ＺＫ４２ ＭＶ９３"
+        for at in range(1, len(code) + 2):
+            q = holds.quote_of(make_msg(own_text="x" * (window - at - 1) + " " + code + " and more"))
+            for piece in ("ＱＸ", "ＺＫ", "ＭＶ", "QX", "ZK", "MV"):
+                self.assertNotIn(piece, q, (at, q[-40:]))
 
     def test_base64_text_is_blanked_even_when_a_line_wrap_cuts_it(self):
         # Second Fable review of PR #4, M2: a base64 line cut by a wrap kept its first line.

@@ -70,17 +70,29 @@ def defang(text):
     return _HOST.sub(_host, text)
 
 
-def clean(text):
-    """Plain text: compatibility forms folded (NFKC: fullwidth letters to ASCII, the long s to s, the
-    Kelvin sign to K, so the rules read what a person reads; second Fable review of PR #4, M2), CRLF
-    folded to LF, invisible, format and control characters removed."""
+def _plain(text):
+    """Plain text as a reader sees it: CRLF folded to LF, invisible, format and control characters
+    removed."""
     text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
-    if not text.isascii():
-        text = unicodedata.normalize("NFKC", text)
     text = _INVISIBLE.sub("", text)
     if not text.isascii():
         text = "".join(c for c in text if unicodedata.category(c) != "Cf")
     return _CONTROL.sub("", text)
+
+
+def _fold(text):
+    """Plain text as the rules read it: compatibility forms folded (NFKC: fullwidth letters to ASCII,
+    the long s to s, the Kelvin sign to K, so the rules read what a person reads; second Fable review
+    of PR #4, M2). She echoes the text as the sender wrote it, unfolded, unless a code in it is
+    blanked (second review of PR #4, round 2, L6)."""
+    if text.isascii():
+        return text
+    return _INVISIBLE.sub("", unicodedata.normalize("NFKC", text))
+
+
+def clean(text):
+    """_plain(text), folded."""
+    return _fold(_plain(text))
 
 
 # --- codes (decision 77; Fable review of PR #4, findings 3 to 5) ----------------------------------
@@ -221,14 +233,14 @@ _GROUP_WORD = re.compile(_GROUP + r"(?::" + _GROUP + r")*$")
 
 
 def _window(text, n, one_line=False):
-    """clean(text), folded to one line if asked, at most n characters of it (the raw text is read at
+    """_plain(text), folded to one line if asked, at most n characters of it (the raw text is read at
     most 4n far). A cut may split a code, so where the text is cut its last word, and every word a
-    code joins to it (one ending in a hyphen, a group of a grouped code), become one [redacted].
-    Invisibles and white space at the end are no cut (second review of PR #4, round 2, L5): the text
-    is cut only where a reader would see more after it."""
+    code joins to it (one ending in a hyphen, a group of a grouped code, read folded), become one
+    [redacted]. Invisibles and white space at the end are no cut (second review of PR #4, round 2,
+    L5): the text is cut only where a reader would see more after it."""
     text = text or ""
     cut = len(text) > 4 * n and _SEEN.search(text, 4 * n) is not None
-    text = clean(text[:4 * n])
+    text = _plain(text[:4 * n])
     if one_line:
         text = " ".join(text.split())
     if not cut and len(text.rstrip()) <= n:
@@ -242,30 +254,46 @@ def _window(text, n, one_line=False):
         i = j
         while i and not head[i - 1].isspace():
             i -= 1
-        word = head[i:j]
+        word = _fold(head[i:j])
         if not word or not (last or word.endswith("-") or _GROUP_WORD.match(word)):
             return head[:end] + REDACTED
         end, last = i, False
 
 
-def safe_excerpt(text, limit, one_line=False):
-    """Inbound text made safe to send: invisibles and control characters removed (folded to one
-    line if asked), read only so far (_window), codes blanked, the first `limit` characters kept and
-    defanged. Defanging adds brackets, so source characters are given up, in proportion, until the
-    defanged text fits."""
-    text = blank_codes(_window(text, limit * SCAN_FACTOR, one_line).strip())
+def _fit(text, limit):
+    """The first characters of text, defanged, at most limit of them. Defanging adds brackets, so
+    source characters are given up, in proportion, until the defanged text fits. Returns (shown,
+    the source characters it shows)."""
     n = limit
     out = defang(text[:n]).rstrip()
     while len(out) > limit:
         n = max(0, min(n - 1, n * limit // len(out)))
         out = defang(text[:n]).rstrip()
-    return out
+    return out, text[:n]
+
+
+def safe_excerpt(text, limit, one_line=False):
+    """Inbound text made safe to send: invisibles and control characters removed (folded to one
+    line if asked), read only so far (_window), codes blanked, the first `limit` characters kept and
+    defanged. It is echoed as written if no code in it is blanked and it defangs as its folded form
+    does; otherwise folded (a fullwidth link: hxxps://...)."""
+    text = _window(text, limit * SCAN_FACTOR, one_line).strip()
+    folded = _fold(text)
+    blanked = blank_codes(folded)
+    if blanked == folded and text != folded:
+        out, source = _fit(text, limit)
+        if _fold(out) == defang(_fold(source)).rstrip():
+            return out
+    return _fit(blanked, limit)[0]
 
 
 def shown_subject(subject):
     """The sender's subject as her reply echoes it: plain text, read at most SUBJECT_CHARS far, every
-    code in it blanked (Fable review of PR #4, finding 1)."""
-    return blank_codes(_window(subject, SUBJECT_CHARS))
+    code in it blanked (Fable review of PR #4, finding 1), as written if none is."""
+    text = _window(subject, SUBJECT_CHARS)
+    folded = _fold(text)
+    blanked = blank_codes(folded)
+    return text if blanked == folded else blanked
 
 
 def shown_address(addr):
