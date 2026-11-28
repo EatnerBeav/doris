@@ -61,7 +61,7 @@ class _Refused(Exception):
 # --- the command -------------------------------------------------------------------------------
 def main(argv) -> int:
     ap = argparse.ArgumentParser(
-        prog="python3 -m doris replay",
+        prog=paths.command("replay"),
         description="Step through a finished run from its receipts alone, after verify's chain check. "
                     "Reads nothing else and writes nothing.")
     ap.add_argument("run", nargs="?", help="a receipts file, a run or trace folder, or a run ID "
@@ -86,7 +86,7 @@ def replay(run, message=None):
         parts = []
         if len(files) > 1 or skipped:
             head = ("Replay of trace %s: %d receipt file%s, one per item, each chain verified before any is "
-                    "stepped through." % (shown(_display(shown_as)), len(files), "" if len(files) == 1 else "s"))
+                    "stepped through." % (_shown_path(shown_as), len(files), "" if len(files) == 1 else "s"))
             for why, words in (("none", "no receipts.jsonl in"), ("unreadable", "could not be read"),
                                ("nested", "inside an item with its own receipts")):
                 names = [shown(n) for n, w in skipped if w == why]
@@ -100,7 +100,7 @@ def replay(run, message=None):
                 found = True
                 parts.append(text)
         if message is not None and not found:
-            raise _Refused("No message %s in %s." % (shown(message), shown(_display(shown_as))), EXIT_USAGE)
+            raise _Refused("No message %s in %s." % (shown(message), _shown_path(shown_as)), EXIT_USAGE)
         return "\n\n".join(parts), EXIT_OK
     except _Refused as refused:
         return refused.line, refused.code
@@ -143,7 +143,7 @@ def _read(path, where):
 
 
 def _where(label, path):
-    return shown(_display(path)) if label is None else "item %s (%s)" % (shown(label), shown(_display(path)))
+    return _shown_path(path) if label is None else "item %s (%s)" % (shown(label), _shown_path(path))
 
 
 def _not_json(data):
@@ -172,8 +172,8 @@ def find(run):
     if run is None:
         path = latest()
         if path is None:
-            raise _Refused("No run to replay yet: run `python -m doris demo` first, or name a receipts file, "
-                           "a run folder or a run ID.", EXIT_USAGE)
+            raise _Refused("No run to replay yet: run `%s` first, or name a receipts file, "
+                           "a run folder or a run ID." % paths.command("demo"), EXIT_USAGE)
         return [(None, path)], path, []
     if os.path.isfile(run):
         return [(None, os.path.abspath(run))], os.path.abspath(run), []
@@ -188,7 +188,7 @@ def find(run):
         raise _Refused("No run %s under state/sandbox/runs, state/live/runs or traces/." % (run,), EXIT_USAGE)
     if len(found) > 1:
         raise _Refused("Run %s is in %d places (%s): name the one to replay." % (
-            run, len(found), ", ".join(shown(_display(p)) for p in found)), EXIT_USAGE)
+            run, len(found), ", ".join(_shown_path(p) for p in found)), EXIT_USAGE)
     return in_folder(found[0])
 
 
@@ -235,7 +235,7 @@ def in_folder(folder):
             skipped.append((name, "none"))       # an item folder with no receipts (its outbox is no answer)
         skipped.extend(unreadable)
     if not items:
-        raise _Refused("No receipts.jsonl in %s or in a folder inside it." % (shown(_display(folder)),),
+        raise _Refused("No receipts.jsonl in %s or in a folder inside it." % (_shown_path(folder),),
                        EXIT_USAGE)
     return items, folder, skipped
 
@@ -255,7 +255,7 @@ def _folders(folder, quiet=False):
     except OSError as exc:
         if quiet:
             return None
-        raise _Refused("Cannot read the folder %s: %s." % (shown(_display(folder)), type(exc).__name__),
+        raise _Refused("Cannot read the folder %s: %s." % (_shown_path(folder), type(exc).__name__),
                        EXIT_USAGE)
 
 
@@ -342,8 +342,8 @@ def render(lines, path, label=None, message=None):
 
 def _heading(lines, path, label, start):
     run_id = lines[0].get("run_id") if lines else None
-    first = ("Replay of run %s (%s)" % (shown(run_id), shown(_display(path))) if label is None else
-             "Item %s: run %s (%s)" % (shown(label), shown(run_id), shown(_display(path))))
+    first = ("Replay of run %s (%s)" % (shown(run_id), _shown_path(path)) if label is None else
+             "Item %s: run %s (%s)" % (shown(label), shown(run_id), _shown_path(path)))
     chain = "Chain: ok, %d lines, every hash matches the line before it (the check `verify` runs)." % len(lines)
     mode = start.get("mode") or (lines[0].get("mode") if lines else None)
     about = "Mode %s; %s." % (shown(mode), _source_words(start.get("model_source"), start.get("model")))
@@ -1068,12 +1068,21 @@ def shown(value, limit=SHOWN):
 
 
 def _display(path):
-    """Inside the repository, the path from its root; anywhere else, the whole path."""
+    """Inside the repository, the path from its root; anywhere else, the whole path (story.py's)."""
     try:
         rel = os.path.relpath(path, paths.REPO)
     except ValueError:
         return path
     return path if rel.startswith("..") else rel
+
+
+def _shown_path(path):
+    """A path as the other commands print it (paths.shown: from the folder you ran this in), made safe
+    like any value (shown) part by part, so a Windows path keeps its single backslashes."""
+    text = paths.shown(path)
+    if os.sep == "\\":
+        return "\\".join(shown(part) for part in text.split("\\"))
+    return shown(text)
 
 
 def _emit(text):

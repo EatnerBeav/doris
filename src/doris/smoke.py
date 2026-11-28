@@ -655,7 +655,7 @@ def _end_to_end(e2e, mail, out, file_request=False):
 # The command
 # ------------------------------------------------------------------------------------------------
 def _parser():
-    ap = argparse.ArgumentParser(prog="python3 -m doris smoke",
+    ap = argparse.ArgumentParser(prog=paths.command("smoke"),
                                  description="Every live adapter call once, against the real servers.")
     ap.add_argument("--env", default=paths.LIVE_ENV, metavar="PATH",
                     help="the env file (default %(default)s, on our server; never asked of a judge)")

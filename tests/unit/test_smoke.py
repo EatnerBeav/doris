@@ -1025,7 +1025,7 @@ class EndToEndTest(SmokeFixture):
         self.wolf.on_deliver = forward_then_stop
         self.assertEqual(self.run_e2e(), 1)
         self.assertEqual(self.result("her loop on the test request"),
-                         "Refused (Halted (cli). Only `python -m doris resume` clears it.)")
+                         "Refused (Halted (cli). Only `%s` clears it.)" % paths.command("resume"))
         self.assertEqual(self.result("her reply confirmed in her Sent and the steps after it"),
                          "not run (her loop sent no reply)")
         self.assertEqual((self.posts, len(self.jmap.delivered)), ([], 1))

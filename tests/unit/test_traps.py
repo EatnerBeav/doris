@@ -821,7 +821,8 @@ class WhereItWrites(unittest.TestCase):
     def main(self, *args):
         out = io.StringIO()
         act = lambda ctx: {"outcome": "quarantine", "screen": 1, "why": "Quarantined."}
-        with contextlib.redirect_stdout(out):
+        with contextlib.redirect_stdout(out), \
+                unittest.mock.patch.dict(os.environ, {traps.paths.SHOWN_FROM: os.path.join(self.repo, "src")}):
             code = traps.main([self.pack] + list(args), deps=fake_deps(FakeLoop(act)))
         return code, out.getvalue()
 
@@ -835,8 +836,10 @@ class WhereItWrites(unittest.TestCase):
         folder = "state/throwaway/traces/%s/" % run
         self.assertTrue(os.path.isfile(os.path.join(self.repo, *(folder + "RESULTS.md").split("/"))))
         self.assertTrue(os.path.isfile(os.path.join(self.repo, *(folder + "pack-manifest.json").split("/"))))
-        self.assertIn("Report: %sRESULTS.md" % folder, out.splitlines()[-1])
-        self.assertIn("traces: %s" % folder, out.splitlines()[-1])
+        # printed from the folder the command was run in (here the repo's src/), as demo prints paths
+        shown = os.path.join("..", *folder.split("/"))
+        self.assertIn("Report: %sRESULTS.md" % shown, out.splitlines()[-1])
+        self.assertIn("traces: %s" % shown, out.splitlines()[-1])
 
     def test_record_writes_the_committed_report_and_traces(self):
         code, out = self.main("--record")
@@ -845,8 +848,8 @@ class WhereItWrites(unittest.TestCase):
         (run,) = os.listdir(os.path.join(self.repo, "traces"))
         self.assertTrue(os.path.isfile(os.path.join(self.repo, "traces", run, "pack-manifest.json")))
         self.assertFalse(os.path.exists(os.path.join(self.repo, "state", "throwaway", "traces")))
-        self.assertIn("Report: tests/trap-pack/RESULTS.md", out.splitlines()[-1])
-        self.assertIn("traces: traces/%s/" % run, out.splitlines()[-1])
+        self.assertIn("Report: %s" % os.path.join("..", "tests", "trap-pack", "RESULTS.md"), out.splitlines()[-1])
+        self.assertIn("traces: %s" % os.path.join("..", "traces", run, ""), out.splitlines()[-1])
 
 
 if __name__ == "__main__":

@@ -79,9 +79,9 @@ class TheDemoDay(unittest.TestCase):
                          "calendar timed out once; she retried). Held for Shane: asks to add or write to another "
                          "person.")
         self.assertEqual(threads["Dana Okafor"],
-                         "Fri Dec 4, 2:00 PM was taken: offered 3 other times. Auto-reply: filed. Filed with no "
-                         "reply, since they opted out. Opted out: she won't write to them again (1 queued "
-                         "request dropped).")
+                         "Fri Dec 4, 2:00 PM was taken: offered 3 other times. Auto-reply: filed. Opted out: she "
+                         "won't write to them again (1 queued request dropped). Filed with no reply, since they "
+                         "opted out.")
         self.assertEqual(threads["Sam Rivera"],
                          "Asked for Mon Dec 7, 10:00 AM; another event landed while she booked it, so she removed "
                          "hers and offered 3 other times.")

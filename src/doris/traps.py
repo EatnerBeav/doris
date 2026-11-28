@@ -1020,15 +1020,18 @@ def _run_names(model_source, stamp, state_root, traces_root):
         n += 1
 
 
-def setup_line(run_name, model_source, run_state, pack_dir, n_files, allowed):
+def setup_line(run_name, model_source, run_state, pack_dir, n_files, allowed, show=None):
+    """The run's setup in one line. Its paths are from the repository root, as the report reads (show:
+    paths.shown for the line the terminal prints)."""
+    show = show or _display
     return ("Setup: run %s; model %s%s; owner %s (the pack's own inbox owner, traps runs only); Doris %s; "
             "clock %s (Tue Dec 1 2026, 9:00 AM Pacific), clock_mode fixed; calendar empty; fresh throwaway "
             "state per item under %s/<NN>/ (NN its place in the pack: its own ledger, an inbox holding the one "
             ".eml, an empty calendar, an outbox); network guard allows %s; forwarded: simulated; pack %s (%d files)."
             % (run_name, model_source,
                " (deterministic keyword stub, not a real model)" if model_source == "stub" else "",
-               OWNER_ADDR, DORIS_ADDR, CLOCK_UTC, _display(run_state),
-               ", ".join(allowed) if allowed else "no host", _display(pack_dir), n_files))
+               OWNER_ADDR, DORIS_ADDR, CLOCK_UTC, show(run_state),
+               ", ".join(allowed) if allowed else "no host", show(pack_dir), n_files))
 
 
 def _describe(lines, closing_line, outbox, sender, calendar_writes, inside, crashed):
@@ -1320,7 +1323,7 @@ def run_traps(pack_dir, model_source="stub", state_root=None, traces_root=None, 
     allowed = LIVE_MODEL_HOSTS if model_source == "live" else ()
     line = setup_line(run_name, model_source, run_state, root, len(items), allowed)
     say = echo or (lambda s: None)
-    say(line)
+    say(setup_line(run_name, model_source, run_state, root, len(items), allowed, show=paths.shown))
     traces_run = os.path.join(traces_root, run_name)
     results_path = results_path or os.path.join(traces_run, "RESULTS.md")
     os.makedirs(traces_run, exist_ok=True)
@@ -1356,7 +1359,7 @@ def run_traps(pack_dir, model_source="stub", state_root=None, traces_root=None, 
 def main(argv=None, deps=None):
     # type: (Optional[List[str]], Any) -> int
     """`python -m doris traps [path] [--model stub|replayed|live] [--answers FILE] [--record]`."""
-    ap = argparse.ArgumentParser(prog="python3 -m doris traps",
+    ap = argparse.ArgumentParser(prog=paths.command("traps"),
                                  description="Run the Trap Pack through Doris, one item at a time on fresh state.")
     ap.add_argument("path", nargs="?", default=paths.TRAP_PACK, help="the pack folder (default tests/trap-pack/pack)")
     ap.add_argument("--model", default="stub", choices=TRAPS_MODEL_SOURCES, help="model source (default stub)")
@@ -1376,6 +1379,7 @@ def main(argv=None, deps=None):
                     results_path=args.results, deps=deps, answers_path=answers, model_id=args.model_id,
                     echo=print, record=args.record)
     failed = sum(1 for r in rep.rows if r.verdict != "pass")
-    print("%d files: pass %d, failed %d. Report: %s; traces: %s/" % (
-        len(rep.rows), len(rep.rows) - failed, failed, _display(rep.results_path), _display(rep.traces_run)))
+    print("%d files: pass %d, failed %d. Report: %s; traces: %s" % (
+        len(rep.rows), len(rep.rows) - failed, failed, paths.shown(rep.results_path),
+        os.path.join(paths.shown(rep.traces_run), "")))
     return 1 if failed else 0

@@ -73,6 +73,16 @@ class DemoDay(unittest.TestCase):
                 self.assertIn("why", line, line)
                 self.assertIn(line["why"]["code"], why.CODES, line)
 
+    def test_danas_opt_out_lands_before_her_other_mail_in_the_same_batch(self):
+        # 13a (her pick) and 13b (her stop) arrive in one pass: the stop is closed first, so the pick's
+        # "this sender opted out earlier" is true in the receipts, the terminal and replay alike
+        closes = [(l["seq"], l["subject"], l["payload"].get("outcome")) for l in self.lines
+                  if l["kind"] == "decided" and "fernhill" in (l.get("subject") or "")
+                  and l["payload"].get("outcome") in ("suppress", "dropped")]
+        self.assertEqual([c[1:] for c in sorted(closes)],
+                         [("20261201.1506.dana.stop@fernhill.example", "suppress"),
+                          ("20261201.1505.dana.pick@fernhill.example", "dropped")], closes)
+
     def test_every_called_line_has_its_result(self):
         called = {l["seq"] for l in self.lines if l["kind"] == "called"}
         answered = {l["payload"].get("call_seq") for l in self.lines if l["kind"] == "result"}

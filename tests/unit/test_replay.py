@@ -1014,7 +1014,7 @@ class FindingTheRun(unittest.TestCase):
     def test_no_argument_and_no_run(self):
         code, out = replay_cli([])
         self.assertEqual(code, 2)
-        self.assertIn("python -m doris demo", out)
+        self.assertIn(paths.command("demo"), out)
         self.assertFalse(os.path.exists(paths.STATE))
 
 
