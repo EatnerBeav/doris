@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}  # every main commit keeps its full run
 
 jobs:
   # Docs-only PRs (*.md, docs/) skip the matrix; main always runs it in full.
