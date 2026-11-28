@@ -39,7 +39,7 @@ Panel average: 75 of 100. Straight 5s are 25 points away.
 - **Evidence:** `README.md:5` and `AGENT.md:11` claim it. `README.md:151` and `AGENT.md:136` say the nudge is not built. Checked. No receipt line in any committed trace contains "follow" (judges' runs).
 - **Judges:** 1, 2, 3.
 - **Files:** `loop.py`, `ledger.py`, `gate.py`, `policy.py`, `caps.py`, `why.py`, `digest.py`, `templates.py`.
-- **In flight:** yes, the follow-up thread: the dated entry, a receipt line, the one nudge, the gone-booking check.
+- **In flight:** yes, the follow-up thread: the dated entry, a receipt line, the one nudge, the gone-booking check. **Done (PR #42, merged):** all four, with AGENT.md's "The follow-up" section; SAFETY.md's nudge and ruling 17 lines in package A's second docs PR; the README lines with package A's README pass. No committed trace shows a T9 sent yet.
 - **Needs Shane:** no. After it merges: the four doc lines above change (package A), and `caps.NUDGE_AFTER_BUSINESS_DAYS`, `caps.RULING17_REREAD_WAIT_S` and `ledger.future_bookings` are checked for use.
 
 ### 3. A move is never finished (2.3)
@@ -171,7 +171,7 @@ Panel average: 75 of 100. Straight 5s are 25 points away.
 ### 18. Code hygiene from the audit (0.15 from the judges; the audit rates it higher)
 From `src/` alone the audit gives Engineering a 4 and names these, with items 10 and 11, as the way to a 5. None adds a feature.
 - **Hidden control characters typed raw into source:** `parser.py:34`, `parser.py:58`, `traps.py:623`. Checked. GitHub puts its hidden-text warning on those files, in a repo whose pitch is hidden-text defence. Write them as `\u` escapes; the strings are the same at run time.
-- **A hold that states an untrue reason:** `loop.py:1284` holds a re-read message whose booking is gone as "the model was unsure". The follow-up thread is working in that code; check after it merges.
+- **A hold that states an untrue reason:** `loop.py:1284` holds a re-read message whose booking is gone as "the model was unsure". **Fixed by PR #42:** a gone booking is now held as removed by the owner (`hold.owner_removed`). The last fallback, a re-read message whose booking is already cancelled, still holds as "unsure" (`loop.py:1326`).
 - **"Every hard limit lives in one file" is not quite true:** `policy.py` spells the two-offer cap and the 30-minute default as numbers in ten places; `parser.py:27`, `model.py:316` and `shapes.py:158` repeat the 30.
 - **The policy "table":** `policy.ACTIONS` is read nowhere and leaves out `replied`; `Plan.pick_kind` is set in seven places and read in none; seven classes are an if-chain.
 - **Dead code:** `mail.fold_for_match`, `redteam._ids`, three ledger constants, `host_kind`, `__version__`, 11 unused imports, 9 unused parameters, two no-op blocks. The audit's finding 8 has the full list.
