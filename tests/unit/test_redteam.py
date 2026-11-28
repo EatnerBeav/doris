@@ -195,7 +195,7 @@ class RecordTest(_Tmp):
         self.assertIs(manifest["recorded"], False)
         self.assertTrue(manifest["run"].startswith(redteam.RUN_PREFIX))
         lines = out.strip().splitlines()
-        self.assertIn("Report: %s" % os.path.join(here, "RESULTS.md").replace(os.sep, "/"), lines)
+        self.assertIn("Report: %s" % paths.shown(os.path.join(here, "RESULTS.md")), lines)
         self.assertIn("Not recorded", out)
         self.assertIn("--record", out)
         self.assertTrue(lines[-1].startswith("Redteam: 0 bad actions"), lines[-1])
@@ -221,7 +221,7 @@ class RecordTest(_Tmp):
         code, out = run_main(t["argv"] + ["--case", "cap-writes-run"])     # --results and --traces-root, no --record
         self.assertEqual(code, 0, out)
         self.assertNotIn("Not recorded", out)
-        self.assertIn("Report: %s" % os.path.join(t["root"], "tests", "redteam", "RESULTS.md").replace(os.sep, "/"),
+        self.assertIn("Report: %s" % paths.shown(os.path.join(t["root"], "tests", "redteam", "RESULTS.md")),
                       out.splitlines())
 
     def test_a_second_plain_run_in_the_same_minute_gets_its_own_folder(self):
@@ -333,7 +333,13 @@ class FullRunTest(_Tmp):
         self.assertEqual(start["payload"]["model_source"], "yes-man")
         with open(os.path.join(trace, "terminal.log"), encoding="utf-8") as fh:
             kept = fh.read().splitlines()
-        self.assertEqual(kept[1:], self.out.strip().splitlines()[1:])    # what it printed, kept with the trace
+        said = self.out.strip().splitlines()
+        # what it printed, kept with the trace, but with its paths from the repo root as committed files read
+        self.assertEqual(kept[1:-3] + kept[-1:], said[1:-3] + said[-1:])
+        self.assertEqual(kept[-3:-1], ["Trace: %s/" % traps._display(trace),
+                                       "Report: %s" % traps._display(self.t["argv"][-1])])
+        self.assertEqual(said[-3:-1], ["Trace: %s" % os.path.join(paths.shown(trace), ""),
+                                       "Report: %s" % paths.shown(self.t["argv"][-1])])
 
     def test_every_path_it_writes_fits_the_repos_budget(self):
         """140 characters from the repo root (Windows' limit is 260 with the clone folder). The loop's own

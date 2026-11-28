@@ -37,7 +37,7 @@ SANDBOX_DORIS = loop.SANDBOX_DORIS
 STOP_MODES = ("sandbox", "live")
 STOP_WHERE = {"sandbox": "in the sandbox", "live": "live"}
 WORKER = "_worker"
-SHOWN_FROM = "DORIS_SHOWN_FROM"    # set for her worker only: the folder the command was run in (_display)
+SHOWN_FROM = paths.SHOWN_FROM      # set for her worker only: the folder the command was run in (paths.shown)
 RUN_CYCLE_S = loop.CYCLE.total_seconds()   # `run`: the wall-clock wait from one pass to her next cycle
 
 
@@ -82,7 +82,7 @@ def first_line(source, model_id):
 
 # --- demo and run --------------------------------------------------------------------------------
 def demo(argv):
-    argparse.ArgumentParser(prog="python3 -m doris demo",
+    argparse.ArgumentParser(prog=paths.command("demo"),
                             description="The sandbox day under the kill switch.").parse_args(argv)
     refusal = supervisor._halt_refusal("sandbox")
     if refusal:
@@ -98,7 +98,8 @@ def demo(argv):
         print("Not started: her sends or bookings from an earlier demo day are still in the sandbox, but that day's "
               "state is not in %s, so a demo now would send and book them all again beside them. Move these into "
               "that day's folder in %s (or out of the sandbox), then run the demo again:\n%s"
-              % (_display(paths.state_dir("sandbox")) + "/", _display(os.path.join(paths.STATE, "old")) + "/",
+              % (os.path.join(_display(paths.state_dir("sandbox")), ""),
+                 os.path.join(_display(os.path.join(paths.STATE, "old")), ""),
                  "\n".join("  " + _display(f) for f, _ in left)))
         return 1
     source, model_id = sandbox_source()
@@ -107,7 +108,7 @@ def demo(argv):
     _say(first_line(source, model_id))
     if kept:
         _say("A fresh sandbox day: the last demo's state and her sends and bookings are kept in %s."
-             % (_display(kept) + "/",))
+             % (os.path.join(_display(kept), ""),))
     code = supervise("sandbox", state, name, run_dir,
                      sandbox_config(name, state, run_dir, source, model_id, digest=True))
     for line in story.lines(os.path.join(run_dir, "receipts.jsonl")):     # what she did, from her receipts alone
@@ -236,10 +237,10 @@ def _put_back(moved, kept):
 
 def run_cmd(argv):
     ap = argparse.ArgumentParser(
-        prog="python3 -m doris run",
+        prog=paths.command("run"),
         description="The long run under the kill switch: a pass over the inbox every ten minutes until "
-                    "`python3 -m doris stop`, and the day's digest to the owner from 5:00 PM Pacific. "
-                    "The sandbox by default; --live for her own mailbox.")
+                    "`%s`, and the day's digest to the owner from 5:00 PM Pacific. "
+                    "The sandbox by default; --live for her own mailbox." % paths.command("stop"))
     ap.add_argument("--live", action="store_true",
                     help="her own mailbox and the owner's shared calendar, every setting from the env file")
     ap.add_argument("--fresh", action="store_true",
@@ -256,7 +257,7 @@ def run_cmd(argv):
         print(refusal)
         return supervisor.EXIT_REFUSED_HALT
     state = paths.state_dir(mode)
-    every = "every %s until `python -m doris stop`" % loop.wait_words(RUN_CYCLE_S)
+    every = "every %s until `%s`" % (loop.wait_words(RUN_CYCLE_S), paths.command("stop"))
     if not args.live:
         source, model_id = sandbox_source()
         name, run_dir = new_run_dir(state, run_name(source, "sandbox"))
@@ -388,17 +389,22 @@ def worker(argv):
         return 1
     cost = "none (stub)" if cfg.model_source == "stub" else "$%.4f%s" % (
         s.cost_usd, " (recorded)" if cfg.model_source == "replayed" else "")
-    say("Done: %d handled, %d held, %d human approvals. %d sent to prospects, %d hold notices, %d bookings. "
+    say("Done: %d handled, %d held, %s. %d sent to prospects, %s, %s. "
         "%s calls %d, cost %s. Receipts %s: %s."
-        % (s.handled, s.held, s.human_approvals, s.sends, s.hold_notices, s.bookings,
+        % (s.handled, s.held, _n(s.human_approvals, "human approval"), s.sends, _n(s.hold_notices, "hold notice"),
+           _n(s.bookings, "booking"),
            "Stand-in" if cfg.model_source == "stub" else "Model", s.model_calls, cost,
            _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
     return 0 if s.verify_ok else 1
 
 
+def _n(k, word):
+    return "%d %s%s" % (k, word, "" if k == 1 else "s")
+
+
 # --- stop and resume ----------------------------------------------------------------------------
 def stop(argv):
-    argparse.ArgumentParser(prog="python3 -m doris stop",
+    argparse.ArgumentParser(prog=paths.command("stop"),
                             description="Halt Doris now, in the sandbox and live.").parse_args(argv)
     halted, failed = [], []
     for mode in STOP_MODES:                 # every mode is tried, whatever the one before it did
@@ -411,19 +417,20 @@ def stop(argv):
             failed.append((mode, "%s: %s" % (type(exc).__name__, exc)))
     if not failed:
         print("Stopped: Doris is halted in the sandbox and live. A run in progress is killed mid-call and its "
-              "receipt names what was dropped. Nothing more is sent or booked until `python -m doris resume`.")
+              "receipt names what was dropped. Nothing more is sent or booked until `%s`." % paths.command("resume"))
         return 0
     for mode, why in failed:
         print("NOT halted %s: %s." % (STOP_WHERE[mode], why.rstrip(".")))
     for mode in halted:
-        print("Halted %s. Nothing more is sent or booked there until `python -m doris resume`."
-              % (STOP_WHERE[mode],))
-    print("The stop did NOT land everywhere: run `python -m doris stop` again now, and check that no run goes on.")
+        print("Halted %s. Nothing more is sent or booked there until `%s`."
+              % (STOP_WHERE[mode], paths.command("resume")))
+    print("The stop did NOT land everywhere: run `%s` again now, and check that no run goes on."
+          % paths.command("stop"))
     return 1
 
 
 def resume(argv):
-    argparse.ArgumentParser(prog="python3 -m doris resume",
+    argparse.ArgumentParser(prog=paths.command("resume"),
                             description="Clear a halt. Only the command line can.").parse_args(argv)
     code, said = 0, []
     for mode in STOP_MODES:
@@ -498,16 +505,7 @@ def _say(text):
         pass        # no terminal left to say it to (a hang-up, a closed pipe): the receipts keep the record
 
 
-def _display(path):
-    """Inside the repository, the path from the working folder (a judge runs from src/, so a printed
-    path can be pasted from there); anywhere else, or when no relative path exists (Windows, another
-    drive), the whole path."""
-    try:
-        if os.path.relpath(path, paths.REPO).startswith(".."):
-            return path
-        return os.path.relpath(path, os.environ.get(SHOWN_FROM) or os.getcwd())
-    except (ValueError, OSError):
-        return path
+_display = paths.shown      # every printed path: from the folder the command was run in
 
 
 def smoke_cmd(argv):
@@ -519,14 +517,19 @@ COMMANDS = {"demo": demo, "run": run_cmd, "traps": traps_cmd, "verify": verify, 
             "smoke": smoke_cmd, "replay": replay_cmd, "watch": watch_cmd, "redteam": redteam_cmd, WORKER: worker}
 
 
+def _help():
+    """The command list, with the interpreter spelled as it runs here (paths.command)."""
+    return __doc__.strip().replace("python3 -m doris", paths.command())
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help", "help"):
-        print(__doc__.strip())
+        print(_help())
         return 0 if argv else 2
     command = COMMANDS.get(argv[0])
     if command is None:
-        print("Unknown command %r.\n\n%s" % (argv[0], __doc__.strip()))
+        print("Unknown command %r.\n\n%s" % (argv[0], _help()))
         return 2
     return command(argv[1:])
 

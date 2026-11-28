@@ -32,6 +32,7 @@ No new features; the law and the scope stand. Bar: first place, and would Steve 
 
 - **in review** · Judge experience: a stranger runs the README's one command and understands what they saw in 60 seconds; fresh-clone runs on Linux and Windows, every stumble fixed · judge-experience thread · Sat 10:00 AM
   - README PR #19 (draft) and a judge-path CI walk. Unblocked: PR #23 merged (a rerun starts the day fresh, honest digest line, paths from where you run, template names, the story at the end). sandbox/README.md's "mail she has already read is skipped" is false after a finished day; its fix goes in #19, which owns that file.
+  - PR #26 (output polish, judge pass items 2 to 5): every hint names the interpreter running (`py` on Windows, `paths.command`); replay, traps and redteam print paths from where you run, like demo (`paths.shown`), with no doubled Windows backslashes; a stop closes first in its batch, so Dana's "opted out earlier" is true; redteam's table fits 120 columns; watch shows Pacific time; "1 booking"; no repeated date after the digest line. Still open: `verify`'s help says python3 (PR #25 owns verify); story.py's `python -m doris` and repo-root paths are the demo-story thread's 8 AM item 4.
 - **done** · Demo value: when `demo` ends, the owner's view in plain words, all from the receipts · demo-value thread · Sat 12:00 PM
   - story.py in PR #18, printed at the end of `demo` by PR #23 (decision 102).
 - **not started** · The same story as a section on the watch page · demo-value thread · Sat 2:00 PM

@@ -295,7 +295,7 @@ class LiveStartTest(LiveFixture):
                     self.go(fresh=True)
                 self.assertEqual(cm.exception.exit_code, 2)
                 self.assertEqual(len(str(cm.exception).splitlines()), 1)
-                self.assertIn("`python -m doris smoke --send-to wolf.whizz@fastmail.com` first", str(cm.exception))
+                self.assertIn("`%s` first" % paths.command("smoke --send-to wolf.whizz@fastmail.com"), str(cm.exception))
                 self.assertFalse(os.path.exists(os.path.join(self.state, "ledger.sqlite")))
                 self.nothing_contacted()
         self.prove_smoke(self.smoke_record())
@@ -323,8 +323,8 @@ class LiveStartTest(LiveFixture):
                 said = str(cm.exception)
                 self.assertEqual(cm.exception.exit_code, 2)
                 self.assertRegex(said, r"^Not started: the smoke check's record \(smoke-sent\.json\) is not as the "
-                                       r"smoke writes it: [^\n]*\. Run `python -m doris smoke --send-to "
-                                       r"wolf\.whizz@fastmail\.com` first\.\Z")
+                                       r"smoke writes it: [^\n]*\. Run `" + re.escape(paths.command("smoke")) +
+                                       r" --send-to wolf\.whizz@fastmail\.com` first\.\Z")
                 self.assertIn(why, said)
                 self.assert_no_value(said[:-len(loop.SMOKE_FIRST)])     # its last words name the test inbox
                 self.assertFalse(os.path.exists(os.path.join(self.state, "ledger.sqlite")))
@@ -334,7 +334,7 @@ class LiveStartTest(LiveFixture):
         with self.assertRaises(loop.Refused) as cm:
             self.go(fresh=True)
         self.assertRegex(str(cm.exception), r"^Not started: the smoke check's record \(smoke-sent\.json\) "
-                                            r"cannot be read: \w+\. Run `python -m doris smoke")
+                                            r"cannot be read: \w+\. Run `" + re.escape(paths.command("smoke")))
         self.nothing_contacted()
 
     def test_a_record_more_than_a_day_old_or_dated_ahead_refuses_before_anything_connects(self):
@@ -1859,7 +1859,7 @@ class RunCommandTest(LiveFixture):
         self.assert_no_value(text)
         self.assertTrue(out.startswith("Live. "), out)
         self.assertIn(model_mod.DEFAULT_MODEL, out)
-        self.assertIn("until `python -m doris stop`", out)
+        self.assertIn("until `%s`" % paths.command("stop"), out)
         self.assert_no_value(out)
         self.assertFalse(os.path.exists(os.path.join(self.state, "ledger.sqlite")))   # the worker starts it
         self.nothing_contacted()

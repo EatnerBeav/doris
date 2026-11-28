@@ -192,7 +192,7 @@ class InboxReadFails(Restart):
         with contextlib.redirect_stdout(out):
             code = cli.worker([config])
         self.assertEqual(code, 0, out.getvalue())
-        self.assertIn(" 1 bookings. Stand-in calls 1, cost none (stub). Receipts ", out.getvalue())
+        self.assertIn(" 1 booking. Stand-in calls 1, cost none (stub). Receipts ", out.getvalue())
         self.assertNotIn("Model calls", out.getvalue())
 
     def test_a_run_until_stopped_reads_again_each_cycle_and_never_ends_on_failed_reads(self):

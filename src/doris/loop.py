@@ -45,12 +45,12 @@ SANDBOX_OWNER = "whizz@fastmail.com"   # the sandbox's owner and Doris addresses
 SANDBOX_DORIS = "doris.htm@fastmail.com"
 WINDOW = caps.MAX_HORIZON + _dt.timedelta(days=1)    # the span an offer reads
 ENV_OWNER = "DORIS_OWNER_ADDRESS"      # live: the owner's own address, from the env file
-SMOKE_FIRST = "Run `python -m doris smoke --send-to wolf.whizz@fastmail.com` first."
+SMOKE_FIRST = "Run `%s` first." % paths.command("smoke --send-to wolf.whizz@fastmail.com")
 SMOKE_REFUSAL = "Not started: %s. %s" % (sentrecord.MISSING, SMOKE_FIRST)   # no smoke record at all
 FRESH_OVER_LEDGER = ("Not started: the live ledger is already there, and --fresh only starts a new one. "
                      "Run without --fresh to go on from it.")
-NO_LIVE_LEDGER = ("Not started: there is no live ledger yet. `python -m doris run --live --fresh` starts one, "
-                  "and she then reads only mail that arrives after it.")
+NO_LIVE_LEDGER = ("Not started: there is no live ledger yet. `%s` starts one, "
+                  "and she then reads only mail that arrives after it." % paths.command("run --live --fresh"))
 ENV_KEY = "ANTHROPIC_API_KEY"
 ENV_NAMES = (ENV_KEY, "DORIS_MODEL", templates.MEETING_LINK_ENV, ENV_OWNER)   # names only ever reach a receipt
 
@@ -507,7 +507,7 @@ class _Run:
         except supervisor.HaltFileError:
             cause = "unreadable"
         if cause is not None:
-            raise Refused("Halted (%s). Only `python -m doris resume` clears it." % (cause,),
+            raise Refused("Halted (%s). Only `%s` clears it." % (cause, paths.command("resume")),
                           supervisor.WORKER_EXIT_HALTED)
         if cfg.mode == "live":              # every setting from the env file, before anything is made
             self.live = live_settings(cfg.env_path, cfg.model_source)
@@ -900,8 +900,10 @@ class _Run:
         self.batch_keys = set(ledger_mod.norm_id(e.key) for e in entries)
         for e in entries:
             self.write_down(e)
-        # (2) what screens 1, 2 and 4 settled goes first: a stop lands before anything else
+        # (2) what screens 1, 2 and 4 settled goes first: a stop lands before anything else, so a sender's
+        # other mail in the batch is filed after their opt-out, as "opted out earlier" says (oldest first otherwise)
         early = [e for e in entries if e.settled_by() is not None and e.settled_by().screen in (1, 2, 4)]
+        early.sort(key=lambda e: e.settled_by().outcome != "suppress")
         for e in early:
             self.close_screened(e)
         # (3) ruling 17 (her bookings still on the calendar) is not in the skeleton
@@ -1962,8 +1964,8 @@ class _Run:
                     self.say("%s  Digest already sent to the owner earlier today; not sent twice."
                              % (templates.fmt_pacific(now),))
                 else:
-                    self.say("%s  Digest sent to the owner: %s"
-                             % (templates.fmt_pacific(now), body.split("\n", 1)[0]))
+                    self.say("%s  Digest sent to the owner: Handled %d, held %d, human approvals %d."
+                             % (templates.fmt_pacific(now), ds["handled"], ds["held"], ds["approvals"]))
 
     # --- staged faults (sandbox only, labelled simulated on the observed line) ------------------
     def arm(self, e):

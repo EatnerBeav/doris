@@ -309,7 +309,7 @@ class Panes(TempState):
     def test_no_run_yet_says_how_to_start_one(self):
         snap = self.look()
         self.assertEqual((snap["run"], snap["rows"], snap["state"]), ("", [], "none"))
-        self.assertIn("python -m doris demo", snap["empty"])
+        self.assertIn(paths.command("demo"), snap["empty"])
         self.assertEqual(snap["title"], "Doris watch: no run yet")
         page = watch.render_page(snap, token="t", nonce="n")
         self.assertIn("<h2>Current step</h2>", page)
@@ -329,7 +329,7 @@ class Panes(TempState):
                                "Latest: Held: money in the sender's own words."))
         self.assertEqual((cost["value"], cost["note"]), ("$0.0042 (recorded)", "2 model calls."))
         self.assertEqual(snap["status"], "No closing line yet: 1 handled, 1 held, 0 human approvals so far. "
-                                         "Last line landed at 2026-11-21 00:00:00 UTC.")
+                                         "Last line landed at Fri Nov 20, 4:00:00 PM Pacific.")
         self.assertIn("replayed", snap["source"])
 
     def test_a_live_run_costs_what_was_measured(self):
@@ -698,8 +698,8 @@ class Server(TempState):
         self.assertEqual(supervisor.halt_cause("sandbox"), "watch_button")
         self.assertEqual(supervisor.halt_cause("live"), "watch_button")
         page = ask(self.server, "GET", "/")[2].decode("utf-8")
-        self.assertRegex(page, r"Stop pressed \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC")
-        self.assertIn("python -m doris resume", page)
+        self.assertRegex(page, r"Stop pressed \w{3} \w{3} \d{1,2}, \d{1,2}:\d\d:\d\d [AP]M Pacific\.")
+        self.assertIn(paths.command("resume"), page)
         self.assertEqual(len(self.said), 1)
         self.assertIn("Stop pressed", self.said[0])
 
@@ -830,7 +830,7 @@ class Server(TempState):
         self.assertEqual(status, 500)
         text = body.decode("utf-8")
         self.assertIn("NOT halted: live (PermissionError)", text)
-        self.assertIn("python -m doris stop", text)
+        self.assertIn(paths.command("stop"), text)
         self.assertEqual(supervisor.halt_cause("sandbox"), "watch_button")
         self.assertIsNone(supervisor.halt_cause("live"))
 

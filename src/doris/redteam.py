@@ -63,6 +63,7 @@ import random
 import re
 import shutil
 import tempfile
+import textwrap
 import unicodedata
 from dataclasses import dataclass, field
 from email import policy as _email_policy
@@ -1397,6 +1398,7 @@ class Report:
     trace_dir: str
     recorded: bool = False
     with_state: bool = False        # the report and the trace both stay in the run's own state folder
+    said_setup: str = ""            # the setup line as the terminal printed it (paths from the working folder)
 
     @property
     def bad_total(self):
@@ -1521,12 +1523,14 @@ def run_redteam(pack_dir=None, only=None, state_root=None, traces_root=None, res
     trace_dir = os.path.join(traces_root, run_name) if traces_root else os.path.join(here, "trace")
     results_path = results_path or os.path.join(here, "RESULTS.md")
     runs = sum(len(c.answers) for c in every)
-    setup_line = ("Setup: run %s; model: the hostile yes-man stand-in (not a real model), %d answers per Trap Pack "
-                  "file, %d for the demo day; %d cases, %d runs, each on fresh throwaway state under %s/%s/; network "
-                  "guard allows no host; the gate and the loop are the real ones."
-                  % (run_name, len(CASE_ANSWERS), len(DAY_ANSWERS), len(every), runs, traps._display(state_root),
-                     state_folder(run_name)))
-    say(setup_line)
+    setup = ("Setup: run %s; model: the hostile yes-man stand-in (not a real model), %d answers per Trap Pack "
+             "file, %d for the demo day; %d cases, %d runs, each on fresh throwaway state under %s; network "
+             "guard allows no host; the gate and the loop are the real ones.")
+    setup_line = setup % (run_name, len(CASE_ANSWERS), len(DAY_ANSWERS), len(every), runs,
+                          "%s/%s/" % (traps._display(state_root), state_folder(run_name)))     # the report's
+    said_setup = setup % (run_name, len(CASE_ANSWERS), len(DAY_ANSWERS), len(every), runs,
+                          os.path.join(paths.shown(here), ""))                             # the terminal's
+    say(said_setup)
     os.makedirs(here, exist_ok=True)
     with open(os.path.join(here, "runs.txt"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write("".join("%s  %s %s\n" % (run_folder(number[c.name], a), c.name, a) for c in every
@@ -1565,7 +1569,8 @@ def run_redteam(pack_dir=None, only=None, state_root=None, traces_root=None, res
             row.canaries = trace_canaries(row.trace)
             rows.append(row)
     rep = Report(run_name, setup_line, rows, results_path, trace_dir, recorded=bool(record),
-                 with_state=traps._inside(trace_dir, here) and traps._inside(results_path, here))
+                 with_state=traps._inside(trace_dir, here) and traps._inside(results_path, here),
+                 said_setup=said_setup)
     os.makedirs(trace_dir, exist_ok=True)
     manifest = {"run": run_name, "model_source": "yes-man",
                 "model": "the hostile yes-man stand-in (model.YES_MAN set by redteam), not a real model",
@@ -1661,12 +1666,21 @@ def by_case(rep):
 BY_CASE_HEAD = ("Case", "Runs", "What the yes-man asked for", "What the gate did", "Bad actions")
 
 
+TERMINAL_WRAP = (None, None, 40, 30, None)     # the two prose columns wrap, so a row fits 120 characters
+
+
 def terminal_table(rep):
-    """The one table the command prints."""
-    body = [tuple(str(c) for c in row) for row in by_case(rep)]
-    widths = [max(len(r[i]) for r in [BY_CASE_HEAD] + body) for i in range(len(BY_CASE_HEAD))]
+    """The one table the command prints. A long cell wraps onto lines of its own under its column."""
+    body = []
+    for row in by_case(rep):
+        cells = [textwrap.wrap(str(c), w, break_on_hyphens=False) or [""] if w else [str(c)]
+                 for c, w in zip(row, TERMINAL_WRAP)]
+        body.append([tuple(cell[k] if k < len(cell) else "" for cell in cells)
+                     for k in range(max(len(cell) for cell in cells))])
+    flat = [BY_CASE_HEAD] + [r for rows in body for r in rows]
+    widths = [max(len(r[i]) for r in flat) for i in range(len(BY_CASE_HEAD))]
     line = lambda r: "  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip()
-    return [line(BY_CASE_HEAD), line(tuple("-" * w for w in widths))] + [line(r) for r in body]
+    return [line(BY_CASE_HEAD), line(tuple("-" * w for w in widths))] + [line(r) for rows in body for r in rows]
 
 
 def _link(path, rep, text):
@@ -1826,7 +1840,7 @@ def main(argv=None):
     """`python -m doris redteam [--record] [--case NAME]...`. Exit 0 only with 0 bad actions and every run
     checked."""
     global LAST_REPORT
-    ap = argparse.ArgumentParser(prog="python3 -m doris redteam",
+    ap = argparse.ArgumentParser(prog=paths.command("redteam"),
                                  description="The gate against a hostile yes-man stand-in model, on fresh state.")
     ap.add_argument("--case", action="append", default=None, help="run only this case (repeatable)")
     ap.add_argument("--record", action="store_true",
@@ -1844,17 +1858,20 @@ def main(argv=None):
         print("Not run: %s." % (exc,))
         return 2
     LAST_REPORT = rep
-    lines = [rep.setup_line] + terminal_table(rep)
+    lines = [rep.said_setup or rep.setup_line] + terminal_table(rep)
     for r in rep.rows:
         lines += ["BAD %s, %s: %s" % (r.case, r.answer, b) for b in r.bad]
         lines += ["NOT CHECKED %s, %s: %s" % (r.case, r.answer, p) for p in r.problems]
     if rep.with_state:
         lines.append("Not recorded: the report and the trace stay with this run's throwaway state. "
-                     "`python -m doris redteam --record` writes tests/redteam/RESULTS.md and traces/.")
-    lines += ["Trace: %s/" % traps._display(rep.trace_dir), "Report: %s" % traps._display(rep.results_path),
+                     "`%s` writes tests/redteam/RESULTS.md and traces/." % paths.command("redteam --record"))
+    lines += ["Trace: %s" % os.path.join(paths.shown(rep.trace_dir), ""), "Report: %s" % paths.shown(rep.results_path),
               last_line(rep)]
     for line in lines[1:]:
         print(line)
+    # what the command printed, kept with the trace; its paths from the repository root, as committed files read
+    lines[0] = rep.setup_line
+    lines[-3:-1] = ["Trace: %s/" % traps._display(rep.trace_dir), "Report: %s" % traps._display(rep.results_path)]
     with open(os.path.join(rep.trace_dir, "terminal.log"), "w", encoding="utf-8", newline="\n") as fh:
-        fh.write("".join(line + "\n" for line in lines))      # what the command printed, kept with the trace
+        fh.write("".join(line + "\n" for line in lines))
     return 0 if rep.bad_total == 0 and not rep.unchecked else 1

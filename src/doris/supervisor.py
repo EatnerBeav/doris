@@ -693,7 +693,7 @@ def _say(text):
 
 
 def _resume_command():
-    return "py -m doris resume" if os.name == "nt" else "python3 -m doris resume"
+    return paths.command("resume")
 
 
 def _halt_refusal(mode, state_dir=None):

@@ -40,7 +40,7 @@ from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-from . import paths, receipts, supervisor
+from . import paths, receipts, supervisor, zones
 from .loop import count_outcomes
 from .shapes import CLASSES
 
@@ -302,9 +302,25 @@ def _tone(kind, p):
     return TONES.get(kind, "read")
 
 
+def _pacific(utc):
+    """An aware instant on the Pacific wall clock, as the terminal tells times: 'Tue Dec 1, 8:10:05 AM'."""
+    t = zones.to_local(utc, "Pacific")
+    clock = "%d:%02d:%02d" % ((t.hour + 11) % 12 + 1, t.minute, t.second)
+    return "%s %s %d, %s %s" % ("Mon Tue Wed Thu Fri Sat Sun".split()[t.weekday()],
+                                "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()[t.month - 1], t.day,
+                                clock, "AM" if t.hour < 12 else "PM")
+
+
 def _time(ts):
+    """A receipt line's time (UTC on the line) on the Pacific clock, as the terminal shows it."""
     m = _TS.match(ts) if isinstance(ts, str) else None
-    return "%s %s" % m.groups() if m else "?"
+    if not m:
+        return "?"
+    try:
+        return _pacific(_dt.datetime.strptime("%s %s" % m.groups(), "%Y-%m-%d %H:%M:%SZ").replace(
+            tzinfo=_dt.timezone.utc))
+    except (ValueError, OverflowError):     # not a date, or one the Pacific clock can't reach (year 1)
+        return "?"
 
 
 def row(line):
@@ -356,11 +372,12 @@ def _chain(path):
     shown = _text(path, 400)
     if not result.ok:
         reason = result.reason.split(": ", 1)[-1]
-        return good, False, ("Chain BROKEN at line %d: %s. Check it with python -m doris verify %s"
-                             % (result.first_bad_seq, reason, shown)), result.first_bad_seq
+        return good, False, ("Chain BROKEN at line %d: %s. Check it with %s %s"
+                             % (result.first_bad_seq, reason, paths.command("verify"), shown)), result.first_bad_seq
     if torn and good and good[-1]["kind"] in receipts.CLOSING_KINDS and not receipts._summary_follows(good[-1]):  # noqa: SLF001
         return good, False, ("Chain BROKEN after its closing line (line %d): %d bytes follow it that are not a whole "
-                             "line. Check it with python -m doris verify %s" % (len(good), len(torn), shown)), len(good) + 1
+                             "line. Check it with %s %s"
+                             % (len(good), len(torn), paths.command("verify"), shown)), len(good) + 1
     if torn:
         return good, True, ("Chain verified through line %d; the line after it is still being written, "
                             "or was cut short." % len(good)), None
@@ -427,7 +444,7 @@ def _decision_note(decisions):
 
 
 def _clock(ns):
-    return _dt.datetime.fromtimestamp(ns / 1e9, _dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return "%s Pacific" % _pacific(_dt.datetime.fromtimestamp(ns / 1e9, _dt.timezone.utc))
 
 
 def snapshot(run):
@@ -438,8 +455,8 @@ def snapshot(run):
                 "status": "", "chain": "", "chain_ok": True, "state": "none",
                 "panes": [{"label": label, "value": "\u2014", "note": ""} for label in LABELS],
                 "rows": [], "after": 0, "more": "",
-                "empty": "No run yet. Start one with python -m doris demo, or python -m doris run; this page "
-                         "picks it up as soon as it starts."}
+                "empty": "No run yet. Start one with %s, or %s; this page picks it up as soon as it "
+                         "starts." % (paths.command("demo"), paths.command("run"))}
     path = os.path.join(run.folder, "receipts.jsonl")
     landed = None
     if os.path.exists(path):
@@ -545,7 +562,7 @@ def unreadable(run, exc):
     return {"run": name, "title": "Doris watch: receipts not shown",
             "run_line": "Run %s" % name if run is not None else "", "source": "",
             "status": "The receipts could not be shown (%s). The Stop button still works. Check them with "
-                      "python -m doris verify %s" % (exc.__class__.__name__, path),
+                      "%s %s" % (exc.__class__.__name__, paths.command("verify"), path),
             "chain": "", "chain_ok": False, "state": "unreadable",
             "panes": [{"label": label, "value": "?", "note": ""} for label in LABELS],
             "rows": [], "after": 0, "more": "", "empty": ""}
@@ -583,7 +600,7 @@ _WHERE = {"sandbox": "the sandbox", "live": "live"}
 
 def pressed_words(done, failed, now):
     """The page's one line about a press of its Stop button."""
-    words = ["Stop pressed %s UTC." % now.strftime("%Y-%m-%d %H:%M:%S")]
+    words = ["Stop pressed %s Pacific." % _pacific(now)]
     if done:
         if all(cause == CAUSE for _, cause in done):
             words.append("Halted in %s." % " and ".join(_WHERE.get(m, m) for m, _ in done))
@@ -591,11 +608,11 @@ def pressed_words(done, failed, now):
             words.append("Halted in %s." % " and ".join(
                 "%s (%s)" % (_WHERE.get(m, m), supervisor.CAUSE_WORDS.get(c, c)) for m, c in done))
     if failed:
-        words.append("NOT halted: %s. Run python -m doris stop now."
-                     % ", ".join("%s (%s)" % (m, e) for m, e in failed))
+        words.append("NOT halted: %s. Run %s now."
+                     % (", ".join("%s (%s)" % (m, e) for m, e in failed), paths.command("stop")))
     else:
         words.append("A run under the kill switch is killed mid-call and its receipt names what was dropped. Nothing more "
-                     "is sent or booked until python -m doris resume.")
+                     "is sent or booked until %s." % paths.command("resume"))
     return " ".join(words)
 
 
@@ -762,8 +779,8 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
   <form class="stop" method="post" action="/stop">
     <input type="hidden" name="token" value="$token">
     <div class="sign"><button type="submit">Stop</button></div>
-    <p>Halts Doris now in the sandbox and live, as <code>python -m doris stop</code> does. A run under the kill switch is killed mid-call.
-      Only <code>python -m doris resume</code>, on the command line, lets her run again.</p>
+    <p>Halts Doris now in the sandbox and live, as <code id="stop-cmd">$stop_cmd</code> does. A run under the kill switch is killed mid-call.
+      Only <code>$resume_cmd</code>, on the command line, lets her run again.</p>
     <p id="pressed" role="status">$pressed</p>
   </form>
 </header>
@@ -782,7 +799,7 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
   <p id="empty">$empty</p>
   <p id="more">$more</p>
   <div class="scroll"><table>
-    <thead><tr><th scope="col">Line</th><th scope="col">Time (UTC)</th><th scope="col">Step</th>
+    <thead><tr><th scope="col">Line</th><th scope="col">Time (Pacific)</th><th scope="col">Step</th>
       <th scope="col">Message</th><th scope="col">What happened</th><th scope="col">Why</th></tr></thead>
     <tbody id="steps" data-run="$run" data-after="$after" data-tip="$tip">$rows</tbody>
   </table></div>
@@ -861,7 +878,7 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
   }
   function lost() {
     put("lost", "This page has lost touch with the watch command, so it is not live and its Stop button " +
-        "cannot reach her. Stop her on the command line: python -m doris stop");
+        "cannot reach her. Stop her on the command line: " + document.getElementById("stop-cmd").textContent);
   }
   function poll() {
     fetch("/state?run=" + encodeURIComponent(run) + "&after=" + after + "&tip=" + encodeURIComponent(tip),
@@ -889,7 +906,7 @@ def boot_id(token):
 
 
 def checked_words(now):
-    return "Page updated %s UTC." % now.strftime("%Y-%m-%d %H:%M:%S")
+    return "Page updated %s Pacific." % _pacific(now)
 
 
 def render_page(snap, token, nonce, pressed="", now=None):
@@ -901,6 +918,7 @@ def render_page(snap, token, nonce, pressed="", now=None):
               "state": _e(snap["state"]), "pressed": _e(pressed), "empty": _e(snap["empty"]),
               "after": int(snap["after"]), "poll": int(POLL_MS), "max_rows": int(MAX_ROWS),
               "boot": _e(boot_id(token)), "checked": _e(checked_words(now)), "more": _e(snap["more"]),
+              "stop_cmd": _e(paths.command("stop")), "resume_cmd": _e(paths.command("resume")),
               "tip": _e(snap["rows"][-1]["hash"] if snap["rows"] else ""),
               "rows": "".join(_row_html(r) for r in reversed(snap["rows"][-MAX_ROWS:]))}
     for i, pane in enumerate(snap["panes"]):
@@ -1073,7 +1091,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _refuse(self, status, why):
         text = "Refused a Stop request: %s. Nothing was stopped." % why
         self.server.say(text)
-        return self._text(status, text + " Use the Stop button on the page, or `python -m doris stop`.")
+        return self._text(status, text + " Use the Stop button on the page, or `%s`." % paths.command("stop"))
 
 
 # ------------------------------------------------------------------------------------------
@@ -1081,7 +1099,7 @@ class _Handler(BaseHTTPRequestHandler):
 # ------------------------------------------------------------------------------------------
 def main(argv) -> int:
     ap = argparse.ArgumentParser(
-        prog="python3 -m doris watch",
+        prog=paths.command("watch"),
         description="The live page: every step of the newest run, why, and its cost so far, with one Stop "
                     "button. Served on 127.0.0.1 only.")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT, help="the port on 127.0.0.1 (default %d)" % DEFAULT_PORT)
@@ -1092,12 +1110,12 @@ def main(argv) -> int:
     try:
         server = WatchServer(args.port)
     except OSError as exc:
-        print("Not started: port %d on %s can't be used (%s). Try another, or `python -m doris watch --port 0` "
-              "for any free one." % (args.port, HOST, exc.__class__.__name__))
+        print("Not started: port %d on %s can't be used (%s). Try another, or `%s` "
+              "for any free one." % (args.port, HOST, exc.__class__.__name__, paths.command("watch --port 0")))
         return 2
     _say("Watch page: %s (this computer only). It follows the newest run, sandbox or live, as its receipts "
-         "land. Its Stop button halts her as `python -m doris stop` does. Ctrl+C closes the page; it does not "
-         "stop her." % server.url)
+         "land. Its Stop button halts her as `%s` does. Ctrl+C closes the page; it does not "
+         "stop her." % (server.url, paths.command("stop")))
     try:
         server.serve_forever(poll_interval=0.25)
     except KeyboardInterrupt:

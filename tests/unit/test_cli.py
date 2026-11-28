@@ -550,7 +550,7 @@ class Run(Isolated):
         self.assertEqual(failures, [])
         self.assertEqual(code, supervisor.EXIT_HALTED, out)
         self.assertTrue(out.startswith("Sandbox. "), out)
-        self.assertIn("until `python -m doris stop`", out.splitlines()[1])
+        self.assertIn("until `%s`" % paths.command("stop"), out.splitlines()[1])
         (run,) = self.runs()
         self.assertTrue(os.path.basename(run).startswith("model-stub-sandbox-"), run)
         path = os.path.join(run, "receipts.jsonl")
@@ -650,8 +650,9 @@ class Smoke(unittest.TestCase):
 
 
 class Help(unittest.TestCase):
-    """The help reads as the README does: python3 -m doris. The env file's default is our server's own
-    path, and the help says so: no judge is ever asked for it."""
+    """The help spells the interpreter as it runs (paths.command: py on Windows, as the README says there;
+    elsewhere this interpreter's own name, python3 under the README). The env file's default is our
+    server's own path, and the help says so: no judge is ever asked for it."""
 
     def usage(self, command):
         out = io.StringIO()
@@ -660,14 +661,24 @@ class Help(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         return " ".join(out.getvalue().split())
 
-    def test_every_commands_usage_line_says_python3(self):
-        for command in ("demo", "run", "traps", "verify", "stop", "resume", "smoke", "replay", "watch", "redteam"):
-            self.assertTrue(self.usage(command).startswith("usage: python3 -m doris %s " % command), command)
+    def test_every_commands_usage_line_names_the_interpreter_running(self):
+        for command in ("demo", "run", "traps", "stop", "resume", "smoke", "replay", "watch", "redteam"):
+            self.assertTrue(self.usage(command).startswith("usage: %s " % paths.command(command)), command)
 
-    def test_the_top_help_says_python3_everywhere(self):
+    def test_the_top_help_names_the_interpreter_running_everywhere(self):
         code, out = run_cli(["--help"])
-        self.assertTrue(out.startswith("python3 -m doris <command>"), out)
-        self.assertNotIn("python -m doris", out)
+        self.assertTrue(out.startswith(paths.command() + " <command>"), out)
+        self.assertEqual(out.count("-m doris"), out.count(paths.command()), out)
+
+    def test_the_interpreter_is_py_on_windows_else_its_own_name(self):
+        with mock.patch.object(paths.os, "name", "nt"):
+            self.assertEqual(paths.command("stop"), "py -m doris stop")
+        with mock.patch.object(paths.os, "name", "posix"), \
+                mock.patch.object(paths.sys, "executable", "/usr/local/bin/python3.9"):
+            self.assertEqual(paths.command("resume"), "python3.9 -m doris resume")
+            self.assertEqual(paths.command(), "python3.9 -m doris")
+        with mock.patch.object(paths.os, "name", "posix"), mock.patch.object(paths.sys, "executable", ""):
+            self.assertEqual(paths.command("demo"), "python3 -m doris demo")
 
     def test_the_env_default_is_named_as_our_servers_never_a_judges(self):
         wanted = "(default %s, on our server; never asked of a judge)" % paths.LIVE_ENV

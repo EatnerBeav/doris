@@ -148,7 +148,7 @@ class DueAtFive(LongRun):
         self.assertEqual(len(self.digest_checks(s)), 1)
         self.assertEqual(self.send_state("2026-12-01"), "confirmed")
         self.assertIn("Tue Dec 1, 5:00 PM Pacific  Digest sent to the owner: "
-                      "Handled 0, held 0, human approvals 0. Tue Dec 1", self.said)
+                      "Handled 0, held 0, human approvals 0.", self.said)    # the date is the line's own, once
         self.assertTrue(receipts.verify(s.receipts_path, finished=True).ok)
 
     def test_one_digest_for_each_pacific_date_however_many_passes(self):
