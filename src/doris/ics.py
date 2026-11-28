@@ -30,10 +30,12 @@ MAX_LINK_CHARS = 500
 
 _CAL_FIELDS = ("VERSION", "PRODID", "METHOD")
 _EVENT_FIELDS = ("UID", "DTSTAMP", "DTSTART", "DTEND", "SUMMARY", "LOCATION", "STATUS", "SEQUENCE")
-_BOOKING_ID = re.compile(r"^doris-[A-Za-z0-9][A-Za-z0-9._@-]{0,190}$")
-_UTC_STAMP = re.compile(r"^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$")
-_SEQUENCE = re.compile(r"^\d{1,9}$")
-_NAME = re.compile(r"^[A-Z][A-Z0-9-]*$")
+# Every pattern that validates a whole value ends in \Z: in Python, $ also matches before a final
+# newline, which would let "doris-abc\n" pass as one of her booking IDs.
+_BOOKING_ID = re.compile(r"^doris-[A-Za-z0-9][A-Za-z0-9._@-]{0,190}\Z")
+_UTC_STAMP = re.compile(r"^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z\Z")
+_SEQUENCE = re.compile(r"^\d{1,9}\Z")
+_NAME = re.compile(r"^[A-Z][A-Z0-9-]*\Z")
 
 
 def is_booking_id(value) -> bool:
@@ -234,9 +236,9 @@ def fields_ok(ics_bytes, meeting_link: Optional[str] = None, booking_id: Optiona
 # ---------------------------------------------------------------------------------------
 _READ = ("UID", "DTSTART", "DTEND", "DURATION", "STATUS", "TRANSP", "RRULE", "RDATE", "RECURRENCE-ID")
 _TOKEN = re.compile(r"[A-Za-z0-9-]+")
-_DATE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
-_DATETIME = re.compile(r"^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$")
-_DURATION = re.compile(r"^([+-])?P(?:(\d+)W|(?=\d|T\d)(?:(\d+)D)?(?:T(?=\d)(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?)$")
+_DATE = re.compile(r"^(\d{4})(\d{2})(\d{2})\Z")
+_DATETIME = re.compile(r"^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)\Z")
+_DURATION = re.compile(r"^([+-])?P(?:(\d+)W|(?=\d|T\d)(?:(\d+)D)?(?:T(?=\d)(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?)\Z")
 
 
 @dataclass(frozen=True)
@@ -260,7 +262,7 @@ class VEvent:
 def _logical_lines(data) -> List[str]:
     if not isinstance(data, (bytes, bytearray)):
         raise ValueError("an .ics is bytes")
-    text = bytes(data).decode("utf-8", errors="replace").lstrip("﻿")
+    text = bytes(data).decode("utf-8", errors="replace").lstrip("\ufeff")
     out = []   # type: List[str]
     for line in re.split(r"\r\n|\n|\r", text):
         if line[:1] in (" ", "\t") and out:

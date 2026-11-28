@@ -145,6 +145,15 @@ class Restart(unittest.TestCase):
             between()
         return self.run_once()
 
+    @staticmethod
+    def at_the_sending_mark(template):
+        """when() for crash_then_run(ledger_mod.Ledger, "set_send_state", ...): the kill lands as the
+        `template` send, written down, is about to be marked sending: before the transport has it.
+        (A kill inside the transport's send may have gone, so that send is held, never sent again.)"""
+        def when(db, message_id, state):
+            return state == "sending" and (db.send(message_id) or {}).get("template") == template
+        return when
+
     def sent(self, to=None):
         out = []
         outbox = os.path.join(self.root, "outbox")
@@ -393,17 +402,32 @@ class SecondOffer(Restart):
         add(self.root, "02b-marcus-decline.eml", self.DECLINE, {"forwarded": "no"})
 
     def test_killed_after_the_second_offer_was_written_down_before_the_send(self):
-        s2 = self.crash_then_run(sandbox_mod.SandboxMail, "send",
-                                 lambda cal, raw, envelope, mid, template=None: template == "T3")
+        marks = []
+
+        def at_the_second_sending_mark(db, message_id, state):    # T3's: written down, not yet sending
+            marks.extend([message_id] if state == "sending" else [])
+            return state == "sending" and len(marks) == 2
+
+        s2 = self.crash_then_run(ledger_mod.Ledger, "set_send_state", at_the_second_sending_mark)
         self.assertEqual(self.templates_sent(self.MARCUS), ["T2", "T3"])
         self.assertEqual(self.offers(), 2)
         self.assertEqual(self.closing(s2, "marcus"), ["reoffer"])
 
+    def test_killed_inside_the_transports_send_it_may_have_gone_so_it_is_held_never_sent_again(self):
+        # review 2, finding 1: once marked sending the transport may have it; Sent shows no T3 after
+        # two looks, so it never goes out again and the owner is told once
+        s2 = self.crash_then_run(sandbox_mod.SandboxMail, "send",
+                                 lambda cal, raw, envelope, mid, template=None: template == "T3")
+        self.assertEqual(self.templates_sent(self.MARCUS), ["T2"])
+        self.assertEqual(self.closing(s2, "marcus"), ["hold:send_unconfirmed"])
+        self.assertEqual([t for t in self.templates_sent(OWNER) if t == "S1"], ["S1"])
+        self.assertEqual(self.closing(self.run_once(), "marcus"), [])         # and a later run leaves it be
+        self.assertEqual(self.templates_sent(self.MARCUS), ["T2"])
+
     def test_after_the_restart_her_own_offer_is_no_time_the_sender_wrote(self):
         # The T3 written down before the kill is the send's own offer, not one already open to Marcus: G9
         # reads its slots as hers, as it did before the kill (Fable review 2 of PR #3, finding E)
-        s2 = self.crash_then_run(sandbox_mod.SandboxMail, "send",
-                                 lambda cal, raw, envelope, mid, template=None: template == "T3")
+        s2 = self.crash_then_run(ledger_mod.Ledger, "set_send_state", self.at_the_sending_mark("T3"))
         self.assertEqual(self.templates_sent(self.MARCUS), ["T2", "T3"])
         lines = receipts.read_lines(s2.receipts_path)
         (g9,) = [l["payload"]["checks"]["G9"] for l in lines
@@ -484,8 +508,7 @@ class SupersededByASecondOffer(Superseded):
         self.assertEqual(self.offers(), 2)
 
     def test_killed_before_the_second_offer_was_sent(self):
-        self.crash_then_run(sandbox_mod.SandboxMail, "send",
-                            lambda cal, raw, envelope, mid, template=None: template == "T3")
+        self.crash_then_run(ledger_mod.Ledger, "set_send_state", self.at_the_sending_mark("T3"))
         self.assertEqual(self.templates_sent(MARCUS), ["T2", "T3"])
         self.assert_books_the_second_offers_first(self.answer(self.DECLINE, "T3", "The first one works."))
 
@@ -522,15 +545,15 @@ class APickBeforeTheSecondOfferWentOut(Superseded):
         return loop.run(cfg)
 
     def crash_at_the_t3_send(self):
-        real, fired = sandbox_mod.SandboxMail.send, []
+        real, fired, at_t3 = ledger_mod.Ledger.set_send_state, [], self.at_the_sending_mark("T3")
 
-        def send(mail, raw, envelope, mid, template=None):
-            if not fired and template == "T3":
+        def set_send_state(db, message_id, state):
+            if not fired and at_t3(db, message_id, state):
                 fired.append(True)
                 raise Crash("send")
-            return real(mail, raw, envelope, mid, template=template)
+            return real(db, message_id, state)
 
-        with mock.patch.object(sandbox_mod.SandboxMail, "send", send):
+        with mock.patch.object(ledger_mod.Ledger, "set_send_state", set_send_state):
             with self.assertRaises(Crash):
                 self.run_once()
         self.assertTrue(fired)
@@ -606,8 +629,7 @@ class SupersededByFreshTimes(Superseded):
         self.assert_books_the_fresh_times_first(self.answer(self.PICK, "T4", "The first one works."))
 
     def test_killed_before_the_fresh_times_were_sent(self):
-        self.crash_then_run(sandbox_mod.SandboxMail, "send",
-                            lambda cal, raw, envelope, mid, template=None: template == "T4")
+        self.crash_then_run(ledger_mod.Ledger, "set_send_state", self.at_the_sending_mark("T4"))
         self.assertEqual(self.templates_sent(MARCUS), ["T2", "T4"])
         self.assert_books_the_fresh_times_first(self.answer(self.PICK, "T4", "The first one works."))
 

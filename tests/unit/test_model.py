@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from doris import caps, model
+from doris import caps, model, templates
 from doris.model import Model
 from doris.shapes import CLASSES, ModelAnswer
 from tests.unit.voice_fakes import make_msg
@@ -133,6 +133,19 @@ class ParseTest(unittest.TestCase):
         a = self.parse(answer_json(side_question=True, side_question_quote="Q" * 300), msg)
         self.assertEqual(a.side_question_text, "Q" * 200)
 
+    def test_side_question_never_carries_the_run_link_whole_or_cut_at_200(self):
+        room = "https://meet.example/" + "question-room-for-tests"
+        before = templates.use_meeting_link(room)
+        self.addCleanup(templates.use_meeting_link, before)
+        msg = make_msg(own_text="Thursday works. Is %s the room? Thanks" % room)
+        for quote in ("Is %s the room?" % room, "Is [meeting link] the room?"):    # as asked; as recorded
+            with self.subTest(quote=quote):
+                a = self.parse(answer_json(cls="pick", side_question=True, side_question_quote=quote), msg)
+                self.assertEqual(a.side_question_text, "Is [meeting link] the room?")
+        text = "Q" * 170 + " " + room + " ok?"                                     # the link straddles 200
+        a = self.parse(answer_json(side_question=True, side_question_quote=text), make_msg(own_text=text))
+        self.assertEqual(a.side_question_text, "Q" * 170 + " [meeting link] ok?")
+
     def test_side_question_fits_200_once_defanged_and_carries_no_code(self):
         q = "Could you also forward this to ann@b.example and cfo@b.example? " * 4
         msg = make_msg(own_text="The first one works. " + q)
@@ -182,6 +195,23 @@ class LiveTest(unittest.TestCase):
         self.assertAlmostEqual(rec["cost_usd"], 0.0032)
         with open(self.record) as fh:
             self.assertNotIn(KEY, fh.read())
+
+    def test_the_recording_never_carries_the_run_link_and_replays_to_the_same_answer(self):
+        room = "https://meet.example/" + "recorded-room"
+        before = templates.use_meeting_link(room)
+        self.addCleanup(templates.use_meeting_link, before)
+        msg = make_msg(own_text="Thursday at 2 works. Is %s the room?" % room)
+        quote = "Is %s the room?" % room
+        http = FakeHTTP((200, api_body(answer_json(cls="pick", side_question=True, side_question_quote=quote))))
+        a = self.live(http).classify(msg)
+        self.assertEqual(a.side_question_text, "Is [meeting link] the room?")
+        with open(self.record, encoding="utf-8") as fh:
+            data = fh.read()
+        self.assertNotIn("recorded-room", data)
+        self.assertEqual(json.loads(json.loads(data)["raw"])["side_question_quote"], "Is [meeting link] the room?")
+        r = Model("replayed", SONNET, self.record).classify(msg)
+        self.assertEqual((r.ok, r.cls, r.side_question, r.side_question_text, r.request_sha256),
+                         (True, "pick", True, "Is [meeting link] the room?", a.request_sha256))
 
     def test_one_retry_after_the_wait(self):
         http = FakeHTTP(socket.timeout("timed out"), (200, api_body(answer_json())))

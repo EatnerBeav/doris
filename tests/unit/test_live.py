@@ -1,0 +1,1919 @@
+"""adapters/live.py: IMAP for her mail, her sends over JMAP (adapters/jmap.py), CalDAV for the
+owner's shared calendar.
+
+No network: the real imaplib and http.client talk to small fake servers on 127.0.0.1 (plain TCP
+in place of TLS, through the adapters' factory hooks; the JMAP one is fake_jmap's). The fakes
+record what they were sent, so a test can prove what Doris never does (no expunge, no Bcc, no
+retry, no title).
+"""
+import base64
+import datetime as dt
+import http.client
+import http.server
+import imaplib
+import io
+import re
+import socket
+import socketserver
+import ssl
+import sys
+import threading
+import time
+import traceback
+import unittest
+import urllib.parse
+import xml.etree.ElementTree as ET
+from unittest import mock
+from xml.sax.saxutils import escape
+
+from doris import caps, compose, ics, mail as mail_mod, screens, slots
+from doris.adapters import live
+from doris.adapters.base import CalendarAdapter, MailAdapter
+from doris.shapes import (AlreadyExists, CalendarError, CalendarTimeout, Event, InboundItem, MailError, NotHers,
+                          SendUnknown, Slot)
+from tests.unit.fake_jmap import SESSION_HOST, TOKEN, FakeJMAP
+
+UTC = dt.timezone.utc
+DORIS = "doris.htm@fastmail.com"
+OWNER = "whizz@fastmail.com"
+PASSWORD = "dummy-app-pass-77"           # a stand-in: never a real key
+CALDAV_URL = "https://caldav.fastmail.com/dav/calendars/user/doris.htm@fastmail.com/owner-shared-cal/"
+LINK = "https://meet.example/doris-test-room"
+
+
+def u(*args):
+    return dt.datetime(*args, tzinfo=UTC)
+
+
+def env(**overrides):
+    values = {"DORIS_MAIL_ADDRESS": DORIS, "DORIS_APP_PASSWORD": PASSWORD, "DORIS_JMAP_TOKEN": TOKEN,
+              "DORIS_CALDAV_URL": CALDAV_URL}
+    values.update(overrides)
+    return {k: v for k, v in values.items() if v is not None}
+
+
+def secret_free(test, exc):
+    """No form of the password or of the Basic credentials appears in anything an error prints."""
+    basic = base64.b64encode(("%s:%s" % (DORIS, PASSWORD)).encode()).decode()
+    plain = base64.b64encode(("\0%s\0%s" % (DORIS, PASSWORD)).encode()).decode()
+    printed = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    for text in (str(exc), repr(exc), printed):
+        for secret in (PASSWORD, basic, plain):
+            test.assertNotIn(secret, text)
+
+
+# ===========================================================================================
+# Configuration and hosts
+# ===========================================================================================
+class HostsTest(unittest.TestCase):
+
+    def test_defaults_are_fastmails_documented_servers_plus_the_calendar_url_host(self):
+        self.assertEqual(live.hosts(env()), ["imap.fastmail.com", "api.fastmail.com", "caldav.fastmail.com"])
+
+    def test_overrides_are_followed_lowercased_and_listed_once(self):
+        e = env(DORIS_IMAP_HOST="Mail.Example.COM", DORIS_CALDAV_URL="https://MAIL.example.com:8443/cal/")
+        self.assertEqual(live.hosts(e), ["mail.example.com", "api.fastmail.com"])
+
+    def test_empty_values_mean_the_default(self):
+        e = env(DORIS_IMAP_HOST="", DORIS_IMAP_PORT=" ")
+        self.assertEqual(live.hosts(e), ["imap.fastmail.com", "api.fastmail.com", "caldav.fastmail.com"])
+
+    def test_her_sends_go_to_the_jmap_host_alone_and_no_smtp_setting_is_read(self):
+        """The law: live mail goes via Fastmail JMAP over HTTPS (DigitalOcean blocks SMTP)."""
+        e = env(DORIS_SMTP_HOST="smtp.example.com", DORIS_SMTP_PORT="not a port")
+        self.assertEqual(live.hosts(e), ["imap.fastmail.com", "api.fastmail.com", "caldav.fastmail.com"])
+        live.LiveMail(e, DORIS)
+        self.assertNotIn("DORIS_SMTP_HOST", live.ENV_NAMES)
+        for gone in ("check_smtp_login", "_smtp"):
+            self.assertFalse(hasattr(live.LiveMail, gone), gone)
+        self.assertFalse(hasattr(live, "smtplib"))
+
+    def test_the_calendar_url_is_required(self):
+        with self.assertRaises(live.ConfigError) as cm:
+            live.hosts(env(DORIS_CALDAV_URL=None))
+        self.assertIn("DORIS_CALDAV_URL", str(cm.exception))
+
+    def test_the_calendar_url_must_be_plain_https(self):
+        for bad in ("http://caldav.fastmail.com/dav/cal/", "https://doris:%s@caldav.fastmail.com/cal/" % PASSWORD,
+                    "https://caldav.fastmail.com/cal/?x=1", "https://caldav.fastmail.com/cal/#f",
+                    "caldav.fastmail.com/cal/", "https:///cal/", "https://caldav.fastmail.com",
+                    "https://caldav.fastmail.com/dav/my cal/", "https://caldav.fastmail.com/dav/caf\u00e9/",
+                    "https://caldav.fastmail.com/dav/<cal>/"):
+            with self.assertRaises(live.ConfigError, msg=bad) as cm:
+                live.hosts(env(DORIS_CALDAV_URL=bad))
+            self.assertIn("DORIS_CALDAV_URL", str(cm.exception))
+            self.assertNotIn(PASSWORD, str(cm.exception))
+            self.assertNotIn(bad, str(cm.exception))
+
+    def test_a_host_that_is_not_a_bare_name_is_refused(self):
+        for bad in ("imap.fastmail.com:993", "imaps://imap.fastmail.com", "imap fastmail", "-bad.example", "a/b"):
+            with self.assertRaises(live.ConfigError, msg=bad) as cm:
+                live.hosts(env(DORIS_IMAP_HOST=bad))
+            self.assertIn("DORIS_IMAP_HOST", str(cm.exception))
+
+    def test_a_port_out_of_range_is_refused(self):
+        for bad in ("0", "65536", "imap", "-1", "99.5", "\u00b2", "\uff19\uff19\uff13"):
+            with self.assertRaises(live.ConfigError, msg=bad):
+                live.LiveMail(env(DORIS_IMAP_PORT=bad), DORIS)
+
+    def test_config_error_is_a_value_error(self):
+        self.assertTrue(issubclass(live.ConfigError, ValueError))
+
+
+class ConstructTest(unittest.TestCase):
+
+    def test_they_are_the_base_adapters(self):
+        self.assertIsInstance(live.LiveMail(env(), DORIS), MailAdapter)
+        self.assertIsInstance(live.LiveCalendar(env()), CalendarAdapter)
+
+    def test_mail_needs_her_address_her_app_password_and_her_jmap_token(self):
+        for missing in ("DORIS_MAIL_ADDRESS", "DORIS_APP_PASSWORD", "DORIS_JMAP_TOKEN"):
+            with self.assertRaises(live.ConfigError) as cm:
+                live.LiveMail(env(**{missing: None}), DORIS)
+            self.assertIn(missing, str(cm.exception))
+
+    def test_a_jmap_token_that_is_malformed_is_refused_naming_it_and_never_showing_it(self):
+        for bad in ("short-token", TOKEN + " x", TOKEN + "\u00e9"):
+            with self.assertRaises(live.ConfigError) as cm:
+                live.LiveMail(env(DORIS_JMAP_TOKEN=bad), DORIS)
+            self.assertIn("DORIS_JMAP_TOKEN", str(cm.exception))
+            self.assertNotIn(bad, str(cm.exception))
+
+    def test_the_calendar_needs_no_jmap_token(self):
+        live.LiveCalendar(env(DORIS_JMAP_TOKEN=None))
+
+    def test_calendar_needs_her_login_and_the_calendar_url(self):
+        for missing in ("DORIS_MAIL_ADDRESS", "DORIS_APP_PASSWORD", "DORIS_CALDAV_URL"):
+            with self.assertRaises(live.ConfigError) as cm:
+                live.LiveCalendar(env(**{missing: None}))
+            self.assertIn(missing, str(cm.exception))
+
+    def test_mail_refuses_an_address_that_is_not_the_login(self):
+        """She sends as herself with her one key: never as the owner, never as an alias."""
+        with self.assertRaises(live.ConfigError):
+            live.LiveMail(env(), OWNER)
+        self.assertEqual(live.LiveMail(env(), DORIS.upper()).doris_addr, DORIS.upper())
+
+    def test_mail_does_not_need_the_calendar_url(self):
+        live.LiveMail(env(DORIS_CALDAV_URL=None), DORIS)
+
+    def test_the_timeout_must_be_positive(self):
+        for bad in (0, -1):
+            with self.assertRaises(ValueError):
+                live.LiveMail(env(), DORIS, timeout_s=bad)
+            with self.assertRaises(ValueError):
+                live.LiveCalendar(env(), timeout_s=bad)
+
+    def test_default_timeouts_come_from_caps(self):
+        self.assertEqual(live.LiveMail(env(), DORIS).timeout_s, caps.MAIL_TIMEOUT_S)
+        self.assertEqual(live.LiveCalendar(env()).timeout_s, caps.CALENDAR_TIMEOUT_S)
+
+    def test_the_password_never_shows_in_repr_str_or_vars(self):
+        for adapter in (live.LiveMail(env(), DORIS), live.LiveCalendar(env())):
+            for text in (repr(adapter), str(adapter), repr(vars(adapter)), repr(vars(adapter).get("_sender"))):
+                self.assertNotIn(PASSWORD, text)
+                self.assertNotIn(TOKEN, text)
+                self.assertNotIn(base64.b64encode(("%s:%s" % (DORIS, PASSWORD)).encode()).decode(), text)
+
+    def test_env_names_lists_every_name_the_module_reads(self):
+        self.assertEqual(set(live.ENV_NAMES), {"DORIS_MAIL_ADDRESS", "DORIS_APP_PASSWORD", "DORIS_IMAP_HOST",
+                                               "DORIS_IMAP_PORT", "DORIS_JMAP_TOKEN", "DORIS_CALDAV_URL"})
+
+
+# ===========================================================================================
+# A fake IMAP server: enough of IMAP4rev1 for the real imaplib to talk to
+# ===========================================================================================
+MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+IMAP_VERBS_ALLOWED = {"CAPABILITY", "LOGIN", "LOGOUT", "NOOP", "SELECT", "EXAMINE", "LIST",
+                      "UID SEARCH", "UID FETCH", "UID STORE"}
+
+
+def internaldate(moment):
+    """INTERNALDATE text for an aware datetime, written in that datetime's own offset."""
+    minutes = int(moment.utcoffset().total_seconds() // 60)
+    sign, minutes = ("+" if minutes >= 0 else "-"), abs(minutes)
+    return "%02d-%s-%04d %02d:%02d:%02d %s%02d%02d" % (moment.day, MONTHS[moment.month - 1], moment.year,
+                                                      moment.hour, moment.minute, moment.second, sign,
+                                                      minutes // 60, minutes % 60)
+
+
+def imap_tokens(text):
+    """Atoms (brackets kept whole), quoted strings (unescaped) and parenthesized lists (raw)."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == " ":
+            i += 1
+        elif c == '"':
+            j, buf = i + 1, []
+            while j < n and text[j] != '"':
+                if text[j] == "\\":
+                    j += 1
+                buf.append(text[j])
+                j += 1
+            out.append(("q", "".join(buf)))
+            i = j + 1
+        elif c == "(":
+            depth, j = 0, i
+            while j < n:
+                depth += {"(": 1, ")": -1}.get(text[j], 0)
+                if depth == 0:
+                    break
+                j += 1
+            out.append(("l", text[i + 1:j]))
+            i = j + 1
+        else:
+            j, depth = i, 0
+            while j < n and (text[j] != " " or depth):
+                depth += {"[": 1, "]": -1}.get(text[j], 0)
+                j += 1
+            out.append(("a", text[i:j]))
+            i = j
+    return out
+
+
+def uid_set(text, uids):
+    chosen, top = set(), max(uids) if uids else 0
+    for part in text.split(","):
+        if ":" in part:
+            a, b = (top if x == "*" else int(x) for x in part.split(":"))
+            chosen.update(x for x in uids if min(a, b) <= x <= max(a, b))
+        elif (top if part == "*" else int(part)) in uids:
+            chosen.add(top if part == "*" else int(part))
+    return sorted(chosen)
+
+
+def header_field(raw, name):
+    """The raw header lines (continuations included) of one field, plus the blank line."""
+    head = raw.split(b"\r\n\r\n", 1)[0].split(b"\r\n")
+    keep, on = [], False
+    for line in head:
+        if line[:1] in (b" ", b"\t"):
+            if on:
+                keep.append(line)
+            continue
+        on = line.split(b":", 1)[0].strip().lower() == name.lower().encode()
+        if on:
+            keep.append(line)
+    return b"\r\n".join(keep) + b"\r\n\r\n" if keep else b"\r\n"
+
+
+class Box(object):
+    def __init__(self, uidvalidity, special=()):
+        self.uidvalidity = uidvalidity
+        self.special = set(special)
+        self.messages = {}            # uid -> {"date": INTERNALDATE text, "raw": bytes, "flags": set}
+        self.next_uid = 1
+
+    def add(self, raw, when, flags=()):
+        uid = self.next_uid
+        self.next_uid += 1
+        self.messages[uid] = {"date": internaldate(when), "raw": raw, "flags": set(flags)}
+        return uid
+
+    def day_of(self, uid):
+        d, mon, y = self.messages[uid]["date"].split(" ")[0].split("-")
+        return dt.date(int(y), MONTHS.index(mon) + 1, int(d))
+
+
+class FakeIMAP(socketserver.ThreadingTCPServer):
+    daemon_threads = True
+    block_on_close = False            # a handler told to hang must not hold up the test's teardown
+    allow_reuse_address = True
+
+    def __init__(self):
+        socketserver.ThreadingTCPServer.__init__(self, ("127.0.0.1", 0), IMAPHandler)
+        self.user, self.password = DORIS, PASSWORD
+        self.boxes = {"INBOX": Box(1700000001)}
+        self.commands = []            # (verb, args) for every command; LOGIN args are not kept
+        self.logins = []              # the user name of every LOGIN
+        self.fault = {}               # verb -> "drop" | "hang" | "bad" | "no"
+        self.hang_s = 1.5
+        self.uid_after_body = False   # put "UID n" after the literal, as some servers do
+        self.unsolicited = False      # slip an unrelated FETCH (flags) update into answers
+        self.omit = set()             # uids whose answers the server leaves out
+        self.header_nil = False       # answer a header fetch with NIL instead of a literal
+        self.no_size = set()          # uids whose RFC822.SIZE the server leaves out
+        self.no_uidvalidity = False
+        self.store_quiet = False      # STORE sends no FETCH back
+        self.store_ignored = False    # STORE answers OK but keeps nothing
+        self.list_return_refused = False
+        self.special_in_plain_list = True
+        self.literal_names = False
+        self.extended_data = False
+        self.thread = threading.Thread(target=self.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+        self.thread.start()
+
+    @property
+    def port(self):
+        return self.server_address[1]
+
+    def stop(self):
+        self.shutdown()
+        self.server_close()
+
+    def verbs(self):
+        return [verb for verb, _ in self.commands]
+
+
+class IMAPHandler(socketserver.StreamRequestHandler):
+    disable_nagle_algorithm = True    # many small writes: no 40 ms stalls
+
+    def out(self, text):
+        self.wfile.write(text.encode("utf-8") + b"\r\n")
+
+    def out_raw(self, data):
+        self.wfile.write(data)
+
+    def handle(self):
+        srv = self.server
+        self.box, self.readonly = None, True
+        self.out("* OK [CAPABILITY IMAP4rev1 LIST-EXTENDED SPECIAL-USE] fake IMAP ready")
+        while True:
+            line = self.rfile.readline()
+            if not line:
+                return
+            tag, _, rest = line.rstrip(b"\r\n").decode("utf-8").partition(" ")
+            verb, _, args = rest.partition(" ")
+            verb = verb.upper()
+            if verb == "UID":
+                sub, _, args = args.partition(" ")
+                verb = "UID " + sub.upper()
+            srv.commands.append((verb, "" if verb == "LOGIN" else args))
+            fault = srv.fault.get(verb)
+            if fault == "drop":
+                return
+            if fault == "hang":
+                time.sleep(srv.hang_s)
+                return
+            if fault in ("bad", "no"):
+                self.out("%s %s refused by the fake" % (tag, fault.upper()))
+                continue
+            handler = getattr(self, "do_" + verb.replace(" ", "_"), None)
+            if handler is None:
+                self.out("%s BAD unknown command" % tag)
+                continue
+            if handler(tag, args) == "close":
+                return
+
+    def do_CAPABILITY(self, tag, args):
+        self.out("* CAPABILITY IMAP4rev1 LIST-EXTENDED SPECIAL-USE")
+        self.out("%s OK CAPABILITY completed" % tag)
+
+    def do_NOOP(self, tag, args):
+        self.out("%s OK NOOP completed" % tag)
+
+    def do_LOGOUT(self, tag, args):
+        self.out("* BYE fake IMAP logging out")
+        self.out("%s OK LOGOUT completed" % tag)
+        return "close"
+
+    def do_LOGIN(self, tag, args):
+        user, password = (value for _, value in imap_tokens(args))
+        self.server.logins.append(user)
+        if (user, password) == (self.server.user, self.server.password):
+            self.out("%s OK LOGIN completed" % tag)
+        else:
+            self.out("%s NO [AUTHENTICATIONFAILED] Authentication failed" % tag)
+
+    def _open(self, tag, args, readonly):
+        name = imap_tokens(args)[0][1]
+        key = "INBOX" if name.upper() == "INBOX" else name
+        box = self.server.boxes.get(key)
+        if box is None:
+            self.out("%s NO no such mailbox" % tag)
+            return
+        self.box, self.readonly = box, readonly
+        self.out("* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)")
+        self.out("* OK [PERMANENTFLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft \\*)] ok")
+        self.out("* %d EXISTS" % len(box.messages))
+        self.out("* 0 RECENT")
+        if not self.server.no_uidvalidity:
+            self.out("* OK [UIDVALIDITY %d] UIDs valid" % box.uidvalidity)
+        self.out("* OK [UIDNEXT %d] next" % box.next_uid)
+        self.out("%s OK [%s] done" % (tag, "READ-ONLY" if readonly else "READ-WRITE"))
+
+    def do_SELECT(self, tag, args):
+        self._open(tag, args, readonly=False)
+
+    def do_EXAMINE(self, tag, args):
+        self._open(tag, args, readonly=True)
+
+    def do_LIST(self, tag, args):
+        srv = self.server
+        extended = "RETURN" in args.upper()
+        if extended and srv.list_return_refused:
+            self.out("%s BAD RETURN options are not supported here" % tag)
+            return
+        for name, box in srv.boxes.items():
+            attrs = " ".join(["\\HasNoChildren"] + (sorted(box.special) if extended or srv.special_in_plain_list
+                                                     else []))
+            tail = ' ("CHILDINFO" ("SUBSCRIBED"))' if srv.extended_data else ""
+            if srv.literal_names:
+                self.out_raw(('* LIST (%s) "/" {%d}\r\n' % (attrs, len(name.encode()))).encode()
+                             + name.encode() + tail.encode() + b"\r\n")
+            else:
+                quoted = '"%s"' % name.replace("\\", "\\\\").replace('"', '\\"')
+                self.out('* LIST (%s) "/" %s%s' % (attrs, quoted, tail))
+        self.out("%s OK LIST completed" % tag)
+
+    def _need_box(self, tag):
+        if self.box is None:
+            self.out("%s BAD no mailbox selected" % tag)
+        return self.box
+
+    def do_UID_SEARCH(self, tag, args):
+        box = self._need_box(tag)
+        if box is None:
+            return
+        uids = sorted(box.messages)
+        toks = imap_tokens(args)
+
+        def one(i):
+            """(the uids one search key matches, the index after it)."""
+            key = toks[i][1].upper()
+            if key == "ALL":
+                return set(uids), i + 1
+            if key == "NOT":
+                inner, j = one(i + 1)
+                return set(uids) - inner, j
+            if key == "KEYWORD":
+                flag = toks[i + 1][1].lower()
+                return {x for x in uids if flag in {f.lower() for f in box.messages[x]["flags"]}}, i + 2
+            if key == "SINCE":
+                d, mon, y = toks[i + 1][1].split("-")
+                since = dt.date(int(y), MONTHS.index(mon) + 1, int(d))
+                return {x for x in uids if box.day_of(x) >= since}, i + 2
+            if key == "HEADER":
+                field, needle = toks[i + 1][1], toks[i + 2][1].lower()
+                return {x for x in uids
+                        if needle in header_field(box.messages[x]["raw"], field).decode("utf-8", "replace").lower()}, i + 3
+            raise ValueError(key)
+        found, i = set(uids), 0
+        try:
+            while i < len(toks):
+                matched, i = one(i)
+                found &= matched
+        except (ValueError, IndexError):
+            self.out("%s BAD unknown search key" % tag)
+            return
+        self.out("* SEARCH" + "".join(" %d" % x for x in sorted(found)))
+        self.out("%s OK SEARCH completed" % tag)
+
+    def do_UID_FETCH(self, tag, args):
+        srv, box = self.server, self._need_box(tag)
+        if box is None:
+            return
+        set_text, _, items = args.partition(" ")
+        items_u = items.upper()
+        uids = sorted(box.messages)
+        if srv.unsolicited:
+            self.out("* 1 FETCH (FLAGS (\\Seen \\Recent))")
+        for uid in uid_set(set_text, uids):
+            if uid in srv.omit:
+                continue
+            msg, seq = box.messages[uid], uids.index(uid) + 1
+            head = [] if srv.uid_after_body else ["UID %d" % uid]
+            if "INTERNALDATE" in items_u:
+                head.append('INTERNALDATE "%s"' % msg["date"])
+            if "FLAGS" in items_u:
+                head.append("FLAGS (%s)" % " ".join(sorted(msg["flags"])))
+            if "RFC822.SIZE" in items_u and uid not in srv.no_size:
+                head.append("RFC822.SIZE %d" % len(msg["raw"]))
+            literal = None
+            partial = re.search(r"BODY\.PEEK\[\]<(\d+)\.(\d+)>", items_u)
+            if partial:
+                origin, count = int(partial.group(1)), int(partial.group(2))
+                literal = ("BODY[]<%d>" % origin, msg["raw"][origin:origin + count])
+            elif "BODY.PEEK[]" in items_u or "BODY[]" in items_u:
+                literal = ("BODY[]", msg["raw"])
+                if "BODY.PEEK[]" not in items_u and not self.readonly:
+                    msg["flags"].add("\\Seen")
+            elif "HEADER.FIELDS (MESSAGE-ID)" in items_u and srv.header_nil:
+                head.append("BODY[HEADER.FIELDS (MESSAGE-ID)] NIL")
+            elif "HEADER.FIELDS (MESSAGE-ID)" in items_u:
+                literal = ("BODY[HEADER.FIELDS (MESSAGE-ID)]", header_field(msg["raw"], "message-id"))
+            tail = " UID %d" % uid if srv.uid_after_body else ""
+            if literal is None:
+                self.out("* %d FETCH (%s%s)" % (seq, " ".join(head), tail))
+            else:
+                lead = " ".join(head) + " " if head else ""
+                self.out_raw(("* %d FETCH (%s%s {%d}\r\n" % (seq, lead, literal[0], len(literal[1]))).encode()
+                             + literal[1] + (tail + ")\r\n").encode())
+        self.out("%s OK FETCH completed" % tag)
+
+    def do_UID_STORE(self, tag, args):
+        srv, box = self.server, self._need_box(tag)
+        if box is None:
+            return
+        set_text, op, flags = args.split(" ", 2)
+        if self.readonly:
+            self.out("%s NO mailbox is read-only" % tag)
+            return
+        uids = sorted(box.messages)
+        for uid in uid_set(set_text, uids):
+            msg = box.messages[uid]
+            if op.upper().startswith("+FLAGS") and not srv.store_ignored:
+                msg["flags"].update(flags.strip("()").split())
+            if not op.upper().endswith(".SILENT") and not srv.store_quiet:
+                self.out("* %d FETCH (UID %d FLAGS (%s))" % (uids.index(uid) + 1, uid, " ".join(sorted(msg["flags"]))))
+        self.out("%s OK STORE completed" % tag)
+
+
+def eml(n, mid=None, extra=b""):
+    mid = mid or "msg-%d@example.com" % n
+    return (b"From: Sender %d <sender%d@example.com>\r\nTo: " % (n, n) + DORIS.encode()
+            + b"\r\nSubject: hello %d\r\nMessage-ID: <" % n + mid.encode() + b">\r\n" + extra
+            + b"\r\nBody %d\r\n.leading dot line\r\n" % n)
+
+
+class ImapFixture(unittest.TestCase):
+    """LiveMail against the fake IMAP server. After each test: only allowed verbs were used,
+    nothing was ever flagged deleted, and every body fetch was a PEEK."""
+
+    def setUp(self):
+        self.imap = FakeIMAP()
+        self.addCleanup(self.imap.stop)
+        self.dialed = []
+        self.inbox = self.imap.boxes["INBOX"]
+        self.mail = self.make_mail()
+
+    def make_mail(self, **kw):
+        e = env(DORIS_IMAP_HOST="imap.example.test", DORIS_IMAP_PORT="1993")
+        return live.LiveMail(e, DORIS, timeout_s=kw.pop("timeout_s", 2.0), imap_factory=self.factory, **kw)
+
+    def factory(self, host, port, timeout):
+        self.dialed.append((host, port, timeout))
+        return imaplib.IMAP4("127.0.0.1", self.imap.port, timeout=timeout)
+
+    def tearDown(self):
+        for verb, args in self.imap.commands:
+            self.assertIn(verb, IMAP_VERBS_ALLOWED)
+            self.assertNotIn("\\DELETED", args.upper())
+            if verb == "UID FETCH":
+                self.assertNotRegex(args.upper(), r"(?<!PEEK)\[[^\]]*\]")
+
+
+# ===========================================================================================
+# Mail: fetch
+# ===========================================================================================
+class FetchTest(ImapFixture):
+
+    def test_hands_over_every_message_oldest_first_by_internaldate(self):
+        plus2 = dt.timezone(dt.timedelta(hours=2))
+        uid1 = self.inbox.add(eml(1), dt.datetime(2026, 11, 27, 12, 0, 5, tzinfo=plus2))
+        uid2 = self.inbox.add(eml(2), u(2026, 11, 27, 9, 30, 0))
+        uid3 = self.inbox.add(eml(3), u(2026, 11, 28, 1, 0, 0))
+        items = self.mail.fetch_new()
+        self.assertEqual([i.server_id for i in items],
+                         ["INBOX:1700000001:%d" % uid for uid in (uid2, uid1, uid3)])
+        self.assertEqual([i.raw for i in items], [eml(2), eml(1), eml(3)])
+        self.assertEqual([i.received_utc for i in items],
+                         [u(2026, 11, 27, 9, 30), u(2026, 11, 27, 10, 0, 5), u(2026, 11, 28, 1, 0)])
+        self.assertTrue(all(isinstance(i, InboundItem) and i.facts == {} for i in items))
+        self.assertTrue(all(i.received_utc.tzinfo == UTC for i in items))
+
+    def test_dials_the_configured_host_and_port_with_the_timeout(self):
+        self.mail.fetch_new()
+        self.assertEqual(self.dialed, [("imap.example.test", 1993, 2.0)])
+        self.assertEqual(self.imap.logins, [DORIS])
+
+    def test_reads_inbox_read_only_with_peek_so_seen_never_changes(self):
+        uid = self.inbox.add(eml(1), u(2026, 11, 27, 9, 0))
+        self.mail.fetch_new()
+        self.assertIn("EXAMINE", self.imap.verbs())
+        self.assertNotIn("SELECT", self.imap.verbs())
+        self.assertIn("BODY.PEEK[]", " ".join(a for v, a in self.imap.commands if v == "UID FETCH"))
+        self.assertEqual(self.inbox.messages[uid]["flags"], set())
+
+    def test_a_start_time_keeps_only_mail_received_since_then(self):
+        self.inbox.add(eml(1), u(2026, 11, 20, 9, 0))
+        self.inbox.add(eml(2), u(2026, 11, 27, 9, 59, 59))
+        uid3 = self.inbox.add(eml(3), u(2026, 11, 27, 10, 0))
+        uid4 = self.inbox.add(eml(4), u(2026, 11, 28, 8, 0))
+        mail = self.make_mail(since_utc=u(2026, 11, 27, 10, 0))
+        items = mail.fetch_new()
+        self.assertEqual([i.server_id for i in items], ["INBOX:1700000001:%d" % uid3, "INBOX:1700000001:%d" % uid4])
+        searches = [a for v, a in self.imap.commands if v == "UID SEARCH"]
+        self.assertEqual(searches, ['SINCE 26-Nov-2026 NOT KEYWORD %s NOT HEADER Message-ID "%s"'
+                                    % (live.SMOKE_TEST_KEYWORD, live.SMOKE_MID_MARK)])
+
+    def test_the_start_time_can_be_set_after_construction(self):
+        self.inbox.add(eml(1), u(2026, 11, 20, 9, 0))
+        uid2 = self.inbox.add(eml(2), u(2026, 11, 28, 8, 0))
+        self.mail.since_utc = u(2026, 11, 27)
+        self.assertEqual([i.server_id for i in self.mail.fetch_new()], ["INBOX:1700000001:%d" % uid2])
+
+    def test_a_naive_start_time_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.make_mail(since_utc=dt.datetime(2026, 11, 27))
+
+    def test_any_answer_order_and_unsolicited_updates_are_read_right(self):
+        self.imap.uid_after_body = True
+        self.imap.unsolicited = True
+        self.inbox.add(eml(1), u(2026, 11, 27, 9, 0))
+        self.inbox.add(eml(2), u(2026, 11, 27, 9, 5))
+        items = self.mail.fetch_new()
+        self.assertEqual([i.raw for i in items], [eml(1), eml(2)])
+        self.assertEqual([i.server_id for i in items], ["INBOX:1700000001:1", "INBOX:1700000001:2"])
+
+    def test_server_ids_are_stable_across_runs_and_change_with_uidvalidity(self):
+        self.inbox.add(eml(1), u(2026, 11, 27, 9, 0))
+        first = [i.server_id for i in self.mail.fetch_new()]
+        self.assertEqual([i.server_id for i in self.make_mail().fetch_new()], first)
+        self.inbox.uidvalidity = 1800000002
+        self.assertEqual([i.server_id for i in self.mail.fetch_new()], ["INBOX:1800000002:1"])
+
+    def test_a_message_the_smoke_marked_as_its_own_is_never_handed_over(self):
+        """The smoke's test request, answered on its own throwaway ledger, carries her keyword
+        SMOKE_TEST_KEYWORD; a live run never reads it, whatever its ledger (only her login can set it)."""
+        for n in range(3):
+            self.inbox.add(eml(n), u(2026, 11, 27, 9, n))
+        self.inbox.messages[2]["flags"].add(live.SMOKE_TEST_KEYWORD)
+        got = self.mail.fetch_new()
+        self.assertEqual([item.server_id for item in got], ["INBOX:1700000001:1", "INBOX:1700000001:3"])
+        (search,) = [args for verb, args in self.imap.commands if verb == "UID SEARCH"]
+        self.assertIn("NOT KEYWORD %s " % live.SMOKE_TEST_KEYWORD, search)
+        self.mail.since_utc = u(2026, 11, 27)
+        self.assertEqual(len(self.mail.fetch_new()), 2)
+
+    def test_a_request_the_smoke_minted_is_never_handed_over_even_unmarked(self):
+        """A smoke cut short (or whose mark failed) between wolf's send and its mark leaves its request
+        in her INBOX without the keyword: its Message-ID, which the smoke mints as SMOKE_TEST_KEYWORD +
+        "." + hex, keeps it from every live run all the same, in the search and again when it is read."""
+        smoke_mid = live.SMOKE_TEST_KEYWORD + ".0123456789abcdef0123456789abcdef@fastmail.com"
+        for n, mid in ((1, None), (2, smoke_mid), (3, "x" + smoke_mid), (4, None)):
+            self.inbox.add(eml(n, mid=mid), u(2026, 11, 27, 9, n))
+        got = self.mail.fetch_new()
+        self.assertEqual([item.raw for item in got], [eml(1), eml(4)])
+        (search,) = [args for verb, args in self.imap.commands if verb == "UID SEARCH"]
+        self.assertTrue(search.endswith('NOT KEYWORD %s NOT HEADER Message-ID "%s."'
+                                        % (live.SMOKE_TEST_KEYWORD, live.SMOKE_TEST_KEYWORD)), search)
+        real_search = live.LiveMail._search                   # a server that leaves that criterion out
+        with mock.patch.object(live.LiveMail, "_search", lambda mail, conn, criteria, step: real_search(
+                mail, conn, criteria[:criteria.index("HEADER") - 1], step)):
+            self.assertEqual([item.raw for item in self.mail.fetch_new()], [eml(1), eml(4)])
+        smoke_run = self.make_mail(smoke_message_id="<%s>" % smoke_mid)    # the smoke's own run still reads it
+        self.inbox.messages[2]["flags"].add(live.SMOKE_TEST_KEYWORD)
+        self.assertEqual([item.raw for item in smoke_run.fetch_new()], [eml(2, mid=smoke_mid)])
+
+    def test_the_smokes_own_run_reads_its_marked_request_and_nothing_else(self):
+        """The smoke's run on its throwaway ledger reads exactly one message: the one carrying her
+        smoke keyword whose Message-ID is the one the smoke minted. Any other mail, a copy without the
+        keyword or a Message-ID that only contains the minted one, is never handed to it."""
+        self.inbox.add(eml(1), u(2026, 11, 27, 9, 1))
+        self.inbox.add(eml(2, mid="smoke-1@fastmail.com"), u(2026, 11, 27, 9, 2))
+        self.inbox.add(eml(3, mid="xsmoke-1@fastmail.com"), u(2026, 11, 27, 9, 3))
+        self.inbox.add(eml(4, mid="smoke-1@fastmail.com"), u(2026, 11, 27, 9, 4))
+        for uid in (2, 3):
+            self.inbox.messages[uid]["flags"].add(live.SMOKE_TEST_KEYWORD)
+        mail = self.make_mail(smoke_message_id="<smoke-1@fastmail.com>")
+        self.assertEqual([item.raw for item in mail.fetch_new()], [eml(2, mid="smoke-1@fastmail.com")])
+        (search,) = [args for verb, args in self.imap.commands if verb == "UID SEARCH"]
+        self.assertTrue(search.endswith('KEYWORD %s HEADER Message-ID "smoke-1@fastmail.com"'
+                                        % live.SMOKE_TEST_KEYWORD), search)
+        for bad in ("no-at-sign", '<a"b@c>', ""):
+            with self.assertRaises(live.ConfigError):
+                self.make_mail(smoke_message_id=bad)
+
+    def test_many_messages_are_fetched_in_batches(self):
+        for n in range(1, 131):
+            self.inbox.add(eml(n), u(2026, 11, 27, 9, 0) + dt.timedelta(minutes=n))
+        items = self.mail.fetch_new()
+        self.assertEqual([i.raw for i in items], [eml(n) for n in range(1, 131)])
+        self.assertGreater(len([v for v in self.imap.verbs() if v == "UID FETCH"]), 2)
+
+    def test_an_empty_inbox_is_an_empty_list(self):
+        self.assertEqual(self.mail.fetch_new(), [])
+
+    def test_a_refused_login_is_a_mail_error_that_carries_no_secret(self):
+        self.imap.password = "dummy-other-pass"
+        with self.assertRaises(MailError) as cm:
+            self.mail.fetch_new()
+        self.assertNotIsInstance(cm.exception, SendUnknown)
+        self.assertIn("login", str(cm.exception))
+        secret_free(self, cm.exception)
+
+    def test_a_dropped_connection_is_a_mail_error_never_an_empty_inbox(self):
+        self.inbox.add(eml(1), u(2026, 11, 27, 9, 0))
+        self.imap.fault["UID FETCH"] = "drop"
+        with self.assertRaises(MailError) as cm:
+            self.mail.fetch_new()
+        secret_free(self, cm.exception)
+
+    def test_a_server_that_hangs_times_out_as_a_mail_error(self):
+        self.imap.fault["EXAMINE"] = "hang"
+        started = time.monotonic()
+        with self.assertRaises(MailError):
+            self.make_mail(timeout_s=0.3).fetch_new()
+        self.assertLess(time.monotonic() - started, 1.4)
+
+    def test_a_refused_examine_is_a_mail_error_naming_the_status(self):
+        self.imap.fault["EXAMINE"] = "no"
+        with self.assertRaises(MailError) as cm:
+            self.mail.fetch_new()
+        self.assertIn("NO", str(cm.exception))
+
+    def test_no_uidvalidity_is_a_failure_not_a_guess(self):
+        self.inbox.add(eml(1), u(2026, 11, 27, 9, 0))
+        self.imap.no_uidvalidity = True
+        with self.assertRaises(MailError):
+            self.mail.fetch_new()
+
+    def test_an_internaldate_at_the_edge_of_time_is_a_mail_error_not_an_overflow(self):
+        for date in ("01-Jan-0001 00:00:00 +0100", "31-Dec-9999 23:30:00 -0100"):
+            self.inbox.messages.clear()
+            uid = self.inbox.add(eml(1), u(2026, 11, 27, 9, 0))
+            self.inbox.messages[uid]["date"] = date
+            err = self.fails_with(MailError, self.mail.fetch_new)
+            self.assertIn("INTERNALDATE", str(err), date)
+
+    def fails_with(self, cls, call, *args):
+        with self.assertRaises(Exception) as cm:
+            call(*args)
+        self.assertIsInstance(cm.exception, cls)
+        secret_free(self, cm.exception)
+        return cm.exception
+
+    def test_a_message_over_the_raw_cap_is_fetched_only_to_one_byte_past_it(self):
+        """Its size is asked with its date; past the cap only a partial fetch goes, and what comes
+        back is still over the cap, so the reader holds it as oversize with a receipt."""
+        small, big = eml(1), eml(2) + b"z" * 5000
+        uid_small = self.inbox.add(small, u(2026, 11, 27, 9, 0))
+        uid_big = self.inbox.add(big, u(2026, 11, 27, 9, 5))
+        with mock.patch.object(caps, "MAX_RAW_BYTES", 2000):
+            items = self.mail.fetch_new()
+            held = screens.oversize(mail_mod.parse_eml(items[1].raw))
+        self.assertEqual([i.raw for i in items], [small, big[:2001]])
+        self.assertEqual((held.settled, held.hold_reason, held.facts["over_raw"]), (True, "hold.oversize", True))
+        fetches = [a for v, a in self.imap.commands if v == "UID FETCH"]
+        self.assertIn("RFC822.SIZE", fetches[0])
+        self.assertIn("%d (UID BODY.PEEK[]<0.2001>)" % uid_big, fetches)
+        whole = [a.split(" ", 1)[0] for a in fetches if a.endswith("BODY.PEEK[])")]
+        self.assertEqual(whole, [str(uid_small)])
+
+    def test_a_size_left_out_of_the_answer_is_a_failure(self):
+        uid = self.inbox.add(eml(1), u(2026, 11, 27, 9, 0))
+        self.imap.no_size.add(uid)
+        with self.assertRaises(MailError):
+            self.mail.fetch_new()
+
+    def test_a_body_left_out_of_the_answer_is_a_failure(self):
+        self.inbox.add(eml(1), u(2026, 11, 27, 9, 0))
+        self.imap.omit.add(1)
+        with self.assertRaises(MailError):
+            self.mail.fetch_new()
+
+    def test_a_connect_failure_is_a_mail_error(self):
+        def refuse(host, port, timeout):
+            raise ConnectionRefusedError("nothing listening")
+        mail = live.LiveMail(env(), DORIS, imap_factory=refuse)
+        with self.assertRaises(MailError) as cm:
+            mail.fetch_new()
+        self.assertIn("ConnectionRefusedError", str(cm.exception))
+
+
+# ===========================================================================================
+# Mail: filing is a keyword on her own copy
+# ===========================================================================================
+class FileTest(ImapFixture):
+
+    def setUp(self):
+        ImapFixture.setUp(self)
+        self.uid = self.inbox.add(eml(1), u(2026, 11, 27, 9, 0), flags={"\\Seen"})
+        self.sid = "INBOX:1700000001:%d" % self.uid
+
+    def test_adds_the_keyword_to_her_copy_and_reads_it_back(self):
+        self.mail.file(self.sid, "doris-file")
+        self.assertEqual(self.inbox.messages[self.uid]["flags"], {"\\Seen", "doris-file"})
+        self.assertEqual([a for v, a in self.imap.commands if v == "UID STORE"],
+                         ["%d +FLAGS (doris-file)" % self.uid])
+        self.assertIn("SELECT", self.imap.verbs())
+
+    def test_reads_the_flags_back_when_the_store_answer_is_silent(self):
+        self.imap.store_quiet = True
+        self.mail.file(self.sid, "doris-held")
+        self.assertIn("doris-held", self.inbox.messages[self.uid]["flags"])
+        self.assertEqual(self.imap.verbs()[-2:], ["UID FETCH", "LOGOUT"])
+
+    def test_a_keyword_the_server_did_not_keep_is_a_failure(self):
+        self.imap.store_ignored = True
+        with self.assertRaises(MailError):
+            self.mail.file(self.sid, "doris-file")
+
+    def test_a_bad_keyword_is_refused_before_any_call(self):
+        for bad in ("", "two words", "\\Deleted", "\\Seen", "a(b", "x" * 65, None, 7, "doris-file\n"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                self.mail.file(self.sid, bad)
+        self.assertEqual(self.imap.commands, [])
+
+    def test_an_id_this_adapter_did_not_hand_out_is_refused_before_any_call(self):
+        for bad in ("01-priya-request.eml", "INBOX:x:1", "Sent:1700000001:1", "INBOX:1:2:3", "INBOX:0:1", None,
+                    "INBOX:1700000001:1\n"):
+            with self.assertRaises(MailError, msg=repr(bad)):
+                self.mail.file(bad, "doris-file")
+        self.assertEqual(self.imap.commands, [])
+
+    def test_a_changed_uidvalidity_files_nothing(self):
+        self.inbox.uidvalidity = 1800000002
+        with self.assertRaises(MailError):
+            self.mail.file(self.sid, "doris-file")
+        self.assertNotIn("UID STORE", self.imap.verbs())
+        self.assertEqual(self.inbox.messages[self.uid]["flags"], {"\\Seen"})
+
+    def test_a_message_that_is_gone_is_a_failure(self):
+        with self.assertRaises(MailError):
+            self.mail.file("INBOX:1700000001:99", "doris-file")
+
+    def test_a_refused_store_is_a_mail_error(self):
+        self.imap.fault["UID STORE"] = "no"
+        with self.assertRaises(MailError) as cm:
+            self.mail.file(self.sid, "doris-file")
+        self.assertIn("NO", str(cm.exception))
+
+
+# ===========================================================================================
+# Mail: find_in_sent looks in the folder flagged \Sent, by Message-ID, and writes nothing
+# ===========================================================================================
+class SentTest(ImapFixture):
+
+    def setUp(self):
+        ImapFixture.setUp(self)
+        self.sent = self.imap.boxes["Sent Items"] = Box(1700000002, special=("\\Sent",))
+
+    def test_finds_her_message_by_message_id_with_or_without_brackets(self):
+        self.sent.add(eml(1, mid="0f3a9c@fastmail.com"), u(2026, 11, 27, 9, 0))
+        self.assertTrue(self.mail.find_in_sent("<0f3a9c@fastmail.com>"))
+        self.assertTrue(self.mail.find_in_sent("0f3a9c@fastmail.com"))
+        self.assertFalse(self.mail.find_in_sent("<ffffff@fastmail.com>"))
+
+    def test_the_folder_is_found_by_its_special_use_flag_never_by_its_name(self):
+        decoy = self.imap.boxes["Sent"] = Box(1700000003)
+        decoy.add(eml(2, mid="decoy@fastmail.com"), u(2026, 11, 27, 9, 0))
+        self.assertFalse(self.mail.find_in_sent("<decoy@fastmail.com>"))
+        self.assertEqual([a for v, a in self.imap.commands if v == "EXAMINE"], ['"Sent Items"'])
+
+    def test_a_message_id_that_only_contains_hers_is_not_a_match(self):
+        self.sent.add(eml(1, mid="x0f3a9c@fastmail.com.example"), u(2026, 11, 27, 9, 0))
+        self.assertFalse(self.mail.find_in_sent("<0f3a9c@fastmail.com>"))
+
+    def test_reads_read_only_and_never_writes(self):
+        uid = self.sent.add(eml(1, mid="0f3a9c@fastmail.com"), u(2026, 11, 27, 9, 0))
+        self.mail.find_in_sent("<0f3a9c@fastmail.com>")
+        self.assertTrue(set(self.imap.verbs()) <= {"CAPABILITY", "LOGIN", "LIST", "EXAMINE", "UID SEARCH",
+                                                   "UID FETCH", "LOGOUT"})
+        self.assertEqual(self.sent.messages[uid]["flags"], set())
+
+    def test_asks_for_special_use_and_falls_back_to_a_plain_list(self):
+        self.sent.add(eml(1, mid="0f3a9c@fastmail.com"), u(2026, 11, 27, 9, 0))
+        self.assertTrue(self.mail.find_in_sent("<0f3a9c@fastmail.com>"))
+        self.assertEqual([a for v, a in self.imap.commands if v == "LIST"], ['"" "*" RETURN (SPECIAL-USE)'])
+        self.imap.list_return_refused = True
+        self.assertTrue(self.mail.find_in_sent("<0f3a9c@fastmail.com>"))
+        self.assertEqual([a for v, a in self.imap.commands if v == "LIST"][1:],
+                         ['"" "*" RETURN (SPECIAL-USE)', '"" *'])
+
+    def test_names_sent_as_literals_and_extended_list_data_are_read(self):
+        self.imap.literal_names = True
+        self.imap.extended_data = True
+        self.sent.add(eml(1, mid="0f3a9c@fastmail.com"), u(2026, 11, 27, 9, 0))
+        self.assertTrue(self.mail.find_in_sent("<0f3a9c@fastmail.com>"))
+
+    def test_every_folder_flagged_sent_is_searched(self):
+        other = self.imap.boxes["Sent Archive"] = Box(1700000004, special=("\\Sent",))
+        other.add(eml(1, mid="0f3a9c@fastmail.com"), u(2026, 11, 27, 9, 0))
+        self.assertTrue(self.mail.find_in_sent("<0f3a9c@fastmail.com>"))
+
+    def test_no_folder_flagged_sent_is_a_failure_not_a_guess(self):
+        self.sent.special = set()
+        self.imap.boxes["Sent"] = Box(1700000003)
+        with self.assertRaises(MailError) as cm:
+            self.mail.find_in_sent("<0f3a9c@fastmail.com>")
+        self.assertIn("Sent", str(cm.exception))
+
+    def test_a_lookup_that_fails_is_a_mail_error_never_false(self):
+        self.imap.fault["UID SEARCH"] = "no"
+        with self.assertRaises(MailError):
+            self.mail.find_in_sent("<0f3a9c@fastmail.com>")
+
+    def test_a_match_the_fetch_then_leaves_out_is_a_mail_error_never_false(self):
+        """Expunged between the search and the fetch: it cannot tell, so it does not say absent."""
+        uid = self.sent.add(eml(1, mid="0f3a9c@fastmail.com"), u(2026, 11, 27, 9, 0))
+        self.imap.omit.add(uid)
+        with self.assertRaises(MailError):
+            self.mail.find_in_sent("<0f3a9c@fastmail.com>")
+
+    def test_a_header_answer_that_is_not_a_literal_is_a_mail_error_never_false(self):
+        self.sent.add(eml(1, mid="0f3a9c@fastmail.com"), u(2026, 11, 27, 9, 0))
+        self.imap.header_nil = True
+        with self.assertRaises(MailError):
+            self.mail.find_in_sent("<0f3a9c@fastmail.com>")
+
+    def test_a_match_read_whole_is_found_whatever_another_match_does(self):
+        """Found is found: a second match that cannot be read does not undo it."""
+        near = self.sent.add(eml(1, mid="x0f3a9c@fastmail.com.example"), u(2026, 11, 27, 9, 0))
+        self.sent.add(eml(2, mid="0f3a9c@fastmail.com"), u(2026, 11, 27, 9, 1))
+        self.imap.omit.add(near)
+        self.assertTrue(self.mail.find_in_sent("<0f3a9c@fastmail.com>"))
+
+    def test_a_message_id_it_cannot_search_for_is_refused_before_any_call(self):
+        for bad in ("", "<>", None, 'a"b@fastmail.com', "no-at-sign", "a b@fastmail.com", "a\r\nb@fastmail.com",
+                    "a\\b@fastmail.com", "<<x@fastmail.com>>x"):
+            with self.assertRaises(MailError, msg=repr(bad)):
+                self.mail.find_in_sent(bad)
+        self.assertEqual(self.imap.commands, [])
+
+
+class InboxLookupTest(ImapFixture):
+    """find_in_inbox: the smoke's look for its own test request in her INBOX, by Message-ID."""
+
+    def test_finds_every_inbox_copy_by_message_id_with_or_without_brackets(self):
+        self.inbox.add(eml(1), u(2026, 11, 27, 9))
+        self.inbox.add(eml(2, mid="smoke-1@fastmail.com"), u(2026, 11, 27, 10))
+        self.assertEqual(self.mail.find_in_inbox("<smoke-1@fastmail.com>"), ["INBOX:1700000001:2"])
+        self.assertEqual(self.mail.find_in_inbox("smoke-1@fastmail.com"), ["INBOX:1700000001:2"])
+        self.inbox.add(eml(3, mid="smoke-1@fastmail.com"), u(2026, 11, 27, 11))
+        self.assertEqual(self.mail.find_in_inbox("<smoke-1@fastmail.com>"), ["INBOX:1700000001:2",
+                                                                             "INBOX:1700000001:3"])
+
+    def test_none_there_is_an_empty_list_and_a_message_id_that_only_contains_it_is_not_a_match(self):
+        self.inbox.add(eml(1, mid="xsmoke-1@fastmail.com"), u(2026, 11, 27, 9))
+        self.assertEqual(self.mail.find_in_inbox("<smoke-1@fastmail.com>"), [])
+
+    def test_reads_read_only_and_never_writes(self):
+        self.inbox.add(eml(2, mid="smoke-1@fastmail.com"), u(2026, 11, 27, 10))
+        self.mail.find_in_inbox("<smoke-1@fastmail.com>")
+        self.assertIn("EXAMINE", self.imap.verbs())
+        self.assertFalse({"SELECT", "UID STORE"} & set(self.imap.verbs()))
+
+    def test_a_match_it_cannot_read_is_a_mail_error_never_a_miss(self):
+        uid = self.inbox.add(eml(2, mid="smoke-1@fastmail.com"), u(2026, 11, 27, 10))
+        self.imap.omit.add(uid)
+        with self.assertRaises(MailError):
+            self.mail.find_in_inbox("<smoke-1@fastmail.com>")
+
+    def test_a_message_id_it_cannot_search_for_is_refused_before_any_call(self):
+        for bad in ("", None, "no-at-sign", '<a"b@c>'):
+            with self.assertRaises(MailError):
+                self.mail.find_in_inbox(bad)
+        self.assertEqual(self.imap.commands, [])
+
+
+class ProbeTest(ImapFixture):
+    """What the smoke checks: login with the INBOX count, and the Sent folder by special-use."""
+
+    def test_inbox_count_examines_inbox(self):
+        for n in range(3):
+            self.inbox.add(eml(n), u(2026, 11, 27, 9, n))
+        self.assertEqual(self.mail.inbox_count(), 3)
+        self.assertIn("EXAMINE", self.imap.verbs())
+        self.assertNotIn("SELECT", self.imap.verbs())
+
+    def test_sent_folders_names_every_folder_flagged_sent(self):
+        self.imap.boxes["Sent Items"] = Box(1700000002, special=("\\Sent",))
+        self.imap.boxes["Drafts"] = Box(1700000005, special=("\\Drafts",))
+        self.assertEqual(self.mail.sent_folders(), ["Sent Items"])
+
+    def test_probes_fail_loudly(self):
+        self.imap.password = "dummy-other-pass"
+        for probe in (self.mail.inbox_count, self.mail.sent_folders):
+            with self.assertRaises(MailError):
+                probe()
+
+
+class DefaultTransportTest(unittest.TestCase):
+    """Without a factory the adapters use TLS that verifies the server, with the timeout given."""
+
+    def test_tls_is_1_2_or_newer_even_where_the_default_context_allows_older(self):
+        real = ssl.create_default_context
+
+        def as_on_3_9(*args, **kw):          # 3.9's default context sets no floor of its own
+            ctx = real(*args, **kw)
+            ctx.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+            return ctx
+        with mock.patch.object(ssl, "create_default_context", as_on_3_9):
+            ctx = live._tls()
+        self.assertEqual(ctx.minimum_version, ssl.TLSVersion.TLSv1_2)
+        self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(ctx.check_hostname)
+
+    def test_imap_is_tls_with_a_verified_certificate_and_the_timeout(self):
+        seen = {}
+
+        def fake(host, port, ssl_context=None, timeout=None):
+            seen.update(host=host, port=port, ctx=ssl_context, timeout=timeout)
+            raise ConnectionRefusedError("stop here")
+        with mock.patch.object(imaplib, "IMAP4_SSL", fake):
+            with self.assertRaises(MailError):
+                live.LiveMail(env(), DORIS, timeout_s=7).fetch_new()
+        self.assertEqual((seen["host"], seen["port"], seen["timeout"]), ("imap.fastmail.com", 993, 7.0))
+        self.assertEqual(seen["ctx"].verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(seen["ctx"].check_hostname)
+
+    def test_her_send_is_jmap_over_verified_https_to_fastmail_with_the_timeout(self):
+        seen = {}
+
+        def fake(host, port=None, timeout=None, context=None, **kw):
+            seen.update(host=host, port=port, timeout=timeout, context=context)
+            raise ConnectionRefusedError("stop here")
+        with mock.patch.object(http.client, "HTTPSConnection", fake):
+            with self.assertRaises(MailError) as cm:
+                live.LiveMail(env(), DORIS, timeout_s=7).send(reply_bytes(), [PROSPECT], MID)
+        self.assertNotIsInstance(cm.exception, SendUnknown)
+        self.assertEqual((seen["host"], seen["port"], seen["timeout"]), ("api.fastmail.com", 443, 7.0))
+        self.assertEqual(seen["context"].verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(seen["context"].check_hostname)
+        self.assertEqual(seen["context"].minimum_version, ssl.TLSVersion.TLSv1_2)
+
+
+# ===========================================================================================
+# Mail: send, over JMAP (adapters/jmap.py) against fake_jmap's server
+# ===========================================================================================
+PROSPECT = "prospect@example.com"
+MID = "<5d1e0c2b9a@fastmail.com>"
+
+
+def reply_bytes(mid=MID, sender=DORIS, extra=b""):
+    return (b"From: " + sender.encode() + b"\r\nTo: " + PROSPECT.encode() + b"\r\nSubject: Re: hello\r\n"
+            b"Date: Fri, 27 Nov 2026 18:00:00 +0000\r\nMessage-ID: " + mid.encode() + b"\r\n" + extra
+            + b"Auto-Submitted: auto-replied\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"utf-8\"\r\n"
+            b"\r\nHello.\r\n.a line that starts with a dot\r\n..and one with two\r\n")
+
+
+class JmapSendFixture(unittest.TestCase):
+    """LiveMail with its JMAP transport dialing fake_jmap's server: the real session URL on
+    api.fastmail.com, whose session names apiUrl and uploadUrl on the account's own host below it
+    (phl.api.fastmail.com), as Fastmail's does."""
+
+    def setUp(self):
+        self.jmap = FakeJMAP().as_fastmail()
+        self.addCleanup(self.jmap.stop)
+        self.dialed = []
+        self.mail = self.make_mail()
+
+    def make_mail(self, timeout_s=2.0, **kw):
+        return live.LiveMail(env(), DORIS, timeout_s=timeout_s, jmap_factory=self.factory, **kw)
+
+    def factory(self, host, port, timeout):
+        self.dialed.append((host, port, timeout))
+        return http.client.HTTPConnection("127.0.0.1", self.jmap.port, timeout=timeout)
+
+    def refused(self, *args, **kw):
+        with self.assertRaises(MailError) as cm:
+            self.mail.send(*args, **kw)
+        self.assertNotIsInstance(cm.exception, SendUnknown)
+        secret_free(self, cm.exception)
+        self.assertNotIn(TOKEN, str(cm.exception))
+        return cm.exception
+
+
+class SendTest(JmapSendFixture):
+    """LiveMail.send keeps its contract over JMAP: once, exactly the envelope given, never a retry;
+    MailError when it surely did not go, SendUnknown when it may have."""
+
+    def test_her_message_goes_once_over_jmap_to_exactly_the_envelope_given(self):
+        self.assertIsNone(self.mail.send(reply_bytes(), [PROSPECT, OWNER], MID, template="T2"))
+        self.assertEqual(self.jmap.delivered, [(DORIS, [PROSPECT, OWNER], reply_bytes())])
+        self.assertEqual(self.jmap.kinds(), ["session", "setup", "upload", "send"])
+        self.assertEqual(self.dialed, [("api.fastmail.com", 443, 2.0)] + [("phl.api.fastmail.com", 443, 2.0)] * 3)
+        self.assertIs(self.mail.last_copy_in_sent, True)
+
+    def test_a_session_that_names_api_fastmail_com_itself_sends_there(self):
+        self.jmap.as_fastmail(SESSION_HOST)
+        self.assertIsNone(self.mail.send(reply_bytes(), [PROSPECT], MID))
+        self.assertEqual(self.dialed, [("api.fastmail.com", 443, 2.0)] * 4)
+
+    def test_what_the_sender_refuses_reaches_no_server(self):
+        for raw, to, mid in ((reply_bytes(extra=b"Bcc: hidden@example.com\r\n"), [PROSPECT], MID),
+                             (reply_bytes(sender=OWNER), [PROSPECT], MID),
+                             (reply_bytes(), [PROSPECT], "<another@fastmail.com>"),
+                             (reply_bytes(), ["Name <%s>" % PROSPECT], MID)):
+            self.assertIn("refused before connecting", str(self.refused(raw, to, mid)))
+        self.assertEqual((self.dialed, self.jmap.requests), ([], []))
+
+    def test_a_submission_turned_away_surely_did_not_go(self):
+        self.jmap.status["send"] = 400
+        self.assertEqual(str(self.refused(reply_bytes(), [PROSPECT], MID)), "jmap send: 400")
+        self.assertEqual(self.jmap.delivered, [])
+
+    def test_an_answer_lost_after_the_submission_went_is_send_unknown_and_never_retried(self):
+        for fault in ("drop", "garbage", 502):
+            self.jmap.fault["send"] = fault
+            with self.assertRaises(SendUnknown) as cm:
+                self.mail.send(reply_bytes(), [PROSPECT], MID)
+            secret_free(self, cm.exception)
+        self.assertEqual(self.jmap.kinds().count("send"), 3)       # one request per send, no retry inside
+        self.assertEqual(len(self.jmap.delivered), 3)
+
+    def test_a_copy_that_did_not_reach_sent_is_said(self):
+        self.jmap.fail_update = "invalidPatch"
+        self.mail.send(reply_bytes(), [PROSPECT], MID)
+        self.assertIs(self.mail.last_copy_in_sent, False)
+
+    def test_check_send_login_reads_the_session_and_sends_nothing(self):
+        self.assertIsNone(self.mail.check_send_login())
+        self.assertEqual(self.jmap.kinds(), ["session", "setup"])
+        self.assertEqual(self.jmap.delivered, [])
+        self.jmap.token = "dummy-another-jmap-token-that-is-long-enough"
+        with self.assertRaises(MailError) as cm:
+            self.mail.check_send_login()
+        self.assertEqual(str(cm.exception), "jmap session: 401")
+
+
+# ===========================================================================================
+# A fake CalDAV server for the real http.client
+# ===========================================================================================
+COLLECTION = "/dav/calendars/user/doris.htm@fastmail.com/owner-shared-cal/"
+BID = "doris-0123456789abcdef01234567"
+D_NS, C_NS = "{DAV:}", "{urn:ietf:params:xml:ns:caldav}"
+S = u(2026, 12, 7, 17, 0)                  # Monday Dec 7, 9:00 AM Pacific
+E = u(2026, 12, 7, 18, 0)
+HOUR, DAY = dt.timedelta(hours=1), dt.timedelta(days=1)
+SLOT = Slot(u(2027, 3, 1, 18, 0), u(2027, 3, 1, 18, 30))
+
+
+def stamp(moment):
+    return moment.strftime("%Y%m%dT%H%M%SZ")
+
+
+def timed(uid, start, end, *more):
+    return ["UID:" + uid, "DTSTAMP:20261101T000000Z", "DTSTART:" + stamp(start), "DTEND:" + stamp(end)] + list(more)
+
+
+def vcal(*events):
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//test//EN"]
+    for ev in events:
+        lines += ["BEGIN:VEVENT"] + list(ev) + ["END:VEVENT"]
+    return ("\r\n".join(lines + ["END:VCALENDAR"]) + "\r\n").encode("utf-8")
+
+
+def item(name, data=None, prop_status="200 OK", status=None, href=None):
+    return {"href": href or COLLECTION + name, "data": data, "prop_status": prop_status, "status": status}
+
+
+def multistatus(items):
+    out = ['<?xml version="1.0" encoding="utf-8"?>',
+           '<d:multistatus xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav">']
+    for it in items:
+        out.append("<d:response><d:href>%s</d:href>" % escape(it["href"]))
+        if it.get("status"):
+            out.append("<d:status>HTTP/1.1 %s</d:status>" % it["status"])
+        else:
+            data = it.get("data")
+            text = escape(data.decode("utf-8") if isinstance(data, bytes) else data) if data is not None else ""
+            out.append("<d:propstat><d:prop><cal:calendar-data>%s</cal:calendar-data></d:prop>"
+                       "<d:status>HTTP/1.1 %s</d:status></d:propstat>" % (text, it.get("prop_status") or "200 OK"))
+        out.append("</d:response>")
+    out.append("</d:multistatus>")
+    return "\n".join(out).encode("utf-8")
+
+
+def her_event(bid=BID, slot=SLOT, method=None):
+    return ics.build_event(bid, slot, LINK, "CONFIRMED", 0, u(2026, 11, 27, 12), method)
+
+
+def basic(user, password):
+    return "Basic " + base64.b64encode(("%s:%s" % (user, password)).encode()).decode()
+
+
+class FakeCalDAV(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    block_on_close = False
+
+    def __init__(self):
+        http.server.ThreadingHTTPServer.__init__(self, ("127.0.0.1", 0), CalDAVHandler)
+        self.auth = basic(DORIS, PASSWORD)
+        self.resources = {}           # resource name -> (etag, bytes)
+        self.requests = []            # (method, path, headers with lowercase names, body)
+        self.report = None            # the REPORT answer's items (None: every resource, unfiltered)
+        self.raw_answer = None        # (status, content type, bytes) answering REPORT and PROPFIND instead
+        self.display_name = "Bookings with Doris"   # the collection's DAV:displayname (None: it has none)
+        self.status = {}              # method -> a status to answer with instead
+        self.fault = {}               # method -> "drop" (close, no answer) | "hang" | "drip" | "drip_body"
+        self.hang_s = 1.5
+        self.drip_s = 0.02            # "drip": the whole answer a byte at a time; "drip_body": the body only
+        self.delay = {}               # method -> seconds to wait before answering as usual
+        self.on_request = None        # called (method, resource name) as each request arrives
+        self.etags = 0
+        self.thread = threading.Thread(target=self.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+        self.thread.start()
+
+    @property
+    def port(self):
+        return self.server_address[1]
+
+    def stop(self):
+        self.shutdown()
+        self.server_close()
+
+    def put(self, name, data):
+        self.etags += 1
+        self.resources[name] = ('"etag-%d"' % self.etags, data)
+
+    def handle_error(self, request, client_address):
+        """A client that gave up before the answer was written (the deadline tests' point) is no
+        error of the fake's; anything else is printed as usual."""
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        http.server.ThreadingHTTPServer.handle_error(self, request, client_address)
+
+    def methods(self):
+        return [r[0] for r in self.requests]
+
+
+class CalDAVHandler(http.server.BaseHTTPRequestHandler):
+    disable_nagle_algorithm = True
+
+    def log_message(self, *args):
+        pass
+
+    def answer(self, code, body=b"", headers=()):
+        self.send_response(code)
+        for name, value in headers:
+            self.send_header(name, value)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def any_method(self):
+        srv = self.server
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        srv.requests.append((self.command, self.path, {k.lower(): v for k, v in self.headers.items()}, body))
+        if srv.on_request is not None:
+            srv.on_request(self.command, self.name())
+        fault = srv.fault.get(self.command)
+        if fault in ("drop", "hang"):
+            if fault == "hang":
+                time.sleep(srv.hang_s)
+            self.close_connection = True
+            return
+        time.sleep(srv.delay.get(self.command, 0))
+        if fault in ("drip", "drip_body"):
+            return self.drip(body, whole=fault == "drip")
+        self.respond(body)
+
+    def respond(self, body):
+        srv = self.server
+        if self.headers.get("Authorization") != srv.auth:
+            return self.answer(401, b"who", [("WWW-Authenticate", 'Basic realm="fake"')])
+        if self.command in srv.status:
+            return self.answer(srv.status[self.command], b"no")
+        getattr(self, "on_" + self.command)(body)
+
+    def drip(self, body, whole):
+        """The usual answer, sent one byte every drip_s: all of it, or the body after the headers."""
+        real, self.wfile = self.wfile, io.BytesIO()
+        try:
+            self.respond(body)
+            data = self.wfile.getvalue()
+        finally:
+            self.wfile = real
+        start = 0 if whole else data.index(b"\r\n\r\n") + 4
+        self.close_connection = True
+        try:
+            real.write(data[:start])
+            for i in range(start, len(data)):
+                real.write(data[i:i + 1])
+                time.sleep(self.server.drip_s)
+        except OSError:
+            pass                      # the client gave up: that is the point
+
+    do_REPORT = do_PROPFIND = do_PUT = do_GET = do_DELETE = any_method
+
+    def name(self):
+        return urllib.parse.unquote(self.path[len(COLLECTION):]) if self.path.startswith(COLLECTION) else None
+
+    def on_GET(self, body):
+        found = self.server.resources.get(self.name())
+        if found is None:
+            return self.answer(404)
+        etag = [("ETag", found[0])] if found[0] is not None else []      # None: the server sends no ETag
+        self.answer(200, found[1], etag + [("Content-Type", "text/calendar; charset=utf-8")])
+
+    def on_PUT(self, body):
+        srv, name = self.server, self.name()
+        if self.headers.get("If-None-Match") == "*" and name in srv.resources:
+            return self.answer(412)
+        srv.put(name, body)
+        self.answer(201, b"", [("ETag", srv.resources[name][0])])
+
+    def on_DELETE(self, body):
+        srv, name = self.server, self.name()
+        found = srv.resources.get(name)
+        if found is None:
+            return self.answer(404)
+        if self.headers.get("If-Match") not in (None, found[0]):
+            return self.answer(412)
+        del srv.resources[name]
+        self.answer(204)
+
+    def on_REPORT(self, body):
+        srv = self.server
+        if srv.raw_answer is not None:
+            code, kind, data = srv.raw_answer
+            return self.answer(code, data, [("Content-Type", kind)])
+        items = srv.report
+        if items is None:
+            uid = report_uid(body)
+            items = [item(name, data) for name, (_, data) in sorted(srv.resources.items())
+                     if uid is None or any(uid in v.uid for v in ics.read_events(data))]
+        self.answer(207, multistatus(items), [("Content-Type", "application/xml; charset=utf-8")])
+
+
+    def on_PROPFIND(self, body):
+        srv = self.server
+        if srv.raw_answer is not None:
+            code, kind, data = srv.raw_answer
+            return self.answer(code, data, [("Content-Type", kind)])
+        if self.path != COLLECTION or self.headers.get("Depth") != "0":
+            return self.answer(400, b"the collection alone, Depth 0")
+        if srv.display_name is None:
+            prop, status = "<d:displayname/>", "404 Not Found"
+        else:
+            prop, status = "<d:displayname>%s</d:displayname>" % escape(srv.display_name, {"\r": "&#13;"}), "200 OK"
+        data = ('<?xml version="1.0" encoding="utf-8"?>\n<d:multistatus xmlns:d="DAV:"><d:response>'
+                "<d:href>%s</d:href><d:propstat><d:prop>%s</d:prop><d:status>HTTP/1.1 %s</d:status></d:propstat>"
+                "</d:response></d:multistatus>" % (escape(COLLECTION), prop, status)).encode("utf-8")
+        self.answer(207, data, [("Content-Type", "application/xml; charset=utf-8")])
+
+
+def report_uid(body):
+    """The text a calendar-query matches UIDs against (RFC 4791 9.7.5: a substring), or None."""
+    for prop in ET.fromstring(body).iter(C_NS + "prop-filter"):
+        if prop.get("name") == "UID":
+            return prop.find(C_NS + "text-match").text
+    return None
+
+
+def closed_port():
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+class CalFixture(unittest.TestCase):
+
+    def setUp(self):
+        self.dav = FakeCalDAV()
+        self.addCleanup(self.dav.stop)
+        self.dialed = []
+        self.cal = self.make_calendar()
+
+    def make_calendar(self, timeout_s=2.0, port=None):
+        def factory(host, port_, timeout):
+            self.dialed.append((host, port_, timeout))
+            return http.client.HTTPConnection("127.0.0.1", port or self.dav.port, timeout=timeout)
+        return live.LiveCalendar(env(), timeout_s=timeout_s, http_factory=factory)
+
+    def tearDown(self):
+        """Only the calendar's own resources, only these five methods, never a DELETE of the collection;
+        the two that read the collection itself (REPORT, PROPFIND) never write."""
+        for method, path, headers, body in self.dav.requests:
+            self.assertIn(method, ("REPORT", "PROPFIND", "PUT", "GET", "DELETE"))
+            self.assertTrue(path.startswith(COLLECTION), path)
+            if method not in ("REPORT", "PROPFIND"):
+                self.assertTrue(path.endswith(".ics") and "/" not in path[len(COLLECTION):], path)
+
+    def fails(self, cls, call, *args):
+        with self.assertRaises(cls) as cm:
+            call(*args)
+        secret_free(self, cm.exception)
+        return cm.exception
+
+
+# ===========================================================================================
+# Calendar: its display name (for the smoke to print)
+# ===========================================================================================
+class DisplayNameTest(CalFixture):
+
+    def answer(self, body, status=207):
+        self.dav.raw_answer = (status, "application/xml; charset=utf-8", body)
+
+    def test_one_depth_0_propfind_on_the_collection_asks_for_the_display_name_alone(self):
+        self.assertEqual(self.cal.display_name(), "Bookings with Doris")
+        (method, path, headers, body), = self.dav.requests
+        self.assertEqual((method, path, headers["depth"]), ("PROPFIND", COLLECTION, "0"))
+        self.assertEqual(headers["authorization"], self.dav.auth)
+        root = ET.fromstring(body)
+        self.assertEqual(root.tag, D_NS + "propfind")
+        self.assertEqual([child.tag for child in root.find(D_NS + "prop")], [D_NS + "displayname"])
+
+    def test_the_name_comes_back_as_the_server_wrote_it(self):
+        for name in ("  Owner & Doris <bookings>  ", "Caf\u00e9 \u2615", "two\nlines\r\n", "\u202eright to left"):
+            self.dav.display_name = name
+            self.assertEqual(self.cal.display_name(), name)
+
+    def test_no_display_name_or_an_empty_one_is_a_calendar_error(self):
+        for name in (None, ""):
+            self.dav.display_name = name
+            exc = self.fails(CalendarError, self.cal.display_name)
+            self.assertEqual(str(exc), "caldav display name: the calendar reports no display name")
+
+    def test_an_answer_other_than_207_is_a_calendar_error_naming_the_status(self):
+        self.dav.status["PROPFIND"] = 403
+        self.assertEqual(str(self.fails(CalendarError, self.cal.display_name)), "caldav display name: 403")
+
+    def test_a_name_given_for_another_resource_is_not_taken(self):
+        self.answer(('<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/dav/other/</d:href>'
+                     "<d:propstat><d:prop><d:displayname>Other</d:displayname></d:prop>"
+                     "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>").encode())
+        self.fails(CalendarError, self.cal.display_name)
+
+    def test_a_doctype_or_unreadable_answer_is_refused(self):
+        self.answer(b'<?xml version="1.0"?><!DOCTYPE d [<!ENTITY a "aa">]><d:multistatus xmlns:d="DAV:">'
+                    b"<d:response><d:href>" + COLLECTION.encode() + b"</d:href><d:propstat><d:prop>"
+                    b"<d:displayname>&a;</d:displayname></d:prop><d:status>HTTP/1.1 200 OK</d:status>"
+                    b"</d:propstat></d:response></d:multistatus>")
+        self.assertIn("DOCTYPE", str(self.fails(CalendarError, self.cal.display_name)))
+        self.answer(b"<d:multistatus xmlns:d=")
+        self.fails(CalendarError, self.cal.display_name)
+
+    def test_no_answer_in_time_is_a_calendar_timeout(self):
+        self.dav.fault["PROPFIND"] = "hang"
+        self.cal = self.make_calendar(timeout_s=0.3)
+        self.fails(CalendarTimeout, self.cal.display_name)
+
+
+# ===========================================================================================
+# Calendar: query
+# ===========================================================================================
+class QueryTest(CalFixture):
+
+    def test_a_calendar_query_report_asks_for_times_status_and_transparency_with_server_expansion(self):
+        self.cal.query(S, E)
+        (method, path, headers, body), = self.dav.requests
+        self.assertEqual((method, path, headers["depth"]), ("REPORT", COLLECTION, "1"))
+        self.assertEqual(headers["authorization"], self.dav.auth)
+        self.assertEqual(self.dialed, [("caldav.fastmail.com", 443, 2.0)])
+        root = ET.fromstring(body)
+        self.assertEqual(root.tag, C_NS + "calendar-query")
+        data = root.find(D_NS + "prop/" + C_NS + "calendar-data")
+        self.assertEqual([c.get("name") for c in data.iter(C_NS + "comp")], ["VCALENDAR", "VEVENT"])
+        calendar, = data.findall(C_NS + "comp")
+        event, = calendar.findall(C_NS + "comp")
+        self.assertEqual([p.get("name") for p in calendar.findall(C_NS + "prop")], ["VERSION"])
+        self.assertEqual({p.get("name") for p in event.findall(C_NS + "prop")},
+                         {"UID", "DTSTART", "DTEND", "DURATION", "STATUS", "TRANSP", "RECURRENCE-ID", "RRULE", "RDATE"})
+        self.assertEqual(len(list(data.iter(C_NS + "prop"))), 10)       # no title, no description, no people
+        window = (stamp(S - 2 * DAY), stamp(E + 2 * DAY))     # padded: any zone's all-day event is caught
+        expand = data.find(C_NS + "expand")
+        self.assertEqual((expand.get("start"), expand.get("end")), window)
+        self.assertEqual([c.get("name") for c in root.iter(C_NS + "comp-filter")], ["VCALENDAR", "VEVENT"])
+        span = root.find("/".join([C_NS + "filter", C_NS + "comp-filter", C_NS + "comp-filter", C_NS + "time-range"]))
+        self.assertEqual((span.get("start"), span.get("end")), window)
+
+    def test_events_come_back_as_times_status_and_transparency_never_a_title(self):
+        self.dav.report = [
+            item("a.ics", vcal(timed("ev-a", S, E, "STATUS:TENTATIVE", "TRANSP:TRANSPARENT",
+                                     "SUMMARY:Board meeting", "DESCRIPTION:private notes"))),
+            item("b.ics", vcal(timed("ev-b", S + HOUR / 2, E + HOUR / 2))),
+        ]
+        events = self.cal.query(S, E)
+        self.assertEqual(events, [Event("ev-a", "TENTATIVE", "TRANSPARENT", "timed", S, E),
+                                  Event("ev-b", "", "", "timed", S + HOUR / 2, E + HOUR / 2)])
+        self.assertNotIn("Board meeting", repr(events))
+        self.assertEqual(self.cal.last_query_whole_span, 0)
+
+    def test_repeats_the_server_expanded_come_back_one_event_each(self):
+        weekly = vcal(timed("weekly", S - DAY, E - DAY, "RECURRENCE-ID:" + stamp(S - DAY)),
+                      timed("weekly", S, E, "RECURRENCE-ID:" + stamp(S)))
+        self.dav.report = [item("w.ics", weekly)]
+        self.assertEqual(self.cal.query(S, E), [Event("weekly", "", "", "timed", S, E)])
+
+    def test_a_repeat_the_server_did_not_expand_is_busy_over_the_whole_span(self):
+        self.dav.report = [item("w.ics", vcal(timed("weekly", S - 7 * DAY, E - 7 * DAY, "RRULE:FREQ=WEEKLY",
+                                                    "STATUS:CONFIRMED"))),
+                           item("r.ics", vcal(timed("odd", S - 3 * DAY, E - 3 * DAY, "RDATE:" + stamp(S))))]
+        self.assertEqual(self.cal.query(S, E), [Event("odd", "", "", "timed", S, E),
+                                                Event("weekly", "CONFIRMED", "", "timed", S, E)])
+        self.assertEqual(self.cal.last_query_whole_span, 2)
+
+    def test_an_event_it_cannot_read_is_busy_over_the_whole_span(self):
+        self.dav.report = [item("bad.ics", b"BEGIN:VCALENDAR\r\nnot ics\r\n"),
+                           item("gone.ics", None, prop_status="404 Not Found"),
+                           item("x", status="403 Forbidden",
+                                href="https://caldav.fastmail.com" + COLLECTION + "forbidden.ics")]
+        events = self.cal.query(S, E)
+        self.assertEqual([(e.uid, e.status, e.kind, e.start_utc, e.end_utc) for e in events],
+                         [("bad", "", "timed", S, E), ("forbidden", "", "timed", S, E), ("gone", "", "timed", S, E)])
+        self.assertEqual(self.cal.last_query_whole_span, 3)
+
+    def test_an_event_at_the_end_of_time_is_busy_over_the_whole_span_not_a_crash(self):
+        self.dav.report = [item("end.ics", vcal(["UID:end-of-time", "DTSTART;VALUE=DATE:99991231"]))]
+        self.assertEqual(self.cal.query(S, E), [Event("end", "", "", "timed", S, E)])
+
+    def test_only_events_touching_the_span_are_kept_and_cancelled_ones_keep_their_status(self):
+        self.dav.report = [item("1.ics", vcal(timed("before", S - HOUR, S))),          # back to back
+                           item("2.ics", vcal(timed("after", E, E + HOUR))),
+                           item("3.ics", vcal(timed("cancelled", S, E, "STATUS:CANCELLED"))),
+                           item("4.ics", vcal(timed("zero", S, S)))]                   # a moment at the start
+        self.assertEqual([(e.uid, e.status) for e in self.cal.query(S, E)], [("cancelled", "CANCELLED"), ("zero", "")])
+
+    def test_an_all_day_event_is_its_pacific_day(self):
+        self.dav.report = [item("d.ics", vcal(["UID:allday", "DTSTART;VALUE=DATE:20261207",
+                                               "DTEND;VALUE=DATE:20261208"]))]
+        (ev,) = self.cal.query(S, E)
+        self.assertEqual((ev.uid, ev.kind, ev.start_date, ev.end_date),
+                         ("allday", "all_day", dt.date(2026, 12, 7), dt.date(2026, 12, 8)))
+
+    def test_an_empty_answer_is_an_empty_calendar(self):
+        self.dav.report = []
+        self.assertEqual(self.cal.query(S, E), [])
+
+    def test_the_collection_itself_is_skipped_but_a_truncated_answer_is_a_failure(self):
+        self.dav.report = [item("", None), item("a.ics", vcal(timed("a", S, E)))]
+        self.assertEqual([e.uid for e in self.cal.query(S, E)], ["a"])
+        self.dav.report = [item("a.ics", vcal(timed("a", S, E))), item("", status="507 Insufficient Storage")]
+        err = self.fails(CalendarError, self.cal.query, S, E)
+        self.assertIn("507", str(err))
+
+    def test_a_status_other_than_multistatus_is_a_calendar_error_naming_it(self):
+        self.dav.status["REPORT"] = 403
+        err = self.fails(CalendarError, self.cal.query, S, E)
+        self.assertNotIsInstance(err, CalendarTimeout)
+        self.assertIn("403", str(err))
+
+    def test_a_refused_login_is_a_calendar_error_that_carries_no_secret(self):
+        self.dav.auth = basic(DORIS, "dummy-other-pass")
+        err = self.fails(CalendarError, self.cal.query, S, E)
+        self.assertIn("401", str(err))
+
+    def test_an_answer_that_is_not_a_multistatus_is_a_failure_never_an_empty_calendar(self):
+        for answer in ((207, "application/xml", b"<html><body>oops</body></html>"),
+                       (207, "application/xml", b"not xml at all"),
+                       (200, "application/xml", b'<d:multistatus xmlns:d="DAV:"/>'),
+                       (207, "application/xml", b'<?xml version="1.0"?><!DOCTYPE d [<!ENTITY a "aa">]>'
+                                                b'<d:multistatus xmlns:d="DAV:"/>')):
+            self.dav.raw_answer = answer
+            self.fails(CalendarError, self.cal.query, S, E)
+
+    def test_a_title_that_mentions_a_doctype_inside_cdata_is_read_like_any_other(self):
+        """The guard is the parser's, not a byte scan: text that only looks like a DOCTYPE is data."""
+        data = vcal(timed("odd-title", S, E, "SUMMARY:<!DOCTYPE x [<!ENTITY y \"z\">]> notes")).decode()
+        body = ('<?xml version="1.0" encoding="utf-8"?>\n<d:multistatus xmlns:d="DAV:" '
+                'xmlns:cal="urn:ietf:params:xml:ns:caldav"><d:response><d:href>%sa.ics</d:href><d:propstat>'
+                '<d:prop><cal:calendar-data><![CDATA[%s]]></cal:calendar-data></d:prop>'
+                '<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>' % (COLLECTION, data))
+        self.dav.raw_answer = (207, "application/xml; charset=utf-8", body.encode("utf-8"))
+        self.assertEqual(self.cal.query(S, E), [Event("odd-title", "", "", "timed", S, E)])
+
+    def test_a_doctype_in_any_encoding_is_refused_never_expanded(self):
+        """UTF-16 hides "<!DOCTYPE" from a byte scan; the parser still sees it, and nothing is expanded."""
+        event = vcal(timed("from-an-entity", S, E)).decode().replace("\r\n", "&#10;")
+        for encoding in ("utf-16", "utf-16-le", "utf-8"):
+            body = ('<?xml version="1.0" encoding="%s"?>\n<!DOCTYPE d [<!ENTITY ev "%s">]>\n'
+                    '<d:multistatus xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav"><d:response>'
+                    '<d:href>%sa.ics</d:href><d:propstat><d:prop><cal:calendar-data>&ev;</cal:calendar-data>'
+                    '</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>'
+                    % (encoding.split("-le")[0], event, COLLECTION))
+            data = body.encode(encoding)
+            if encoding == "utf-16-le":
+                data = b"\xff\xfe" + data
+            self.dav.raw_answer = (207, "application/xml", data)
+            err = self.fails(CalendarError, self.cal.query, S, E)
+            self.assertIn("DOCTYPE", str(err), encoding)
+
+    def test_an_encoding_it_cannot_decode_is_a_calendar_error_not_a_raw_exception(self):
+        for name in ("x-no-such-encoding", "utf-7"):
+            body = ('<?xml version="1.0" encoding="%s"?><d:multistatus xmlns:d="DAV:"/>' % name).encode("ascii")
+            self.dav.raw_answer = (207, "application/xml", body)
+            with self.assertRaises(Exception) as cm:
+                self.cal.query(S, E)
+            self.assertIsInstance(cm.exception, CalendarError, name)
+            self.assertIn("cannot be read", str(cm.exception))
+
+    def test_an_href_that_is_not_a_url_is_a_calendar_error_not_a_raw_exception(self):
+        self.dav.report = [item("a.ics", vcal(timed("a", S, E)), href="//[")]
+        with self.assertRaises(Exception) as cm:
+            self.cal.query(S, E)
+        self.assertIsInstance(cm.exception, CalendarError)
+
+    def test_a_server_that_hangs_is_a_calendar_timeout(self):
+        self.dav.fault["REPORT"] = "hang"
+        cal = self.make_calendar(timeout_s=0.3)
+        started = time.monotonic()
+        self.fails(CalendarTimeout, cal.query, S, E)
+        self.assertLess(time.monotonic() - started, 1.4)
+
+    def test_a_connection_lost_after_the_request_is_a_calendar_timeout(self):
+        self.dav.fault["REPORT"] = "drop"
+        self.fails(CalendarTimeout, self.cal.query, S, E)
+
+    def test_a_connect_failure_is_a_calendar_error_not_a_timeout(self):
+        err = self.fails(CalendarError, self.make_calendar(port=closed_port()).query, S, E)
+        self.assertNotIsInstance(err, CalendarTimeout)
+        self.assertIn("connect", str(err))
+
+    def test_a_naive_or_backward_span_is_refused_before_any_call(self):
+        with self.assertRaises(ValueError):
+            self.cal.query(S.replace(tzinfo=None), E)
+        with self.assertRaises(ValueError):
+            self.cal.query(E, S)
+        self.assertEqual(self.dav.requests, [])
+
+
+# ===========================================================================================
+# Calendar: create, get, delete
+# ===========================================================================================
+class CreateTest(CalFixture):
+
+    def test_puts_her_event_create_only_under_its_booking_id(self):
+        data = her_event()
+        self.cal.create_only(BID, data)
+        (method, path, headers, body), = self.dav.requests
+        self.assertEqual((method, path, body), ("PUT", COLLECTION + BID + ".ics", data))
+        self.assertEqual(headers["if-none-match"], "*")
+        self.assertTrue(headers["content-type"].startswith("text/calendar"))
+        self.assertEqual(headers["authorization"], self.dav.auth)
+        self.assertEqual(self.dav.resources[BID + ".ics"][1], data)
+
+    def test_an_id_already_on_the_calendar_is_already_exists(self):
+        self.cal.create_only(BID, her_event())
+        before = dict(self.dav.resources)
+        self.fails(AlreadyExists, self.cal.create_only, BID, her_event())
+        self.assertEqual(self.dav.resources, before)
+
+    def test_anything_not_hers_or_not_her_fixed_form_is_refused_before_any_call(self):
+        self.fails(NotHers, self.cal.create_only, "someone-else", her_event())
+        self.fails(CalendarError, self.cal.create_only, BID, her_event(bid="doris-ffffffffffffffffffffffff"))
+        self.fails(CalendarError, self.cal.create_only, BID,
+                   her_event().replace(b"STATUS:CONFIRMED", b"STATUS:CONFIRMED\r\nATTENDEE:mailto:x@example.com"))
+        self.fails(CalendarError, self.cal.create_only, BID, her_event(method="PUBLISH"))
+        self.assertTrue(issubclass(NotHers, CalendarError))
+        self.assertEqual(self.dav.requests, [])
+
+    def test_a_connection_lost_after_the_write_went_is_a_calendar_timeout(self):
+        self.dav.fault["PUT"] = "drop"
+        self.fails(CalendarTimeout, self.cal.create_only, BID, her_event())
+
+    def test_no_answer_in_time_is_a_calendar_timeout(self):
+        self.dav.fault["PUT"] = "hang"
+        self.fails(CalendarTimeout, self.make_calendar(timeout_s=0.3).create_only, BID, her_event())
+
+    def test_a_refused_write_is_a_calendar_error_naming_the_status(self):
+        for code in (403, 409, 500):
+            self.dav.status["PUT"] = code
+            err = self.fails(CalendarError, self.cal.create_only, BID, her_event())
+            self.assertNotIsInstance(err, (CalendarTimeout, AlreadyExists))
+            self.assertIn(str(code), str(err))
+
+    def test_a_connect_failure_before_the_write_is_a_calendar_error_not_a_timeout(self):
+        err = self.fails(CalendarError, self.make_calendar(port=closed_port()).create_only, BID, her_event())
+        self.assertNotIsInstance(err, CalendarTimeout)
+
+    def test_only_201_counts_as_created(self):
+        """Under If-None-Match: * a 200 or 204 is an overwrite, or a server that ignores the condition."""
+        for code in (200, 204):
+            self.dav.status["PUT"] = code
+            err = self.fails(CalendarError, self.cal.create_only, BID, her_event())
+            self.assertNotIsInstance(err, (CalendarTimeout, AlreadyExists))
+            self.assertIn(str(code), str(err))
+
+    def test_a_gateway_error_or_a_timeout_answer_is_unknown_never_not_written(self):
+        """The write may have landed behind the gateway: the caller looks it up by booking ID."""
+        for code in (408, 502, 504):
+            self.dav.status["PUT"] = code
+            err = self.fails(CalendarTimeout, self.cal.create_only, BID, her_event())
+            self.assertIn(str(code), str(err))
+
+
+class GetTest(CalFixture):
+
+    def test_reads_her_event_back_by_booking_id(self):
+        self.cal.create_only(BID, her_event())
+        self.assertEqual(self.cal.get(BID), ics.read_event(her_event()))
+        self.assertEqual(self.dav.requests[-1][:2], ("GET", COLLECTION + BID + ".ics"))
+
+    def test_none_only_when_the_server_says_404(self):
+        self.assertIsNone(self.cal.get(BID))
+        self.assertEqual(self.dav.methods(), ["GET", "REPORT"])
+        for code in (403, 410, 500):
+            self.dav.status["GET"] = code
+            err = self.fails(CalendarError, self.cal.get, BID)
+            self.assertIn(str(code), str(err))
+        del self.dav.status["GET"]
+        self.dav.fault["GET"] = "drop"
+        self.fails(CalendarTimeout, self.cal.get, BID)
+
+    def test_an_id_not_hers_is_refused_before_any_call(self):
+        for bad in ("other", "doris-../x", "", None, BID + "\n"):
+            self.fails(NotHers, self.cal.get, bad)
+        self.assertEqual(self.dav.requests, [])
+
+    def test_a_404_is_confirmed_by_asking_the_collection_for_her_uid(self):
+        """None only when the calendar itself answers and holds no event with her UID."""
+        self.dav.put("someone-else.ics", vcal(timed("someone-else", S, E)))
+        self.assertIsNone(self.cal.get(BID))
+        (_, path, headers, body) = self.dav.requests[-1]
+        self.assertEqual((self.dav.methods(), path, headers["depth"]), (["GET", "REPORT"], COLLECTION, "1"))
+        self.assertEqual(report_uid(body), BID)
+        self.assertIsNone(ET.fromstring(body).find(".//" + C_NS + "time-range"))
+
+    def test_a_calendar_that_answers_404_itself_is_a_failure_never_none(self):
+        """A revoked share or a wrong collection answers 404 to everything: her event may still be there."""
+        for report in (404, 403, 500):
+            self.dav.status.update(GET=404, REPORT=report)
+            err = self.fails(CalendarError, self.cal.get, BID)
+            self.assertIn(str(report), str(err))
+
+    def test_her_uid_filed_under_another_name_is_a_failure_never_none(self):
+        self.dav.put("renamed-by-a-client.ics", vcal(timed(BID, S, E)))
+        self.fails(CalendarError, self.cal.get, BID)
+
+    def test_an_event_filed_under_her_id_with_another_uid_is_a_failure(self):
+        self.dav.put(BID + ".ics", vcal(timed("not-hers", S, E)))
+        self.fails(CalendarError, self.cal.get, BID)
+
+    def test_anything_but_exactly_her_one_event_is_a_failure_never_her_event(self):
+        """Not the first VEVENT that carries her UID: exactly one VEVENT, hers, that does not repeat."""
+        for data in (vcal(timed(BID, S, E), timed("someone", S, E)),
+                     vcal(timed(BID, S, E), timed(BID, S + DAY, E + DAY, "RECURRENCE-ID:" + stamp(S + DAY))),
+                     vcal(timed(BID, S, E), timed(BID, S, E)),
+                     vcal(timed(BID, S, E, "RRULE:FREQ=DAILY")),
+                     vcal(timed(BID, S, E, "RDATE:" + stamp(S + DAY)))):
+            self.dav.put(BID + ".ics", data)
+            self.fails(CalendarError, self.cal.get, BID)
+
+    def test_her_event_comes_back_with_the_times_and_status_the_server_holds(self):
+        """What the server holds, never what she wrote: the loop compares the two."""
+        self.dav.put(BID + ".ics", vcal(timed(BID, S + DAY, E + DAY, "STATUS:CANCELLED")))
+        self.assertEqual(self.cal.get(BID), Event(BID, "CANCELLED", "", "timed", S + DAY, E + DAY))
+
+    def test_an_event_it_cannot_read_is_a_failure_never_none(self):
+        for data in (b"garbage", vcal(["UID:" + BID, "DTSTART;VALUE=DATE:99991231"])):
+            self.dav.put(BID + ".ics", data)
+            self.fails(CalendarError, self.cal.get, BID)
+
+
+class BookingIdsTest(CalFixture):
+    """booking_ids(prefix): the smoke's search for the test events earlier smokes left, by UID."""
+    PREFIX = "doris-smoke-"
+
+    def test_one_report_matches_uids_holding_the_prefix_and_keeps_her_ids_that_start_with_it(self):
+        for bid in ("doris-smoke-20261127T042934Z", "doris-smoke-test", "doris-cafe-doris-smoke-1", BID):
+            self.dav.put(bid + ".ics", her_event(bid))
+        self.dav.put("notes.ics", vcal(timed("notes-doris-smoke-1@elsewhere.example", S, E)))
+        self.assertEqual(self.cal.booking_ids(self.PREFIX), ["doris-smoke-20261127T042934Z", "doris-smoke-test"])
+        (method, path, headers, body), = self.dav.requests
+        self.assertEqual((method, path, headers["depth"]), ("REPORT", COLLECTION, "1"))
+        self.assertEqual(report_uid(body), self.PREFIX)                # RFC 4791 9.7.5: a substring match
+        self.assertIsNone(ET.fromstring(body).find(".//" + C_NS + "time-range"))
+        self.assertIsNotNone(ET.fromstring(body).find(D_NS + "prop/" + C_NS + "calendar-data"))
+
+    def test_none_on_the_calendar_is_an_empty_list(self):
+        self.dav.put(BID + ".ics", her_event())
+        self.assertEqual(self.cal.booking_ids(self.PREFIX), [])
+
+    def test_an_answer_it_cannot_read_is_a_failure_never_an_empty_list(self):
+        for code in (403, 404, 500):
+            self.dav.status["REPORT"] = code
+            self.assertIn(str(code), str(self.fails(CalendarError, self.cal.booking_ids, self.PREFIX)))
+        del self.dav.status["REPORT"]
+        for answer in ([item("doris-smoke-1.ics")], [item("doris-smoke-1.ics", "garbage")],
+                       [item("doris-smoke-1.ics", status="404 Not Found")]):
+            self.dav.report = answer
+            self.fails(CalendarError, self.cal.booking_ids, self.PREFIX)
+        self.dav.fault["REPORT"] = "drop"
+        self.fails(CalendarTimeout, self.cal.booking_ids, self.PREFIX)
+
+    def test_a_prefix_none_of_her_ids_can_start_with_is_refused_before_any_call(self):
+        for bad in ("", "smoke-", "doris-smoke-<x>", None, "doris-smoke-\n"):
+            self.fails(NotHers, self.cal.booking_ids, bad)
+        self.assertEqual(self.dav.requests, [])
+
+
+class DeleteTest(CalFixture):
+
+    def test_reads_then_removes_exactly_her_resource_if_unchanged(self):
+        self.dav.put("other.ics", vcal(timed("other", S, E)))
+        self.cal.create_only(BID, her_event())
+        etag = self.dav.resources[BID + ".ics"][0]
+        self.cal.delete(BID)
+        self.assertEqual(self.dav.methods(), ["PUT", "GET", "DELETE"])
+        method, path, headers, body = self.dav.requests[-1]
+        self.assertEqual((path, headers["if-match"]), (COLLECTION + BID + ".ics", etag))
+        self.assertEqual(set(self.dav.resources), {"other.ics"})
+        self.assertIsNone(self.cal.get(BID))
+
+    def test_an_id_already_gone_is_a_no_op(self):
+        self.cal.delete(BID)
+        self.assertEqual(self.dav.methods(), ["GET", "REPORT"])
+        self.assertEqual(report_uid(self.dav.requests[-1][3]), BID)
+
+    def test_a_calendar_that_answers_404_itself_is_a_failure_not_a_no_op(self):
+        self.dav.status.update(GET=404, REPORT=404)
+        err = self.fails(CalendarError, self.cal.delete, BID)
+        self.assertIn("404", str(err))
+        self.assertNotIn("DELETE", self.dav.methods())
+
+    def test_her_uid_filed_under_another_name_is_a_failure_not_a_no_op(self):
+        self.dav.put("renamed-by-a-client.ics", vcal(timed(BID, S, E)))
+        self.fails(CalendarError, self.cal.delete, BID)
+        self.assertNotIn("DELETE", self.dav.methods())
+
+    def test_an_id_not_hers_is_refused_before_any_call(self):
+        for bad in ("other", "doris-../x", "", None, "doris-a/b", BID + "\n"):
+            self.fails(NotHers, self.cal.delete, bad)
+        self.assertEqual(self.dav.requests, [])
+
+    def test_a_resource_under_her_id_that_is_not_only_her_event_is_not_deleted(self):
+        for data in (vcal(timed("someone", S, E)), vcal(timed(BID, S, E), timed("someone", S, E))):
+            self.dav.put(BID + ".ics", data)
+            self.fails(NotHers, self.cal.delete, BID)
+        self.assertNotIn("DELETE", self.dav.methods())
+        self.assertIn(BID + ".ics", self.dav.resources)
+
+    def test_a_resource_it_cannot_read_is_not_deleted(self):
+        for data in (b"garbage", vcal(["UID:" + BID, "DTSTART;VALUE=DATE:99991231"])):
+            self.dav.put(BID + ".ics", data)
+            self.fails(CalendarError, self.cal.delete, BID)
+        self.assertNotIn("DELETE", self.dav.methods())
+
+    def test_a_refused_changed_or_lost_delete_fails_loudly(self):
+        for code in (403, 412):
+            self.cal.create_only(BID, her_event()) if BID + ".ics" not in self.dav.resources else None
+            self.dav.status["DELETE"] = code
+            err = self.fails(CalendarError, self.cal.delete, BID)
+            self.assertNotIsInstance(err, CalendarTimeout)
+            self.assertIn(str(code), str(err))
+        del self.dav.status["DELETE"]
+        self.dav.fault["DELETE"] = "drop"
+        self.fails(CalendarTimeout, self.cal.delete, BID)
+        self.assertIn(BID + ".ics", self.dav.resources)
+
+    def test_without_a_strong_etag_nothing_is_deleted(self):
+        """If-Match takes a strong ETag only; without one the DELETE would be unconditional."""
+        for etag in ('W/"weak-1"', None, "", "unquoted"):
+            self.dav.resources[BID + ".ics"] = (etag, her_event())
+            err = self.fails(CalendarError, self.cal.delete, BID)
+            self.assertIn("ETag", str(err), repr(etag))
+        self.assertNotIn("DELETE", self.dav.methods())
+        self.assertIn(BID + ".ics", self.dav.resources)
+
+    def test_a_resource_gone_between_the_read_and_the_delete_is_a_no_op(self):
+        self.cal.create_only(BID, her_event())
+
+        def someone_deletes_it_first(method, name):
+            if method == "DELETE":
+                self.dav.resources.pop(name, None)
+        self.dav.on_request = someone_deletes_it_first
+        self.cal.delete(BID)
+        self.assertEqual(self.dav.methods(), ["PUT", "GET", "DELETE", "REPORT"])
+
+    def test_a_delete_answered_404_while_her_event_is_still_there_is_a_failure(self):
+        self.cal.create_only(BID, her_event())
+        self.dav.status["DELETE"] = 404
+        self.fails(CalendarError, self.cal.delete, BID)
+        self.assertIn(BID + ".ics", self.dav.resources)
+
+
+class DeadlineTest(CalFixture):
+    """One deadline per call. A socket timeout restarts with every byte, so a server answering a
+    byte at a time would otherwise hold a call (and her loop) for as long as it liked."""
+
+    def test_an_answer_dripped_a_byte_at_a_time_times_out_at_the_calls_deadline(self):
+        cal = self.make_calendar(timeout_s=0.5)
+        for mode in ("drip", "drip_body"):
+            self.dav.fault["REPORT"] = mode
+            started = time.monotonic()
+            self.fails(CalendarTimeout, cal.query, S, E)
+            self.assertLess(time.monotonic() - started, 1.5, mode)
+
+    def test_every_request_of_one_call_shares_its_deadline(self):
+        """get's GET (404) and the query that confirms it: 0.3 s each is over a 0.5 s call."""
+        cal = self.make_calendar(timeout_s=0.5)
+        self.dav.delay.update(GET=0.3, REPORT=0.3)
+        started = time.monotonic()
+        self.fails(CalendarTimeout, cal.get, BID)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_a_call_within_its_deadline_is_unchanged(self):
+        self.dav.put(BID + ".ics", her_event())
+        self.dav.fault["GET"] = "drip_body"
+        self.dav.drip_s = 0.001
+        self.assertEqual(self.make_calendar(timeout_s=5.0).get(BID), ics.read_event(her_event()))
+
+
+class CalDAVTransportTest(unittest.TestCase):
+
+    def test_caldav_is_https_with_a_verified_certificate_and_the_timeout(self):
+        seen = {}
+
+        def fake(host, port=None, timeout=None, context=None, **kw):
+            seen.update(host=host, port=port, timeout=timeout, context=context)
+            raise ConnectionRefusedError("stop here")
+        with mock.patch.object(http.client, "HTTPSConnection", fake):
+            with self.assertRaises(CalendarError) as cm:
+                live.LiveCalendar(env(), timeout_s=7).query(S, E)
+        self.assertNotIsInstance(cm.exception, CalendarTimeout)
+        self.assertEqual((seen["host"], seen["port"], seen["timeout"]), ("caldav.fastmail.com", 443, 7.0))
+        self.assertEqual(seen["context"].verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(seen["context"].check_hostname)
+
+
+
+if __name__ == "__main__":
+    unittest.main()

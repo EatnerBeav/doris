@@ -2,12 +2,16 @@
 ledger.py, for the kill switch's process tests.
 
 Run as a script it is the worker (or a second supervisor, or a bare lock holder). Like the real
-worker, it takes the ledger lock for its own life and exits 3 when another holds it:
+worker, it takes the ledger lock for its own life and exits 3 when another holds it, and it does
+not outlive the supervisor that started it (its stdin is its lifeline):
 
     fake_worker.py work --scenario midcall|quick|budget|torn|g1|lostrace --receipts P --ledger P --run NAME
                         --mode MODE --state DIR --repo DIR --life P --marker P [--backend fake|real]
     fake_worker.py supervise <same options>     # a whole second Doris: run_supervised in this process
     fake_worker.py hold-lock --lock P --marker P # takes the ledger lock, says so, sleeps
+    fake_worker.py doris-run --sandbox DIR --state DIR --cycle-s S --marker P
+                                                 # a real Doris: `python -m doris run` on a sandbox copy,
+                                                 # its real worker's pid written to --marker
 
 Imported, it gives the tests `FakeReceipts` (ReceiptWriter, read_lines, verify) and `JsonLedger`,
 written to CONTRACTS.md so the tests never depend on a half-built receipts.py or ledger.py.
@@ -18,6 +22,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -256,8 +261,26 @@ def _patch_paths(args):
     paths.REPO = args.repo
 
 
+def _die_with_the_supervisor():
+    """The real worker's lifeline, short: when the supervisor that started it is gone (killed by a
+    test, its stdin pipe closed), this fake worker exits at once instead of sleeping on alone."""
+    from doris import supervisor
+    if os.environ.get(supervisor.LIFELINE_ENV) != supervisor.LIFELINE_STDIN:
+        return
+
+    def watch():
+        try:
+            while os.read(0, 1):
+                pass
+        except OSError:
+            pass
+        os._exit(1)
+    threading.Thread(target=watch, name="fake-lifeline", daemon=True).start()
+
+
 def work(args):
     from doris import supervisor
+    _die_with_the_supervisor()
     _patch_paths(args)
     life = supervisor.acquire_lock(args.life)       # the OS lets go of it the instant this process dies
     if life is None:
@@ -345,6 +368,25 @@ def hold_lock(args):
     return 0
 
 
+def doris_run(args):
+    """`python -m doris run` on a sandbox copy and a state folder of the test's, its cycle --cycle-s
+    seconds: the real supervisor over the real worker. The worker's pid goes to --marker as it starts,
+    so a test can find the worker its supervisor leaves behind."""
+    from doris import __main__ as cli
+    from doris import paths, supervisor
+    paths.SANDBOX, paths.STATE = args.sandbox, args.state
+    cli.RUN_CYCLE_S = float(args.cycle_s)
+    spawn = supervisor._spawn
+
+    def spawn_and_note(argv, cwd):
+        child = spawn(argv, cwd)
+        with open(args.marker, "w") as fh:
+            fh.write("%d\n" % child.pid)
+        return child
+    supervisor._spawn = spawn_and_note
+    return cli.main(["run"])
+
+
 def _common(args):
     return ["--scenario", args.scenario, "--receipts", args.receipts, "--ledger", args.ledger,
             "--run", args.run, "--mode", args.mode, "--state", args.state, "--repo", args.repo,
@@ -353,14 +395,14 @@ def _common(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("work", "supervise", "hold-lock"))
-    for name in ("receipts", "ledger", "run", "state", "repo", "life", "marker", "lock"):
+    parser.add_argument("command", choices=("work", "supervise", "hold-lock", "doris-run"))
+    for name in ("receipts", "ledger", "run", "state", "repo", "life", "marker", "lock", "sandbox", "cycle-s"):
         parser.add_argument("--" + name)
     parser.add_argument("--mode", default="sandbox")
     parser.add_argument("--scenario", default="midcall", choices=("midcall", "quick", "budget", "torn", "g1", "lostrace"))
     parser.add_argument("--backend", default="fake", choices=("fake", "real"))
     args = parser.parse_args(argv)
-    return {"work": work, "supervise": supervise, "hold-lock": hold_lock}[args.command](args)
+    return {"work": work, "supervise": supervise, "hold-lock": hold_lock, "doris-run": doris_run}[args.command](args)
 
 
 if __name__ == "__main__":

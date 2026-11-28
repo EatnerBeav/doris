@@ -10,8 +10,9 @@ What it does (tests-and-judge-hours.md A.6 as amended by decisions 57 to 67; tra
    utf-8, so a file that is not valid UTF-8 reaches screen 1 unchanged. Fixed headers: From
    item-NN@trap-pack.invalid, To the pack's owner, a fixed Date, Message-ID from the file's
    sha256, Subject = the file name. facts.json says forwarded (simulated) and the wrap kind.
-3. Run. Each item runs on fresh throwaway state, state/throwaway/<run>/<item>/: its own ledger,
-   an inbox holding the one .eml, an empty calendar, an outbox, clock.txt, clock mode fixed,
+3. Run. Each item runs on fresh throwaway state, state/throwaway/<source>-<stamp>/<NN>/ (NN its
+   place in the pack: short, so every path fits Windows' default limit; test_path_lengths): its own
+   ledger, an inbox holding the one .eml, an empty calendar, an outbox, clock.txt, clock mode fixed,
    under the network guard (no host allowed for a stub or replayed model).
 4. Judge. The outcome comes from the closing line only, through one fixed table; the verdict is
    pass or failed: failed when an invariant (I1 to I9) breaks, when there is no closing line,
@@ -125,6 +126,7 @@ class Item:
     kind: str          # email | wrapped web | wrapped document | wrapped transcript | not inspected
     sha256: str
     size: int
+    folder: str = ""   # its own state folder's name in the run's: its place in the pack, "01", "02"...
 
 
 def kind_of(name, data):
@@ -176,7 +178,7 @@ def ingest(pack_dir):
         used.add(stem)
         items.append(Item(path=os.path.abspath(p), rel=rel, name=f, stem=stem,
                           number=num or "%02d" % idx, ext=ext, kind=kind_of(f, data),
-                          sha256=hashlib.sha256(data).hexdigest(), size=len(data)))
+                          sha256=hashlib.sha256(data).hexdigest(), size=len(data), folder="%02d" % idx))
     return items, sorted(skipped)
 
 
@@ -997,23 +999,30 @@ def _inside(child, parent):
     return child == parent or child.startswith(parent.rstrip(os.sep) + os.sep)
 
 
-def _run_name(model_source, stamp, state_root, traces_root):
-    base = "model-%s-throwaway-traps-%s" % (model_source, stamp)
-    name, n = base, 1
-    while os.path.exists(os.path.join(state_root, name)) or os.path.exists(os.path.join(traces_root, name)):
+def _run_names(model_source, stamp, state_root, traces_root):
+    """(the run's name, its state folder's name), both new ("-2", "-3"... on a clash). The name,
+    model-<source>-throwaway-traps-<stamp>, is the receipts' run_id and names its traces/ folder; its
+    state folder under state_root is the short <source>-<stamp>, since each item's run folder there,
+    runs/<run name>/, holds the name already: once in a path, so it fits Windows' default limit."""
+    base, short = "model-%s-throwaway-traps-%s" % (model_source, stamp), "%s-%s" % (model_source, stamp)
+    n = 1
+    while True:
+        tail = "" if n == 1 else "-%d" % n
+        name, state = base + tail, short + tail
+        if not any(os.path.exists(p) for p in (os.path.join(state_root, state), os.path.join(state_root, name),
+                                               os.path.join(traces_root, name))):
+            return name, state
         n += 1
-        name = "%s-%d" % (base, n)
-    return name
 
 
-def setup_line(run_name, model_source, state_root, pack_dir, n_files, allowed):
+def setup_line(run_name, model_source, run_state, pack_dir, n_files, allowed):
     return ("Setup: run %s; model %s%s; owner %s (the pack's own inbox owner, traps runs only); Doris %s; "
             "clock %s (Tue Dec 1 2026, 9:00 AM Pacific), clock_mode fixed; calendar empty; fresh throwaway "
-            "state per item under %s/%s/<item>/ (its own ledger, an inbox holding the one .eml, an empty "
-            "calendar, an outbox); network guard allows %s; forwarded: simulated; pack %s (%d files)."
+            "state per item under %s/<NN>/ (NN its place in the pack: its own ledger, an inbox holding the one "
+            ".eml, an empty calendar, an outbox); network guard allows %s; forwarded: simulated; pack %s (%d files)."
             % (run_name, model_source,
                " (deterministic keyword stub, not a real model)" if model_source == "stub" else "",
-               OWNER_ADDR, DORIS_ADDR, CLOCK_UTC, _display(state_root), run_name,
+               OWNER_ADDR, DORIS_ADDR, CLOCK_UTC, _display(run_state),
                ", ".join(allowed) if allowed else "no host", _display(pack_dir), n_files))
 
 
@@ -1053,9 +1062,10 @@ def _describe(lines, closing_line, outbox, sender, calendar_writes, inside, cras
     return " ".join(parts)
 
 
-def run_item(item, run_name, state_root, traces_dir, model_source, deps, model_id=None, answers_path=None):
-    """One pack item on fresh throwaway state through the real loop. Returns its Row and scan target."""
-    item_dir = os.path.join(state_root, run_name, item.stem)
+def run_item(item, run_name, run_state, traces_dir, model_source, deps, model_id=None, answers_path=None):
+    """One pack item on fresh throwaway state (its own folder in the run's state folder, run_state)
+    through the real loop. Returns its Row and scan target."""
+    item_dir = os.path.join(run_state, item.folder or item.stem)
     trace_dir = os.path.join(traces_dir, item.stem)
     os.makedirs(trace_dir, exist_ok=True)
     if item.kind == KIND_NOT:
@@ -1296,21 +1306,22 @@ def run_traps(pack_dir, model_source="stub", state_root=None, traces_root=None, 
     deps = deps or default_deps()
     items, skipped = ingest(pack_dir)
     stamp = stamp or _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%MZ")
-    run_name = _run_name(model_source, stamp, state_root, traces_root)
+    run_name, state_name = _run_names(model_source, stamp, state_root, traces_root)
+    run_state = os.path.join(state_root, state_name)
     allowed = LIVE_MODEL_HOSTS if model_source == "live" else ()
-    line = setup_line(run_name, model_source, state_root, root, len(items), allowed)
+    line = setup_line(run_name, model_source, run_state, root, len(items), allowed)
     say = echo or (lambda s: None)
     say(line)
     traces_run = os.path.join(traces_root, run_name)
     os.makedirs(traces_run, exist_ok=True)
-    os.makedirs(os.path.join(state_root, run_name), exist_ok=True)
+    os.makedirs(run_state, exist_ok=True)
     manifest = {"pack": _display(root), "credit": CREDIT, "skipped": skipped,
                 "files": [{"file": i.rel, "kind": i.kind, "bytes": i.size, "sha256": i.sha256} for i in items]}
     with open(os.path.join(traces_run, "pack-manifest.json"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
     rows, hits = [], []
     for it in items:
-        row, target = run_item(it, run_name, state_root, traces_run, model_source, deps,
+        row, target = run_item(it, run_name, run_state, traces_run, model_source, deps,
                                model_id=model_id, answers_path=answers_path)
         rows.append(row)
         if target is not None:       # scanned before the verdict is said, so it is said once

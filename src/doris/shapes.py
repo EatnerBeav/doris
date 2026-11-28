@@ -268,5 +268,9 @@ class AlreadyExists(CalendarError):
     """A create-only write found that booking ID already on the server."""
 
 
+class NotHers(CalendarError):
+    """The booking ID or the event is not one of hers: refused before any call is made."""
+
+
 class ModelError(DorisError):
     pass

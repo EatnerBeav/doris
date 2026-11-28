@@ -8,9 +8,12 @@ in tests/process/test_killswitch.py run the whole kill against a real child proc
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -40,6 +43,27 @@ class StateDirTest(unittest.TestCase):
         return path
 
 
+class RefusedReads:
+    """The supervisor's open() with the first `times` reads of a HALT that is there refused
+    (PermissionError), as Windows refuses them while another process replaces the file (review of
+    7e1a9fa, item 12); the waits between its tries are kept, not slept."""
+
+    def __init__(self, test, times):
+        self.left, self.refused, self.waits = times, 0, []
+        real = open
+
+        def windows_open(path, *args, **kw):
+            if os.path.basename(str(path)) == supervisor.HALT_NAME and os.path.exists(path) and self.left > 0:
+                self.left -= 1
+                self.refused += 1
+                raise PermissionError(13, "Access is denied", str(path))
+            return real(path, *args, **kw)
+        for patch in (mock.patch.object(supervisor, "open", windows_open, create=True),
+                      mock.patch.object(supervisor, "_pause", self.waits.append)):
+            patch.start()
+            test.addCleanup(patch.stop)
+
+
 # ------------------------------------------------------------------------------------------
 # Halt files: HALT (ours, written atomically) and STOP (the user's, only ever read)
 # ------------------------------------------------------------------------------------------
@@ -67,6 +91,41 @@ class HaltCauseTest(StateDirTest):
         supervisor.request_stop(self.mode, "budget_cap")
         supervisor.request_stop(self.mode, "cli")
         self.assertEqual(supervisor.halt_cause(self.mode), "budget_cap")
+
+    def test_a_halt_file_caught_mid_replace_is_read_again_a_few_short_tries(self):
+        """Review of 7e1a9fa, item 12: Windows refuses to open HALT while another process replaces it.
+        Every reader but the supervisor's poll reads again, HALT_READ_TRIES in all, HALT_READ_WAIT_S
+        apart, before it calls the file unreadable: the worker's halt checks (G1), request_stop (so
+        the first cause stays), the start's refusal and resume."""
+        supervisor.request_stop(self.mode, "budget_cap")
+        reads = RefusedReads(self, supervisor.HALT_READ_TRIES - 1)
+        self.assertEqual(supervisor.halt_cause(self.mode), "budget_cap")
+        self.assertEqual((reads.refused, reads.waits), (supervisor.HALT_READ_TRIES - 1,
+                                                        [supervisor.HALT_READ_WAIT_S] * (supervisor.HALT_READ_TRIES - 1)))
+        reads.left = 1
+        self.assertEqual(supervisor.request_stop(self.mode, "cli"), "budget_cap")   # the first cause stays
+        self.assertEqual(supervisor.read_halt(self.mode)["cause"], "budget_cap")
+        reads.left = 1
+        self.assertIn("halted (model spend reached the cap of the run)", supervisor._halt_refusal(self.mode))
+        reads.left = supervisor.HALT_READ_TRIES                        # refused every time: unreadable, fail closed
+        with self.assertRaises(supervisor.HaltFileError):
+            supervisor.halt_cause(self.mode)
+        self.assertLessEqual(supervisor.HALT_READ_TRIES * supervisor.HALT_READ_WAIT_S, 0.5)
+
+    def test_the_supervisors_poll_reads_once_and_fails_closed_at_once(self):
+        supervisor.request_stop(self.mode, "budget_cap")
+        reads = RefusedReads(self, 1)
+        self.assertEqual(supervisor._poll_halt(self.mode), ("stop_file", True))   # the kill comes first
+        self.assertEqual((reads.refused, reads.waits), (1, []))
+
+    def test_a_stop_signal_and_a_supervisor_gone_are_causes_that_survive_like_the_rest(self):
+        for cause in ("signal", "supervisor_gone"):
+            with self.subTest(cause=cause):
+                supervisor.request_stop(self.mode, cause)
+                self.assertEqual(supervisor.halt_cause(self.mode), cause)
+                res = supervisor.resume(self.mode)
+                self.assertEqual((res.ok, res.cleared), (True, cause))
+                self.assertIn(supervisor.CAUSE_WORDS[cause], res.message)
 
     def test_halt_goes_through_a_temp_file_and_replace(self):
         # A write in place would leave a HALT (maybe half written) when the replace fails.
@@ -206,11 +265,36 @@ class ResumeTest(StateDirTest):
         res = supervisor.resume(self.mode)
         self.assertFalse(res.ok)
         self.assertTrue(os.path.exists(stop))
-        self.assertFalse(os.path.exists(self.halt))
+        self.assertTrue(os.path.exists(self.halt))          # a failed resume clears nothing
         self.assertEqual(res.stop_files, [stop])
         self.assertIn(stop, res.message)
         self.assertIn("delete", res.message.lower())
         self.assertEqual(supervisor.halt_cause(self.mode), "stop_file")
+
+    def test_a_failed_resume_changes_nothing_so_deleting_the_stop_file_alone_never_starts_her(self):
+        stop = self.touch(os.path.join(self.sdir, "STOP"))
+        supervisor.request_stop(self.mode, "cli")
+        with open(self.halt, "rb") as fh:
+            before = fh.read()
+        res = supervisor.resume(self.mode)
+        self.assertEqual((res.ok, res.cleared, res.stop_files), (False, None, [stop]))
+        self.assertTrue(res.message.startswith("Not resumed: "), res.message)
+        self.assertIn("resume", res.message.replace("Not resumed", ""))   # says to resume again after
+        with open(self.halt, "rb") as fh:
+            self.assertEqual(fh.read(), before)               # HALT untouched, its first cause kept
+        os.remove(stop)                                       # the user deletes the STOP file
+        self.assertEqual(supervisor.halt_cause(self.mode), "cli")
+        self.assertIn("halted (stop on the command line)", supervisor._halt_refusal(self.mode))
+        res = supervisor.resume(self.mode)                    # only now does a resume clear it
+        self.assertEqual((res.ok, res.cleared), (True, "cli"))
+        self.assertIsNone(supervisor.halt_cause(self.mode))
+
+    def test_a_stop_file_with_no_halt_is_named_and_nothing_is_written(self):
+        stop = self.touch(os.path.join(self.repo, "STOP"))
+        res = supervisor.resume(self.mode)
+        self.assertEqual((res.ok, res.cleared, res.stop_files), (False, None, [stop]))
+        self.assertFalse(os.path.exists(self.halt))
+        self.assertIn(stop, res.message)
 
     def test_resume_with_nothing_to_clear(self):
         res = supervisor.resume(self.mode)
@@ -415,11 +499,11 @@ class RecordHaltTest(StateDirTest):
         self.assertIn(("set_booking_state", "doris-b1", "unconfirmed"), led.calls)
         self.assertTrue(led.closed)
 
-    def test_a_send_in_flight_is_marked_unknown_by_its_message_id(self):
+    def test_a_send_in_flight_is_marked_sending_by_its_message_id(self):
         rec = FakeReceipts([line(3, "called", call="send", target="T2", message_id="<s1@fastmail.com>")])
         led = FakeLedger()
         out = self.record("watch_button", rec, led)
-        self.assertIn(("set_send_state", "<s1@fastmail.com>", "unknown"), led.calls)
+        self.assertIn(("set_send_state", "<s1@fastmail.com>", "sending"), led.calls)
         self.assertTrue(out["payload"]["in_flight"]["unconfirmed"])
         self.assertEqual(out["why"]["code"], "halt.watch_button")
 
@@ -501,6 +585,129 @@ class RecordHaltTest(StateDirTest):
         out = self.record("stop_file", FakeReceipts(), FakeLedger(), halt_file_unreadable=True)
         self.assertEqual(out["payload"]["halt_file"], "unreadable")
 
+    def test_a_stop_signal_is_named_in_the_line(self):
+        rec = FakeReceipts([line(3, "called", call="calendar_create", target="doris-b1")])
+        led = FakeLedger()
+        out = self.record("signal", rec, led, signal="SIGTERM")
+        self.assertEqual(out["payload"]["cause"], "signal")
+        self.assertEqual(out["payload"]["signal"], "SIGTERM")
+        self.assertEqual(out["why"], {"code": "halt.signal",
+                                      "text": "Halted: a stop signal (SIGTERM, SIGHUP or Ctrl+Break) reached the supervisor."})
+        self.assertIn(("set_booking_state", "doris-b1", "unconfirmed"), led.calls)
+        self.assertNotIn("signal", self.record("cli", FakeReceipts(), FakeLedger())["payload"])
+
+    def test_a_key_that_could_spell_the_meeting_link_is_shown_by_its_hash(self):
+        """Review of 7e1a9fa, item 2: a Message-ID or thread key can hold the link (Message-ID:
+        <meet.example/live-loop-room@x>), and the supervisor never loads the env, so it cannot redact
+        it as the worker's receipts do. A key that holds "/", ":", "%" or "&" (a character every form of
+        an https link needs) or anything outside plain ASCII is shown by its hash (ledger.key_sha256)."""
+        from doris.ledger import key_sha256
+
+        def hashed(key):
+            return "key-sha256:" + key_sha256(key)
+        linked, escaped = "meet.example/live-loop-room@x.example", "<meet.example%2Flive-loop-room@x.example>"
+        entity, wide = "meet.example&#47;live-loop-room@x.example", "meet.example／live-loop-room@x.example"
+        schemed, thread = "https:meet.example@x.example", "<meet.example/live-loop-room/t1@x.example>"
+        raw_key, gmail = "sha256:" + "ab" * 32, "CAHk-=wh+x_y.z!#$'*?^`{|}~@mail.gmail.com"
+        led = FakeLedger(
+            queued=[{"message_key": linked, "kind": "send_reply", "detail": {"template": "T2"}},
+                    {"message_key": "m2@b.example", "kind": "send_reply", "detail": {"thread_key": escaped}}],
+            unprocessed=[{"key": entity, "thread_key": wide, "status": "fetched"},
+                         {"key": schemed, "thread_key": "t4@d.example", "status": "fetched"},
+                         {"key": raw_key, "thread_key": None, "status": "fetched"},
+                         {"key": gmail, "thread_key": "[t5]@e.example", "status": "processing"}],
+            threads={linked: thread})
+        out = self.record("cli", FakeReceipts(), led)
+        self.assertEqual([(d["message"], d["thread"]) for d in out["payload"]["dropped"]], [
+            (hashed(linked), hashed(thread)),
+            ("m2@b.example", hashed(escaped)),
+            (hashed(entity), hashed(wide)),
+            (hashed(schemed), "t4@d.example"),
+            (raw_key, None),                    # a mail with no Message-ID: already a hash
+            (gmail, "[t5]@e.example"),          # plain Message-IDs as written
+        ])
+        self.assertEqual(hashed(thread), hashed(thread.strip("<>")))     # the ledger's own key form
+        self.assertEqual(out["payload"]["dropped"][1]["template"], None)
+        self.assertNotIn("live-loop-room", json.dumps(out, ensure_ascii=False))
+        self.assertEqual(out["payload"]["ledger"], "ok")
+
+
+class RecordHaltLinkTest(StateDirTest):
+    """Review of 7e1a9fa, item 2, against the real ledger and receipt writer: the halted line the
+    supervisor writes never shows the meeting link, whatever a dropped key holds."""
+
+    ROOM = "https://meet.example/live-loop-room"
+    LINKS = (ROOM, "https://meet.example/doris-sandbox-room", "https://zoom.us", "https://zoom.us?pwd=a1",
+             "https://zoom.us/j/123?pwd=a&b=c", "https://u@meet.example:8443/room.x")
+
+    def setUp(self):
+        super().setUp()
+        from doris import templates
+        self.templates = templates
+        before = templates.use_meeting_link(self.ROOM)
+        self.addCleanup(templates.use_meeting_link, before)
+
+    def test_the_halted_line_from_a_real_ledger_never_shows_the_link(self):
+        import datetime
+        from doris import receipts
+        from doris.ledger import Ledger
+        receipts_path = os.path.join(self.sdir, "runs", RUN, "receipts.jsonl")
+        ledger_path = os.path.join(self.sdir, "ledger.sqlite")
+        os.makedirs(os.path.dirname(receipts_path))
+        at = datetime.datetime(2026, 11, 27, 19, 0, tzinfo=datetime.timezone.utc)
+        with Ledger(ledger_path) as led:
+            led.record_message("meet.example/live-loop-room@x.example", "<meet.example/live-loop-room@x.example>",
+                               "priya@b.example", at, "processing", run_id=RUN)
+            led.enqueue_action(RUN, "meet.example/live-loop-room@x.example", "send_reply", {"template": "T2"})
+            led.record_message("m2@b.example", "HTTPS://MEET.EXAMPLE/live-loop-room", "sam@b.example", at, "fetched",
+                               run_id=RUN)
+            led.record_message("meet.example%2Flive-loop-room@x.example", "t3@c.example", "kim@c.example", at,
+                               "fetched", run_id=RUN)
+        out = supervisor.record_halt(self.mode, RUN, "cli", receipts_path, ledger_path)
+        with open(receipts_path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual([d["kind"] for d in out["payload"]["dropped"]], ["send_reply", "message", "message"])
+        self.assertEqual(out["payload"]["dropped"][2]["thread"], "t3@c.example")
+        self.assertNotIn("live-loop-room", text)
+        self.assertFalse(self.templates.has_link(text))
+        self.assertTrue(receipts.verify(receipts_path).ok)
+
+    def forms(self, link):
+        """Ways a key can spell the link: the ones RedactLinkTest covers, escaped, wrapped and embedded."""
+        rest = link.split("://", 1)[1]
+        ways = [link, link.upper(), "http://" + rest, "hxxps://" + rest, "hxxp://" + rest + "/",
+                "https:\\/\\/" + rest.replace("/", "\\/"), "hxxps[://]" + rest.replace(".", "[.]"),
+                rest.replace("@", "[@]"), link.replace("&", "&amp;"), link.replace("-", "%2D"),
+                "".join("&#%d;" % ord(c) for c in link), "".join("%%%02X" % ord(c) for c in link),
+                "\n ".join(link)]
+        if "/" in rest.rstrip("/"):
+            ways.append(rest)
+        return [w for way in ways for w in (way, "<%s@x.example>" % way, "a" + way + "b")]
+
+    def test_every_key_that_shows_the_link_is_hashed_and_every_key_shown_as_written_is_plain(self):
+        """The claim the plain-key rule rests on, for links of every https shape: a key the redactors
+        would touch is never shown as written, and the same keys with "/", ":", "%" and "&" turned into
+        plain characters (shown as written) never spell the link."""
+        t = self.templates
+        for link in self.LINKS:
+            t.use_meeting_link(link)
+            found = plain = 0
+            for key in self.forms(link):
+                if not (t.has_link(key) or t.redact_link(key) != key):
+                    continue
+                found += 1
+                shown = supervisor.shown_key(key)
+                self.assertNotEqual(shown, key, (link, key))
+                self.assertFalse(t.has_link(shown), (link, key))
+                for c in "._-=+~":
+                    flat = "".join(c if ch in "/:%&" else ch for ch in key).replace("\n ", "")
+                    if supervisor.shown_key(flat) == flat:
+                        plain += 1
+                        self.assertFalse(t.has_link(flat), (link, flat))
+                        self.assertEqual(t.redact_link(flat), flat, (link, flat))
+            self.assertGreaterEqual(found, 30, link)
+            self.assertGreaterEqual(plain, 100, link)
+
 
 # ------------------------------------------------------------------------------------------
 # The poll loop, driven with a fake child (the process tests use a real one)
@@ -577,6 +784,36 @@ class WatchTest(StateDirTest):
         self.assertTrue(stopped.unreadable)
         self.assertGreaterEqual(child.kills, 1)
 
+    def test_a_halt_file_caught_mid_replace_is_read_again_once_the_worker_is_dead(self):
+        """Review of 7e1a9fa, item 12 (Windows: 'stop_file' != 'budget_cap'): the poll that met HALT
+        mid-replace kills the worker at once, as an unreadable halt file; once the worker is dead,
+        HALT is read again and its real cause recorded."""
+        for ends_alone in (False, True):
+            with self.subTest(ends_alone=ends_alone):
+                if os.path.exists(self.halt):
+                    os.remove(self.halt)
+                reads = RefusedReads(self, 2)
+
+                def cap(c, ends_alone=ends_alone):
+                    supervisor.request_stop(self.mode, "budget_cap")
+                    if ends_alone:
+                        c.returncode = supervisor.WORKER_EXIT_HALTED
+                child = FakeChild(on_wait_number(2, cap))
+                stopped = self.watch(child)
+                self.assertEqual((stopped.cause, stopped.unreadable), ("budget_cap", False))
+                self.assertEqual(reads.refused, 2)
+                self.assertEqual(reads.waits, [supervisor.HALT_READ_WAIT_S])   # the poll's one read, then a settle try
+                self.assertIsNotNone(child.returncode)                          # read again only once it is dead
+                self.assertEqual(child.kills >= 1, not ends_alone)
+
+    def test_an_unreadable_halt_is_still_unreadable_once_the_worker_is_dead(self):
+        child = FakeChild(on_wait_number(2, lambda c: self.touch(self.halt, b"\x00")))
+        waits = []
+        with mock.patch.object(supervisor, "_pause", waits.append):
+            stopped = self.watch(child)
+        self.assertEqual((stopped.cause, stopped.unreadable), ("stop_file", True))     # fail closed, as before
+        self.assertEqual(len(waits), supervisor.HALT_READ_TRIES - 1)
+
     def test_ctrl_c_is_a_stop_on_the_command_line_that_survives_a_restart(self):
         def interrupt(c):
             raise KeyboardInterrupt
@@ -585,6 +822,38 @@ class WatchTest(StateDirTest):
         self.assertEqual(stopped.cause, "cli")
         self.assertGreaterEqual(child.kills, 1)
         self.assertEqual(supervisor.halt_cause(self.mode), "cli")
+
+    def test_a_stop_signal_kills_the_worker_and_is_a_stop_that_survives_a_restart(self):
+        signals = supervisor.StopSignals()            # not entered: the test plays the handler
+        child = FakeChild(on_wait_number(2, lambda c: signals.note(signal.SIGTERM)))
+        stopped = supervisor.watch(child, self.mode, poll_s=0.01, signals=signals)
+        self.assertEqual((stopped.cause, stopped.signal), ("signal", "SIGTERM"))
+        self.assertGreaterEqual(child.kills, 1)
+        self.assertEqual(child.waits, 3)            # acted on at the very next poll
+        self.assertEqual(supervisor.halt_cause(self.mode), "signal")
+
+    @unittest.skipUnless(hasattr(signal, "SIGHUP"), "no SIGHUP on this platform")
+    def test_a_hang_up_that_ended_the_worker_too_is_still_a_stop(self):
+        # A closed terminal sends SIGHUP to the worker as well: it may be dead before the next poll.
+        signals = supervisor.StopSignals()
+
+        def hang_up(c):
+            signals.note(signal.SIGHUP)
+            c.returncode = -1
+        stopped = supervisor.watch(FakeChild(on_wait_number(2, hang_up)), self.mode, poll_s=0.01, signals=signals)
+        self.assertEqual((stopped.cause, stopped.signal), ("signal", "SIGHUP"))
+        self.assertEqual(supervisor.halt_cause(self.mode), "signal")
+
+    def test_a_halt_already_on_disk_keeps_its_cause_when_a_signal_comes_too(self):
+        signals = supervisor.StopSignals()
+
+        def both(c):
+            supervisor.request_stop(self.mode, "watch_button")
+            signals.note(signal.SIGTERM)
+        stopped = supervisor.watch(FakeChild(on_wait_number(2, both)), self.mode, poll_s=0.01, signals=signals)
+        self.assertEqual(stopped.cause, "watch_button")
+        self.assertIsNone(stopped.signal)
+        self.assertEqual(supervisor.halt_cause(self.mode), "watch_button")
 
 
 # ------------------------------------------------------------------------------------------
@@ -743,6 +1012,200 @@ class RelockTest(StateDirTest):
     def test_the_lock_file_sits_next_to_the_ledger(self):
         self.assertEqual(supervisor.lock_path_for(os.path.join(self.sdir, "ledger.sqlite")),
                          os.path.join(self.sdir, "ledger.lock"))
+
+
+# ------------------------------------------------------------------------------------------
+# A stop signal on the supervisor, and a supervisor that is gone
+# ------------------------------------------------------------------------------------------
+@unittest.skipIf(os.name == "nt", "SIGTERM cannot be caught on Windows, and it has no SIGHUP")
+class StopSignalsTest(unittest.TestCase):
+    """While the worker runs, SIGTERM and SIGHUP on the supervisor are stops, as Ctrl+C is; the
+    handlers before are put back after. (The process tests send real ones to a real supervisor.)"""
+
+    def caught(self, number, before):
+        handler = signal.getsignal(number)
+        self.assertNotIn(handler, (signal.SIG_DFL, signal.SIG_IGN, None, before), "not caught: never raise it")
+        return handler
+
+    def test_term_and_hang_up_are_caught_while_the_worker_runs_and_put_back_after(self):
+        numbers = (signal.SIGTERM, signal.SIGHUP)
+        before = {n: signal.getsignal(n) for n in numbers}
+        with supervisor.StopSignals() as signals:
+            for n in numbers:
+                self.caught(n, before[n])
+            self.assertIsNone(signals.seen)
+            signal.raise_signal(signal.SIGHUP)
+            self.assertEqual(signals.seen, "SIGHUP")
+            signal.raise_signal(signal.SIGTERM)
+            self.assertEqual(signals.seen, "SIGHUP")      # the first one is the one named
+        for n in numbers:
+            self.assertEqual(signal.getsignal(n), before[n])
+
+    def test_a_hang_up_ignored_at_start_stays_ignored(self):
+        # Started under nohup: whoever started her asked for her to outlive the terminal.
+        before = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        self.addCleanup(signal.signal, signal.SIGHUP, signal.SIG_DFL if before is None else before)
+        with supervisor.StopSignals():
+            self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+            self.caught(signal.SIGTERM, None)
+        self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+
+    def test_off_the_main_thread_nothing_is_set_and_nothing_fails(self):
+        before = signal.getsignal(signal.SIGTERM)
+        seen = {}
+
+        def target():
+            with supervisor.StopSignals() as signals:
+                seen["handler"], seen["seen"] = signal.getsignal(signal.SIGTERM), signals.seen
+        thread = threading.Thread(target=target)
+        thread.start()
+        thread.join(5)
+        self.assertEqual(seen, {"handler": before, "seen": None})
+
+
+class LifelineTest(StateDirTest):
+    """The worker's tie to its supervisor: a pipe whose write end only the supervisor holds and
+    never writes to. However the supervisor ends, the OS closes that end and the worker reads EOF."""
+
+    def setUp(self):
+        super().setUp()
+        self.ends, self.lines = {}, []
+        self.addCleanup(self.end_lines)           # after the path patches, so it runs before they are undone
+
+    def pipe(self):
+        self.ends.update(zip(("r", "w"), os.pipe()))
+        return self.ends["r"]
+
+    def started(self, line):
+        self.lines.append(line)
+        return line
+
+    def end_lines(self):
+        """No lifeline outlives its test: close the supervisor's end (it wakes a reader still
+        waiting), wait for every lifeline thread to finish, and only then close the reader's end."""
+        if "w" in self.ends:
+            os.close(self.ends.pop("w"))
+        for line in self.lines:
+            if line.thread is not None:
+                line.thread.join(5)
+                self.assertFalse(line.thread.is_alive(), "a lifeline thread outlived its test")
+        if "r" in self.ends:
+            os.close(self.ends.pop("r"))
+
+    def supervisor_dies(self):
+        os.close(self.ends.pop("w"))
+
+    def watched(self, line):
+        line.thread.join(5)
+        self.assertFalse(line.thread.is_alive(), "the lifeline never saw its end close")
+        return line
+
+    def test_while_the_supervisor_holds_its_end_nothing_happens(self):
+        line = self.started(supervisor.Lifeline(self.pipe(), self.mode).start())
+        line.thread.join(0.2)
+        self.assertTrue(line.thread.is_alive())
+        self.assertFalse(line.gone)
+        self.assertIsNone(supervisor.halt_cause(self.mode))
+
+    def test_when_the_supervisor_is_gone_she_writes_halt(self):
+        line = self.started(supervisor.Lifeline(self.pipe(), self.mode).start())
+        self.supervisor_dies()
+        self.assertTrue(self.watched(line).gone)
+        self.assertEqual(supervisor.halt_cause(self.mode), "supervisor_gone")
+
+    def test_a_halt_already_in_force_keeps_its_cause(self):
+        supervisor.request_stop(self.mode, "watch_button")
+        line = self.started(supervisor.Lifeline(self.pipe(), self.mode).start())
+        self.supervisor_dies()
+        self.assertTrue(self.watched(line).gone)
+        self.assertEqual(supervisor.halt_cause(self.mode), "watch_button")
+
+    def test_a_halt_that_cannot_be_written_still_leaves_her_knowing(self):
+        with mock.patch.object(supervisor, "request_stop", side_effect=OSError(28, "No space left on device")):
+            line = self.started(supervisor.Lifeline(self.pipe(), self.mode).start())
+            self.supervisor_dies()
+            self.watched(line)
+        self.assertTrue(line.gone)                  # the run reads it too (G1 and every halt check)
+        self.assertIsNone(supervisor.halt_cause(self.mode))
+
+    def test_halt_goes_to_the_folder_she_was_started_with_whatever_the_paths_say_later(self):
+        # A lifeline once outlived its test: by the time it fired, paths.STATE was the repository's
+        # again, and HALT landed in the real state/sandbox. Her folder is fixed when she starts.
+        line = self.started(supervisor.Lifeline(self.pipe(), self.mode).start())
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        with mock.patch.object(paths, "STATE", elsewhere):
+            self.supervisor_dies()
+            self.watched(line)
+        self.assertFalse(os.path.exists(elsewhere))
+        self.assertEqual(supervisor.halt_cause(self.mode), "supervisor_gone")
+
+    def test_a_state_folder_of_her_own(self):
+        own = os.path.join(self.tmp, "own")
+        line = self.started(supervisor.Lifeline(self.pipe(), "throwaway", own).start())
+        self.supervisor_dies()
+        self.watched(line)
+        self.assertEqual(supervisor.halt_cause("throwaway", state_dir=own), "supervisor_gone")
+        self.assertIsNone(supervisor.halt_cause(self.mode))
+
+    def test_only_a_worker_its_supervisor_gave_one_watches_its_stdin(self):
+        self.assertIsNone(supervisor.lifeline(self.mode, environ={}))
+        self.assertIsNone(supervisor.lifeline(self.mode, environ={supervisor.LIFELINE_ENV: "1"}))
+        line = self.started(supervisor.lifeline(self.mode, environ={supervisor.LIFELINE_ENV: supervisor.LIFELINE_STDIN},
+                                                fd=self.pipe()))
+        self.assertIsInstance(line, supervisor.Lifeline)
+        self.supervisor_dies()
+        self.watched(line)
+        self.assertEqual(supervisor.halt_cause(self.mode), "supervisor_gone")
+
+    def test_the_worker_is_started_with_its_lifeline_on_stdin_and_told_so(self):
+        seen = os.path.join(self.tmp, "seen.json")
+        code = ("import json, os, stat; json.dump({'env': os.environ.get(%r), 'pipe': stat.S_ISFIFO(os.fstat(0).st_mode)},"
+                " open(%r, 'w'))" % (supervisor.LIFELINE_ENV, seen))
+        child = supervisor._spawn([sys.executable, "-c", code], self.tmp)
+        try:
+            self.assertEqual(child.wait(20), 0)
+        finally:
+            supervisor._kill(child)
+            supervisor._let_go(child)
+        self.assertTrue(child.stdin.closed)
+        with open(seen, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"env": supervisor.LIFELINE_STDIN, "pipe": True})
+        self.assertNotIn(supervisor.LIFELINE_ENV, os.environ)    # the supervisor's own environment is untouched
+
+    def test_run_supervised_lets_go_of_its_end_once_the_worker_is_dead(self):
+        children, real = [], supervisor._spawn
+
+        def spawn(argv, cwd):
+            children.append(real(argv, cwd))
+            return children[-1]
+        with mock.patch.object(supervisor, "_spawn", spawn):
+            code = supervisor.run_supervised(self.mode, RUN, [sys.executable, "-c", "pass"],
+                                             os.path.join(self.sdir, "r.jsonl"), os.path.join(self.sdir, "l.sqlite"),
+                                             say=[].append, poll_s=0.01)
+        self.assertEqual(code, 0)
+        self.assertTrue(children[0].stdin.closed)
+
+
+class SayTest(unittest.TestCase):
+    def test_the_line_said_after_a_signal_names_it(self):
+        line = {"why": {"code": "halt.signal",
+                        "text": "Halted: a stop signal (SIGTERM, SIGHUP or Ctrl+Break) reached the supervisor."},
+                "payload": {"cause": "signal", "signal": "SIGHUP", "in_flight": None, "dropped": []}}
+        said = supervisor._summary(line, 3)
+        self.assertTrue(said.startswith("Halted: a stop signal (SIGTERM, SIGHUP or Ctrl+Break) reached the supervisor. "
+                                        "The signal was SIGHUP. The worker was dead 3 ms after the stop."), said)
+
+
+    def test_a_line_to_a_terminal_that_is_gone_is_no_error(self):
+        # A hang-up closes the terminal before the supervisor's last line: the receipts keep the record.
+        class Gone:
+            def write(self, text):
+                raise OSError(5, "Input/output error")
+
+            def flush(self):
+                raise BrokenPipeError(32, "Broken pipe")
+        with mock.patch.object(sys, "stdout", Gone()):
+            supervisor._say("Halted: a stop signal (SIGTERM, SIGHUP or Ctrl+Break) reached the supervisor.")
 
 
 if __name__ == "__main__":

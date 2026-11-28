@@ -47,6 +47,16 @@ def unfold(raw):
     return raw.decode("ascii").replace("\r\n ", "").split("\r\n")
 
 
+class BookingIdTest(unittest.TestCase):
+
+    def test_her_ids_pass_and_a_trailing_newline_does_not(self):
+        """In Python, $ also matches before a final newline: "doris-abc\\n" is not one of her IDs."""
+        for good in ("doris-abc", "doris-0123456789abcdef01234567", "doris-a.b_c@d-e"):
+            self.assertTrue(ics.is_booking_id(good), repr(good))
+        for bad in ("doris-abc\n", "doris-abc\r\n", "doris-abc\r", "\ndoris-abc", "doris-", "doris-a..b", None):
+            self.assertFalse(ics.is_booking_id(bad), repr(bad))
+
+
 class BuildEventTest(unittest.TestCase):
 
     def test_fixed_fields_only_in_fixed_order(self):
@@ -273,6 +283,11 @@ class ReadEventTest(unittest.TestCase):
         raw = b"\xef\xbb\xbf" + cal("BEGIN:VEVENT", "UID:b", "DTSTART:20261202T180000Z", "DTEND:20261202T183000Z",
                                     "END:VEVENT")
         self.assertEqual(ics.read_event(raw).start_utc, u(2026, 12, 2, 18, 0))
+
+    def test_the_source_writes_the_byte_order_mark_as_an_escape(self):
+        """An invisible U+FEFF in the source is one an editor can drop without anyone seeing it."""
+        with open(ics.__file__, "rb") as fh:
+            self.assertFalse(b"\xef\xbb\xbf" in fh.read(), "a literal U+FEFF in the source")
 
     def test_timezone_and_alarm_components_do_not_leak_into_the_event(self):
         raw = cal("BEGIN:VTIMEZONE", "TZID:X", "BEGIN:STANDARD", "DTSTART:19701101T020000", "END:STANDARD",

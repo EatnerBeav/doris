@@ -110,6 +110,30 @@ class QuoteTest(unittest.TestCase):
         q = holds.quote_of(make_msg(own_text="@" * 600))
         self.assertEqual(q, "[@]" * 133)
 
+    def test_the_run_link_never_reaches_the_quote_whole_or_cut_at_its_cap(self):
+        room = "https://meet.example/" + "quote-room"
+        before = templates.use_meeting_link(room)
+        self.addCleanup(templates.use_meeting_link, before)
+        q = holds.quote_of(make_msg(own_text="Is %s right? Or https://other.example/x" % room))
+        self.assertEqual(q, "Is [meeting link] right? Or hxxps://other[.]example/x")
+        cut = holds.quote_of(make_msg(own_text="a" * 370 + " " + room + " ok"))   # it straddles 400
+        self.assertEqual(cut, "a" * 370 + " [meeting link] ok")
+        hidden = make_msg(own_text="Fine.", hidden_text="hxxps://meet[.]example/quote-room")
+        self.assertEqual(holds.quote_of(hidden), "Fine.")                         # hidden text is never quoted
+
+    def test_the_run_link_in_wide_letters_never_reaches_what_she_echoes(self):
+        # She echoes the sender's text as written unless folding changes what the rules read: the link
+        # in fullwidth letters folds to the link, so it goes too, in the quote and in every excerpt.
+        room = "https://meet.example/" + "quote-room"
+        before = templates.use_meeting_link(room)
+        self.addCleanup(templates.use_meeting_link, before)
+        wide = "".join(chr(ord(c) + 0xFEE0) if "!" <= c <= "~" else c for c in room)
+        for written in (wide, wide.split(chr(0xFF1A))[1].lstrip(chr(0xFF0F))):    # with its scheme, and without
+            with self.subTest(written=written):
+                self.assertEqual(holds.quote_of(make_msg(own_text="Is %s right?" % written)), "Is [meeting link] right?")
+                self.assertEqual(holds.safe_excerpt("Is %s right?" % written, 200, one_line=True),
+                                 "Is [meeting link] right?")
+
 
 class CodeTest(unittest.TestCase):
     """A code, key, passphrase or token from the mail is never repeated in anything she sends."""

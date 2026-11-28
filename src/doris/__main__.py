@@ -1,12 +1,21 @@
 """python -m doris <command>: the one way in.
 
     demo     the sandbox day under the kill switch: no install, no key
+    run      the long run under the kill switch: a pass over the inbox every ten minutes until
+             `python -m doris stop`, and the day's digest to the owner at her first pass from
+             5:00 PM Pacific; the sandbox by default (no key), or with --live her own
+             mailbox and the owner's calendar from the env file (--env PATH, default
+             /root/doris-secrets/.env; --fresh starts the live ledger, once)
     traps    the Trap Pack, one file at a time on fresh throwaway state
     verify   recompute a run's receipt chain (the latest sandbox run by default)
     stop     halt Doris now, in the sandbox and live; she stays halted until resume
     resume   clear a halt (only here, on the command line)
+    smoke    every live adapter call once against the real servers, before a live run
 
-run (live), redteam, replay and watch are not built yet: each says so and exits 2.
+Every live run, the smoke included, keeps its trace in traces/live-<run|smoke>-<UTC stamp>/ when
+it ends, pass or fail (livetrace.py); a start refused before anything was contacted keeps none.
+
+redteam, replay and watch are not built yet: each says so and exits 2.
 """
 
 import argparse
@@ -15,13 +24,14 @@ import json
 import os
 import sys
 
-from . import caps, loop, paths, receipts, supervisor
+from . import caps, livetrace, loop, paths, receipts, supervisor
 
 SANDBOX_OWNER = loop.SANDBOX_OWNER
 SANDBOX_DORIS = loop.SANDBOX_DORIS
 STOP_MODES = ("sandbox", "live")
-LATER = ("run", "redteam", "replay", "watch")
+LATER = ("redteam", "replay", "watch")
 WORKER = "_worker"
+RUN_CYCLE_S = loop.CYCLE.total_seconds()   # `run`: the wall-clock wait from one pass to her next cycle
 
 
 def answers_path():
@@ -37,9 +47,11 @@ def demo_source(env, answers_exist):
     return "replayed" if answers_exist else "stub"
 
 
-def run_name(source, mode):
-    """model-<source>-<mode>-<wall clock, UTC>: the source and mode first, so a trace says what it is (A6)."""
-    return "model-%s-%s-%s" % (source, mode, _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+def run_name(source, mode, when=None):
+    """model-<source>-<mode>-<wall clock, UTC>: the source and mode first, so a trace says what it is (A6).
+    when: the run's start (an aware datetime), else now."""
+    when = when or _dt.datetime.now(_dt.timezone.utc)
+    return "model-%s-%s-%s" % (source, mode, when.astimezone(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
 
 
 def _recorded_run(path):
@@ -61,68 +73,179 @@ def first_line(source, model_id):
             "every receipt says stub. Add ANTHROPIC_API_KEY to call the model.")
 
 
-# --- demo ------------------------------------------------------------------------------------
+# --- demo and run --------------------------------------------------------------------------------
 def demo(argv):
     argparse.ArgumentParser(prog="python -m doris demo",
                             description="The sandbox day under the kill switch.").parse_args(argv)
-    from . import model as model_mod
-    source = demo_source(os.environ, os.path.exists(answers_path()))
-    model_id = model_mod.default_model_id(os.environ) if source == "live" else None
     refusal = supervisor._halt_refusal("sandbox")
     if refusal:
         print(refusal)
         return supervisor.EXIT_REFUSED_HALT
+    source, model_id = sandbox_source()
     state = paths.state_dir("sandbox")
-    base = name = run_name(source, "sandbox")
-    for n in range(2, 100):                  # two runs in one second each get their own folder
+    name, run_dir = new_run_dir(state, run_name(source, "sandbox"))
+    _say(first_line(source, model_id))
+    return supervise("sandbox", state, name, run_dir,
+                     sandbox_config(name, state, run_dir, source, model_id, digest=True))
+
+
+def run_cmd(argv):
+    ap = argparse.ArgumentParser(
+        prog="python -m doris run",
+        description="The long run under the kill switch: a pass over the inbox every ten minutes until "
+                    "`python -m doris stop`, and the day's digest to the owner from 5:00 PM Pacific. "
+                    "The sandbox by default; --live for her own mailbox.")
+    ap.add_argument("--live", action="store_true",
+                    help="her own mailbox and the owner's shared calendar, every setting from the env file")
+    ap.add_argument("--fresh", action="store_true",
+                    help="live: start the live ledger (once); she reads only mail that arrives after it")
+    ap.add_argument("--env", metavar="PATH", help="live: the env file (default %s)" % paths.LIVE_ENV)
+    args = ap.parse_args(argv)
+    if not args.live and (args.fresh or args.env is not None):
+        print("Not started: --fresh and --env are for a live run, so they need --live.")
+        return 2
+    mode = "live" if args.live else "sandbox"
+    refusal = supervisor._halt_refusal(mode)
+    if refusal:
+        print(refusal)
+        return supervisor.EXIT_REFUSED_HALT
+    state = paths.state_dir(mode)
+    every = "every %s until `python -m doris stop`" % _span(RUN_CYCLE_S)
+    if not args.live:
+        source, model_id = sandbox_source()
+        name, run_dir = new_run_dir(state, run_name(source, "sandbox"))
+        _say(first_line(source, model_id))
+        _say("She reads the sandbox inbox %s; a new .eml dropped in waits for her next cycle." % every)
+        return supervise("sandbox", state, name, run_dir, sandbox_config(
+            name, state, run_dir, source, model_id, digest=True, cycles=None, cycle_s=RUN_CYCLE_S))
+    env_path = os.path.abspath(args.env or paths.LIVE_ENV)
+    try:                                     # the worker makes every check again, under its lock
+        settings = loop.live_preflight(state, env_path, args.fresh)
+    except loop.Refused as refused:
+        print(refused)
+        return refused.exit_code
+    started = livetrace.now()
+    name, run_dir = new_run_dir(state, run_name("live", "live", started))
+    # Every line from here goes to the terminal and to the run's terminal.log, the worker's too.
+    term = livetrace.Printed(out=_say, path=os.path.join(run_dir, livetrace.TERMINAL))
+    term("Live. Every setting from the env file %s; model called live (%s). She reads her own inbox %s.%s"
+         % (env_path, settings.model_id, every,
+            " A fresh live ledger: she reads only mail that arrives from now on." if args.fresh else ""))
+    # No setting goes in the config: the worker loads the env file itself.
+    code = supervise("live", state, name, run_dir, {
+        "mode": "live", "run_name": name, "state_dir": state, "env_path": env_path, "fresh": args.fresh,
+        "model_source": "live", "record_path": os.path.join(run_dir, "recorded-answers.jsonl"),
+        "clock_mode": "fixed", "digest": True, "cycles": None, "cycle_s": RUN_CYCLE_S}, say=term)
+    return live_trace(run_dir, name, started, code, term)
+
+
+def live_trace(run_dir, name, started, code, term):
+    """traces/live-run-<stamp>/ for a live run that has ended, pass or fail (livetrace). A start
+    refused before her loop wrote a receipt (a halt, the lock, a setting the worker checks again under
+    its lock) contacted nothing and is no run: it keeps none. Returns the run's exit code, as it was."""
+    receipts_path = os.path.join(run_dir, "receipts.jsonl")
+    if not os.path.isfile(receipts_path):
+        return code
+    outcome, first = livetrace.judge_run(receipts_path, code)
+    try:
+        livetrace.write("run", started, livetrace.now(), outcome, first, printed=term, receipts_path=receipts_path,
+                        extra={"run_name": name, "exit_code": code})
+    except Exception as exc:                 # said loudly; the run's own outcome stands
+        term("Live trace NOT kept: %s. Her receipts are in %s." % (type(exc).__name__, _display(receipts_path)))
+    return code
+
+
+def sandbox_source():
+    """(model source, model ID) for a sandbox run: see demo_source; the ID only when called live."""
+    from . import model as model_mod
+    source = demo_source(os.environ, os.path.exists(answers_path()))
+    return source, model_mod.default_model_id(os.environ) if source == "live" else None
+
+
+def sandbox_config(name, state, run_dir, source, model_id, **more):
+    config = {"mode": "sandbox", "run_name": name, "state_dir": state, "sandbox_root": paths.SANDBOX,
+              "owner_addr": SANDBOX_OWNER, "doris_addr": SANDBOX_DORIS, "model_source": source,
+              "model_id": model_id, "answers_path": answers_path() if source == "replayed" else None,
+              "record_path": os.path.join(run_dir, "recorded-answers.jsonl") if source == "live" else None,
+              "clock_mode": "advance", "calendar_timeout_s": caps.CALENDAR_TIMEOUT_S,
+              "retry_wait_s": caps.CALENDAR_RETRY_WAIT_S}
+    config.update(more)
+    return config
+
+
+def new_run_dir(state, base):
+    """(name, folder) for a new run under state/runs: two runs in one second each get their own."""
+    name = base
+    for n in range(2, 100):
         run_dir = os.path.join(state, "runs", name)
         try:
             os.makedirs(run_dir)
             break
         except FileExistsError:
             name = "%s-%d" % (base, n)
-    config = {"mode": "sandbox", "run_name": name, "state_dir": state, "sandbox_root": paths.SANDBOX,
-              "owner_addr": SANDBOX_OWNER, "doris_addr": SANDBOX_DORIS, "model_source": source,
-              "model_id": model_id, "answers_path": answers_path() if source == "replayed" else None,
-              "record_path": os.path.join(run_dir, "recorded-answers.jsonl") if source == "live" else None,
-              "clock_mode": "advance", "digest": True, "calendar_timeout_s": caps.CALENDAR_TIMEOUT_S,
-              "retry_wait_s": caps.CALENDAR_RETRY_WAIT_S}
+    return name, run_dir
+
+
+def supervise(mode, state, name, run_dir, config, say=None):
+    """The run's config.json, then its worker under the kill switch, whose lines go through say."""
     config_path = os.path.join(run_dir, "config.json")
     with open(config_path, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(config, fh, indent=1, sort_keys=True)
         fh.write("\n")
-    print(first_line(source, model_id))
-    sys.stdout.flush()
     return supervisor.run_supervised(
-        "sandbox", name, [sys.executable, "-m", "doris", WORKER, config_path],
-        os.path.join(run_dir, "receipts.jsonl"), os.path.join(state, "ledger.sqlite"), cwd=paths.SRC, run_id=name)
+        mode, name, [sys.executable, "-m", "doris", WORKER, config_path],
+        os.path.join(run_dir, "receipts.jsonl"), os.path.join(state, "ledger.sqlite"), say=say, cwd=paths.SRC,
+        run_id=name)
+
+
+def _span(seconds):
+    if seconds >= 60 and seconds % 60 == 0:
+        minutes = int(seconds // 60)
+        return "minute" if minutes == 1 else "%d minutes" % minutes
+    return "%g seconds" % seconds
 
 
 def worker(argv):
     """The child the kill switch watches: one run from its config file. Exit 0 done, 1 the run
-    failed (the inbox could not be read, or the chain failed its own check), 3 another Doris holds
-    the ledger, 4 halted (the parent writes that line)."""
+    failed (the inbox could not be read: once in a finite run, caps.MAIL_READ_FAILURES_IN_A_ROW
+    cycles running in a run until stopped; or the chain failed its own check), 3 another Doris
+    holds the ledger, 4 halted (the parent writes that line; when her supervisor is gone, she has
+    written it herself). Under run_supervised her stdin is her lifeline to it (supervisor.Lifeline).
+    A live worker's lines also go to terminal.log beside its config, for the run's trace."""
     with open(argv[0], encoding="utf-8") as fh:
         fields = json.load(fh)
-    cfg = loop.RunConfig(supervised=True, say=_say, **fields)
+    say = _say
+    if fields.get("mode") == "live":
+        say = livetrace.Printed(out=_say, path=os.path.join(os.path.dirname(os.path.abspath(argv[0])),
+                                                            livetrace.TERMINAL))
+    lifeline = supervisor.lifeline(fields.get("mode"), fields.get("state_dir"))
+    cfg = loop.RunConfig(supervised=True, say=say, lifeline=lifeline, **fields)
     try:
         s = loop.run(cfg)
     except loop.Refused as refused:
-        _say(str(refused))
+        say(str(refused))
         return refused.exit_code
     except loop.Halted:
         return supervisor.WORKER_EXIT_HALTED
+    if s.halted:                    # her supervisor is gone: she wrote the halted line and the summary
+        why = ("Halted: her supervisor is gone, so she stopped herself" if s.halted == "supervisor_gone" else
+               "Halted (%s), and her supervisor is gone, so she stopped" % (supervisor.CAUSE_WORDS.get(s.halted, s.halted),))
+        say("%s and wrote the halted line. %d handled, %d held before it. Receipts %s: %s. Run `%s` to go on."
+            % (why, s.handled, s.held, _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN",
+               supervisor._resume_command()))
+        return supervisor.WORKER_EXIT_HALTED
     if s.read_failed:
-        _say("Stopped: the inbox could not be read, so the run ended there (%d handled, %d held before it). "
-             "Nothing was read as an empty inbox. Receipts %s: %s."
-             % (s.handled, s.held, _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
+        times = "" if cfg.cycles is not None else " %d times in a row" % caps.MAIL_READ_FAILURES_IN_A_ROW
+        say("Stopped: the inbox could not be read%s, so the run ended there (%d handled, %d held before it). "
+            "Nothing was read as an empty inbox. Receipts %s: %s."
+            % (times, s.handled, s.held, _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
         return 1
     cost = "none (stub)" if cfg.model_source == "stub" else "$%.4f%s" % (
         s.cost_usd, " (recorded)" if cfg.model_source == "replayed" else "")
-    _say("Done: %d handled, %d held, %d human approvals. %d sent to prospects, %d hold notices, %d bookings. "
-         "Model calls %d, cost %s. Receipts %s: %s."
-         % (s.handled, s.held, s.human_approvals, s.sends, s.hold_notices, s.bookings, s.model_calls, cost,
-            _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
+    say("Done: %d handled, %d held, %d human approvals. %d sent to prospects, %d hold notices, %d bookings. "
+        "Model calls %d, cost %s. Receipts %s: %s."
+        % (s.handled, s.held, s.human_approvals, s.sends, s.hold_notices, s.bookings, s.model_calls, cost,
+           _display(s.receipts_path), "chain verified" if s.verify_ok else "CHAIN BROKEN"))
     return 0 if s.verify_ok else 1
 
 
@@ -193,8 +316,11 @@ def later(name):
 
 
 def _say(text):
-    print(text)
-    sys.stdout.flush()
+    try:
+        print(text)
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        pass        # no terminal left to say it to (a hang-up, a closed pipe): the receipts keep the record
 
 
 def _display(path):
@@ -206,7 +332,13 @@ def _display(path):
     return path if rel.startswith("..") else rel
 
 
-COMMANDS = {"demo": demo, "traps": traps_cmd, "verify": verify, "stop": stop, "resume": resume, WORKER: worker}
+def smoke_cmd(argv):
+    from . import smoke                   # live adapters load only when asked for
+    return smoke.main(argv)
+
+
+COMMANDS = {"demo": demo, "run": run_cmd, "traps": traps_cmd, "verify": verify, "stop": stop, "resume": resume,
+            "smoke": smoke_cmd, WORKER: worker}
 COMMANDS.update({name: later(name) for name in LATER})
 
 

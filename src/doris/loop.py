@@ -1,7 +1,9 @@
 """The loop: read -> classify -> decide -> check -> act -> record, one message at a time.
 
-`run(cfg)` drains the inbox once and returns a RunSummary. Each cycle, in the order of
-calendar-rulings-spec ("The order inside one cycle"):
+`run(cfg)` makes cfg.cycles passes over the inbox and returns a RunSummary: one by default (the
+demo, traps); `python -m doris run` goes on until stopped, waiting for her next cycle on the wall
+clock between passes. Each cycle, in the order of calendar-rulings-spec ("The order inside one
+cycle"):
 
   1. fetch new mail;
   2. screens 1, 2 and 4 over the whole batch, so a stop lands before anything else happens;
@@ -22,26 +24,35 @@ steps to her next ten-minute cycle after each arrival ("her 3:10 PM cycle"); in 
 
 import datetime as _dt
 import hashlib
+import math
 import os
 import time
 import types
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, List, Optional
 
 from . import caps, compose, digest, gate, holds, ics, mail, netguard, parser, paths, policy, receipts
-from . import screens, slots, supervisor, templates, zones
+from . import screens, sentrecord, slots, supervisor, templates, zones
 from . import ledger as ledger_mod
 from . import model as model_mod
 from . import why as why_mod
 from .shapes import UTC, Action, AlreadyExists, CalendarError, CalendarTimeout, MailError, SendUnknown, Slot
 
 CYCLE = _dt.timedelta(minutes=10)
-DIGEST_AT = _dt.time(17, 0)            # Pacific: the demo's digest goes at 5:00 PM (or after the last cycle)
+DIGEST_AT = _dt.time(17, 0)            # Pacific: the digest goes at 5:00 PM (the demo's, or after its last cycle)
 SANDBOX_OWNER = "whizz@fastmail.com"   # the sandbox's owner and Doris addresses (sandbox/README.md)
 SANDBOX_DORIS = "doris.htm@fastmail.com"
 WINDOW = caps.MAX_HORIZON + _dt.timedelta(days=1)    # the span an offer reads
-ENV_NAMES = ("ANTHROPIC_API_KEY", "DORIS_MODEL", "DORIS_MEETING_LINK")   # names only ever reach a receipt
+ENV_OWNER = "DORIS_OWNER_ADDRESS"      # live: the owner's own address, from the env file
+SMOKE_FIRST = "Run `python -m doris smoke --send-to wolf.whizz@fastmail.com` first."
+SMOKE_REFUSAL = "Not started: %s. %s" % (sentrecord.MISSING, SMOKE_FIRST)   # no smoke record at all
+FRESH_OVER_LEDGER = ("Not started: the live ledger is already there, and --fresh only starts a new one. "
+                     "Run without --fresh to go on from it.")
+NO_LIVE_LEDGER = ("Not started: there is no live ledger yet. `python -m doris run --live --fresh` starts one, "
+                  "and she then reads only mail that arrives after it.")
+ENV_KEY = "ANTHROPIC_API_KEY"
+ENV_NAMES = (ENV_KEY, "DORIS_MODEL", templates.MEETING_LINK_ENV, ENV_OWNER)   # names only ever reach a receipt
 
 CALENDAR_FAULTS = frozenset({"timeout-once", "timeout-twice", "read-fails", "slow-calendar", "lands-between",
                              "write-unknown-present", "write-unknown-absent", "lookup-fails",
@@ -54,6 +65,17 @@ RESUMABLE_BOOKING_STATES = ("intent", "unconfirmed", "written", "confirmed", "co
 NOTICE_WITHOUT_TIMES = frozenset({"hold.owner_mail", "hold.calendar_down", "hold.unknown_result", "hold.no_slot",
                                   "hold.remove_failed", "hold.internal_error"})
 
+HALT_POLL_S = 1.0                      # how often a long run's wait looks for a halt itself
+COPY_NAME_HEX = 16                     # her copy of a mail is named by this many hex digits of its sha256,
+                                       # short enough for Windows' default path limit; the receipt keeps all 64
+_sleep = time.sleep                    # her waits go through here, so a test can stand in for the wall clock
+_time = time.time
+
+
+def _wall_now():
+    """The wall clock, aware UTC to the second: a live run's clock."""
+    return _dt.datetime.now(UTC).replace(microsecond=0)
+
 
 # ------------------------------------------------------------------------------------------
 # Config and summary
@@ -63,20 +85,35 @@ class RunConfig:
     mode: str                               # sandbox | live | throwaway
     run_name: str                           # starts with the model source, then the mode (A6)
     state_dir: str                          # holds ledger.sqlite, ledger.lock, HALT and runs/
-    sandbox_root: str                       # holds inbox/, calendar/, outbox/ and clock.txt
-    owner_addr: str
-    doris_addr: str
+    sandbox_root: Optional[str] = None      # sandbox and throwaway: inbox/, calendar/, outbox/ and clock.txt
+    owner_addr: Optional[str] = None        # sandbox and throwaway; a live run reads both from its env file
+    doris_addr: Optional[str] = None
     model_source: str = "stub"              # live | replayed | stub | yes-man
     model_id: Optional[str] = None
     answers_path: Optional[str] = None      # recorded answers, for replayed
     record_path: Optional[str] = None       # live: where answers are recorded
     clock_mode: str = "fixed"               # fixed: stays at clock.txt; advance: steps cycle by cycle
     budget_usd: float = caps.BUDGET_USD_PER_RUN
-    digest: bool = False                    # send S2 when the run ends (the demo does)
+    digest: bool = False                    # S2: when a finite run ends (the demo), or each day from 5:00 PM
+                                            # Pacific in a run until stopped (`run`)
     supervised: bool = False                # the worker under the kill switch: a halt exits, the parent records it
     retry_wait_s: Optional[float] = None    # None: caps.CALENDAR_RETRY_WAIT_S
     calendar_timeout_s: Optional[float] = None   # sandbox calendar's wait: None the adapter's own; demo caps'
     say: Optional[Callable[[str], None]] = None   # one plain line per message, for the terminal
+    env_path: Optional[str] = None          # live only: the env file the run loads itself (live_settings)
+    fresh: bool = False                     # live only: start a new live ledger, reading mail from now on
+    cycles: Optional[int] = 1               # passes over the inbox; None: until stopped (`run`)
+    cycle_s: Optional[float] = None         # the wall-clock grid her waits keep; None: CYCLE, ten minutes
+    lifeline: Optional[object] = None       # the worker's tie to its supervisor (supervisor.Lifeline): once it
+                                            # is gone she halts herself and writes her own halted line
+    # The smoke's own run (live only; smoke.py): her loop on the smoke's one test request, on a throwaway
+    # ledger of its own (state_dir), obeying the live folder all the same.
+    live_dir: Optional[str] = None          # the live state folder whose HALT, STOP and smoke record she obeys
+                                            # (None: state_dir, as every other run)
+    smoke_message_id: Optional[str] = None  # the one message she reads: the smoke's request, marked with
+                                            # live.SMOKE_TEST_KEYWORD (needs live_dir)
+    calendar_read_only: bool = False        # a create or delete is refused, so no test booking reaches the
+                                            # owner's calendar (the message is held instead)
 
 
 @dataclass
@@ -108,7 +145,8 @@ class Refused(Exception):
 
 
 class Halted(Exception):
-    """A halt was found mid-run (G1, or the budget cap). The worker exits; the parent writes the line."""
+    """A halt was found mid-run (G1, or the budget cap). The worker exits; the parent writes the line
+    (unless the worker's supervisor is gone: then she writes it herself)."""
 
     def __init__(self, cause):
         Exception.__init__(self, cause)
@@ -121,6 +159,154 @@ class _CalendarDown(Exception):
     def __init__(self, code="hold.calendar_down"):
         Exception.__init__(self, code)
         self.code = code
+
+
+class _ReadsFailed(Exception):
+    """A run until stopped: her inbox could not be read at caps.MAIL_READ_FAILURES_IN_A_ROW cycles
+    running. Each failure has its error line; the run ends on its summary, read_failed."""
+
+
+class _ReadOnlyCalendar(object):
+    """The smoke's run: the owner's calendar for reads only. A create or a delete is refused as a
+    CalendarError, which the loop holds on (calendar_down): a test booking never reaches his calendar."""
+    REFUSED = "the smoke's run writes nothing to the owner's calendar"
+
+    def __init__(self, calendar):
+        self._calendar = calendar
+
+    def create_only(self, booking_id, ics_bytes):
+        raise CalendarError(self.REFUSED)
+
+    def delete(self, booking_id):
+        raise CalendarError(self.REFUSED)
+
+    def __getattr__(self, name):                # query, get and the rest: the calendar's own
+        return getattr(self._calendar, name)
+
+
+def compose_ok_message_id(value):
+    """One Message-ID, with or without its brackets: what the smoke mints and her fetch can search for."""
+    from .adapters import live
+    return isinstance(value, str) and bool(live._MESSAGE_ID.match(live._norm_mid(value)))
+
+
+class LiveSettings(object):
+    """What a live run takes from its env file. Its repr shows no value: the env holds her app
+    password and the model key, and the link and the addresses are the env file's too."""
+    __slots__ = ("env", "owner_addr", "doris_addr", "meeting_link", "hosts", "model_id")
+
+    def __init__(self, env, owner_addr, doris_addr, meeting_link, hosts, model_id):
+        self.env, self.owner_addr, self.doris_addr = env, owner_addr, doris_addr
+        self.meeting_link, self.hosts, self.model_id = meeting_link, hosts, model_id
+
+    def __repr__(self):
+        return "<live settings from the env file>"
+
+    __str__ = __repr__
+
+
+def _live_link(env, error):
+    """The meeting link live bookings carry: one https link of printable characters, no space."""
+    name = templates.MEETING_LINK_ENV
+    value = (env.get(name) or "").strip()
+    if not value:
+        raise error("%s is not set" % name)
+    try:
+        parts = urllib.parse.urlsplit(value)
+        ok = parts.scheme == "https" and bool(parts.hostname)
+    except ValueError:
+        ok = False
+    if not ok or len(value) > ics.MAX_LINK_CHARS or not all(0x21 <= ord(c) <= 0x7E for c in value):
+        raise error("%s must be one https link of printable characters, at most %d" % (name, ics.MAX_LINK_CHARS))
+    return value
+
+
+def model_hosts():
+    """The hosts a live model call reaches: the API's, and the HTTPS proxy's when the environment
+    names one (the network guard lets the call through the proxy)."""
+    hosts = [urllib.parse.urlsplit(model_mod.API_URL).hostname]
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    if proxy:
+        hosts.append(urllib.parse.urlsplit(proxy).hostname)
+    return tuple(h for h in hosts if h)
+
+
+def smoke_refusal(state_dir, now):
+    """None when the live state folder holds the smoke's sent record (sentrecord) exactly as
+    `smoke --send-to` writes it once it finds its copy in Sent, and fresh at now (no more than
+    caps.SMOKE_RECORD_MAX_AGE old): the proof that the mail she sends reaches her Sent folder. Else the
+    one line a live run is refused with, saying what is wrong."""
+    why = sentrecord.problem(state_dir, now)
+    return None if why is None else "Not started: %s. %s" % (why, SMOKE_FIRST)
+
+
+def live_settings(env_path, model_source):
+    """Everything a live run takes from its env file, and nothing from os.environ: her address and
+    the owner's, the meeting link, the hosts the network guard allows and, with the model live, the
+    model ID (the key stays in the env). The env it keeps holds only the names she reads (ENV_NAMES
+    and live.ENV_NAMES): the smoke's wolf.whizz settings in the same file never reach her loop. The
+    adapters are built once to check every setting they read; building one connects nowhere.
+    Refused (exit 2) with one plain line naming the env file or the setting, never a value."""
+    from . import envfile
+    from .adapters import live
+    try:
+        env = envfile.load(env_path, names=_her_names())
+    except envfile.EnvFileError as exc:
+        raise Refused("Not started: the env file at %s cannot be used: %s." % (env_path, exc), 2) from None
+    try:
+        return settings_from(env, model_source)
+    except live.ConfigError as exc:
+        raise Refused("Not started: %s (env file %s)." % (exc, env_path), 2) from None
+
+
+def _her_names():
+    from .adapters import live
+    return set(ENV_NAMES) | set(live.ENV_NAMES)
+
+
+def her_env(env):
+    """Of an env already loaded (the smoke's, which holds wolf's names too), the names she reads alone."""
+    names = _her_names()
+    return {name: value for name, value in env.items() if name in names}
+
+
+def settings_from(env, model_source):
+    """live_settings' checks on an env that holds only her names (envfile.load with them, or her_env:
+    the smoke checks her loop's settings so before its end-to-end test). live.ConfigError naming the
+    setting, never its value."""
+    from .adapters import live
+    doris_addr = live.bare_address(env, live.ENV_ADDRESS)
+    owner_addr = live.bare_address(env, ENV_OWNER)
+    if owner_addr.lower() == doris_addr.lower():
+        raise live.ConfigError("%s must be the owner's own address, not hers" % ENV_OWNER)
+    link = _live_link(env, live.ConfigError)
+    hosts = tuple(live.hosts(env))
+    live.LiveMail(env, doris_addr)
+    live.LiveCalendar(env)
+    model_id = None
+    if model_source == "live":
+        if not (env.get(ENV_KEY) or "").strip():
+            raise live.ConfigError("%s is not set" % ENV_KEY)
+        model_id = model_mod.default_model_id(env)
+        if not caps.MODEL_PRICES_USD_PER_MTOK.get(model_id):
+            raise live.ConfigError("DORIS_MODEL names a model with no price in caps.MODEL_PRICES_USD_PER_MTOK")
+    return LiveSettings(env, owner_addr, doris_addr, link, hosts, model_id)
+
+
+def live_preflight(state_dir, env_path, fresh):
+    """`run --live`'s checks in the worker's own order, for the command line to make before it makes
+    anything: the env file's settings (the model live), the smoke's proof, then the ledger against
+    --fresh. Refused (exit 2) in one plain line; the worker makes every check again under its lock."""
+    settings = live_settings(env_path, "live")
+    refusal = smoke_refusal(state_dir, _wall_now())
+    if refusal is not None:
+        raise Refused(refusal, 2)
+    there = os.path.exists(os.path.join(state_dir, "ledger.sqlite"))
+    if fresh and there:
+        raise Refused(FRESH_OVER_LEDGER, 2)
+    if not fresh and not there:
+        raise Refused(NO_LIVE_LEDGER, 2)
+    return settings
 
 
 # ------------------------------------------------------------------------------------------
@@ -164,6 +350,11 @@ def read_clock(root):
     return t.astimezone(UTC)
 
 
+def _file_bytes(path):
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
 def _status_for(outcome):
     if outcome == "quarantine":
         return "quarantined"
@@ -174,6 +365,12 @@ def _status_for(outcome):
     if outcome in ("dropped", "skip"):
         return "dropped"
     return "done"
+
+
+def _as_written(ev, slot):
+    """Her event read back exactly as she wrote it: the slot's start and end, and CONFIRMED."""
+    return (ev is not None and ev.start_utc == slot.start_utc and ev.end_utc == slot.end_utc
+            and ev.status == "CONFIRMED")
 
 
 def _event_line(ev):
@@ -248,7 +445,32 @@ class _Run:
             raise ValueError("clock_mode is fixed or advance, not %r" % (cfg.clock_mode,))
         if cfg.model_source not in model_mod.SOURCES:
             raise ValueError("unknown model source %r" % (cfg.model_source,))
+        if cfg.mode != "live" and (cfg.live_dir is not None or cfg.smoke_message_id is not None
+                                   or cfg.calendar_read_only):
+            raise ValueError("live_dir, smoke_message_id and calendar_read_only are for the smoke's live run only")
+        if cfg.smoke_message_id is not None and (not cfg.live_dir or not compose_ok_message_id(cfg.smoke_message_id)):
+            raise ValueError("smoke_message_id needs live_dir, and it must be one Message-ID")
+        if cfg.mode == "live":
+            if cfg.sandbox_root is not None or cfg.owner_addr is not None or cfg.doris_addr is not None:
+                raise ValueError("a live run reads both addresses from its env file and has no sandbox")
+            if not cfg.env_path:
+                raise ValueError("a live run needs env_path, its env file")
+            if cfg.clock_mode != "fixed":
+                raise ValueError("a live run reads the wall clock: clock_mode is fixed")
+        else:
+            if not (cfg.sandbox_root and cfg.owner_addr and cfg.doris_addr):
+                raise ValueError("a %s run needs sandbox_root, owner_addr and doris_addr" % (cfg.mode,))
+            if cfg.env_path is not None or cfg.fresh:
+                raise ValueError("env_path and fresh are for a live run only")
+        if cfg.cycles is not None and (isinstance(cfg.cycles, bool) or not isinstance(cfg.cycles, int)
+                                       or cfg.cycles < 1):
+            raise ValueError("cycles is a whole number from 1, or None for until stopped")
+        if cfg.cycle_s is not None and (isinstance(cfg.cycle_s, bool) or not isinstance(cfg.cycle_s, (int, float))
+                                        or not cfg.cycle_s > 0):
+            raise ValueError("cycle_s is a positive number of seconds")
         self.cfg = cfg
+        self.halt_dir = cfg.live_dir or cfg.state_dir   # where her HALT, STOP and smoke record are read
+        self.cycle_s = CYCLE.total_seconds() if cfg.cycle_s is None else float(cfg.cycle_s)
         self.mode = cfg.mode
         self.run_id = cfg.run_name
         self.run_dir = os.path.join(cfg.state_dir, "runs", cfg.run_name)
@@ -258,12 +480,16 @@ class _Run:
         self.wait_s = caps.CALENDAR_RETRY_WAIT_S if cfg.retry_wait_s is None else cfg.retry_wait_s
         self.lock = self.ledger = self.receipts = self.guard = None
         self.mail = self.calendar = self.model = self.env = None
+        self.link_before = self.pinned_link = None
+        self.live = None                    # LiveSettings, for a live run
+        self.mail_since = None              # live: the ledger's fresh start; mail before it is never read
         self.model_target = cfg.model_source
         self.t = None
         self.model_down = False
         self.clean_readbacks = set()
         self.redo = set()
         self.batch_keys = set()
+        self.read_failures = 0              # a run until stopped: her failed inbox reads in a row
 
     # --- opening and closing ---------------------------------------------------------------
     def open(self):
@@ -279,14 +505,22 @@ class _Run:
         if cause is not None:
             raise Refused("Halted (%s). Only `python -m doris resume` clears it." % (cause,),
                           supervisor.WORKER_EXIT_HALTED)
+        if cfg.mode == "live":              # every setting from the env file, before anything is made
+            self.live = live_settings(cfg.env_path, cfg.model_source)
+            refusal = smoke_refusal(self.halt_dir, _wall_now())
+            if refusal is not None:
+                raise Refused(refusal, 2)
+            self.cfg = cfg = replace(cfg, owner_addr=self.live.owner_addr, doris_addr=self.live.doris_addr)
         os.makedirs(os.path.join(self.run_dir, "messages"), exist_ok=True)
-        self.t = None if cfg.mode == "live" else read_clock(cfg.sandbox_root)
+        # live: the env file's link; the sandbox: its own fixed link, never one from the shell
+        self.pin_link(self.live.meeting_link if self.live else templates.PLACEHOLDER_MEETING_LINK)
+        self.t = None if self.live else read_clock(cfg.sandbox_root)
         self.guard = netguard.install(self.allowed_hosts())
-        self.ledger = ledger_mod.Ledger(os.path.join(cfg.state_dir, "ledger.sqlite"))
+        self.ledger = self.open_ledger()
         self.receipts = receipts.ReceiptWriter(self.receipts_path, self.run_id, cfg.mode, clock=self.now)
         self.mail, self.calendar = self.adapters()
         self.model = model_mod.Model(cfg.model_source, model_id=cfg.model_id, answers_path=cfg.answers_path,
-                                     record_path=cfg.record_path)
+                                     record_path=cfg.record_path, env=self.live.env if self.live else None)
         if cfg.model_source in ("live", "replayed"):
             self.model_target = self.model.model_id
         led = self.ledger
@@ -298,7 +532,35 @@ class _Run:
             queued_count=lambda addr: len([m for m in led.unprocessed_messages(sender=addr)
                                            if ledger_mod.norm_id(m["key"]) not in self.batch_keys]))
 
+    def open_ledger(self):
+        """The mode's ledger. Live (ruling 8): no ledger, no run, unless told to start fresh; a fresh
+        start records its time, and she reads only mail received from then on."""
+        path = os.path.join(self.cfg.state_dir, "ledger.sqlite")
+        if self.live is None:
+            return ledger_mod.Ledger(path)
+        if self.cfg.fresh:
+            try:
+                ledger_mod.start_fresh(path, self.now())
+            except FileExistsError:
+                raise Refused(FRESH_OVER_LEDGER, 2) from None
+        elif not os.path.exists(path):
+            raise Refused(NO_LIVE_LEDGER, 2)
+        led = ledger_mod.Ledger(path, create=False)
+        self.mail_since = led.fresh_start()
+        if self.mail_since is None:
+            led.close()
+            raise Refused("Not started: the live ledger names no fresh start, so old mail cannot be told from new.", 2)
+        return led
+
+    def pin_link(self, link):
+        """The one link this run uses, pinned for the reply, the .ics and G13 alike; let go at close."""
+        self.link_before = templates.use_meeting_link(link)
+        self.pinned_link = link
+
     def close_handles(self):
+        if self.pinned_link is not None:
+            templates.use_meeting_link(self.link_before)
+            self.pinned_link = self.link_before = None
         if self.guard is not None:
             self.guard.uninstall()
             self.guard = None
@@ -310,31 +572,42 @@ class _Run:
             self.lock = None
 
     def allowed_hosts(self):
-        hosts = []
+        hosts = list(self.live.hosts) if self.live else []      # live: the hosts the env file names
         if self.cfg.model_source == "live":
-            hosts.append("api.anthropic.com")
-            proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
-            if proxy:
-                hosts.append(urllib.parse.urlsplit(proxy).hostname)
+            hosts += model_hosts()
         return tuple(h for h in hosts if h)
 
     def adapters(self):
-        if self.cfg.mode == "live":
-            raise Refused("The live adapters (IMAP, SMTP, CalDAV) are not built yet.", 2)
+        cal = {} if self.cfg.calendar_timeout_s is None else {"timeout_s": self.cfg.calendar_timeout_s}
+        if self.live:
+            from .adapters import live
+            calendar = live.LiveCalendar(self.live.env, **cal)
+            return (live.LiveMail(self.live.env, self.cfg.doris_addr, since_utc=self.mail_since,
+                                  smoke_message_id=self.cfg.smoke_message_id),
+                    _ReadOnlyCalendar(calendar) if self.cfg.calendar_read_only else calendar)
         from .adapters import sandbox
         clock = self.now if self.cfg.clock_mode == "advance" else None
-        cal = {} if self.cfg.calendar_timeout_s is None else {"timeout_s": self.cfg.calendar_timeout_s}
         return (sandbox.SandboxMail(self.cfg.sandbox_root, self.cfg.doris_addr, clock=clock),
                 sandbox.SandboxCalendar(self.cfg.sandbox_root, **cal))
 
     # --- small helpers ---------------------------------------------------------------------
     def now(self):
         if self.t is None:
-            return _dt.datetime.now(UTC).replace(microsecond=0)
+            return _wall_now()
         return self.t
 
     def halt_cause(self):
-        return supervisor.halt_cause(self.mode, state_dir=self.cfg.state_dir)
+        """The halt in force, read from disk now (G1 asks this at every effect). A worker whose
+        supervisor is gone is halted even before HALT is down, or when it cannot be written."""
+        cause = supervisor.halt_cause(self.mode, state_dir=self.halt_dir)
+        if cause is None and self.supervisor_gone():
+            return "supervisor_gone"
+        return cause
+
+    def supervisor_gone(self):
+        """True once the worker's lifeline to its supervisor has closed (supervisor.Lifeline)."""
+        line = self.cfg.lifeline
+        return bool(line is not None and line.gone)
 
     def check_halt(self):
         try:
@@ -345,14 +618,17 @@ class _Run:
             raise Halted(cause)
 
     def link(self):
-        return templates.meeting_link()     # the one the gate checks (G13): the env, else the placeholder
+        return templates.meeting_link()     # the one the gate checks (G13): the link this run pinned
 
     def pause(self):
         if self.wait_s > 0:
             time.sleep(self.wait_s)
 
     def write(self, kind, payload, subject="", why=None):
-        return self.receipts.write(kind, payload, subject=subject, why=why)
+        """One receipt line. The law: the meeting link never goes in one, whoever wrote it (a sender's
+        text, the model's answer quoting it): every form of it is "[meeting link]" in every line."""
+        return self.receipts.write(kind, templates.redact_values(payload), subject=templates.redact_link(subject),
+                                   why=templates.redact_values(why) if why is not None else None)
 
     def called(self, call, target, subject="", **detail):
         return self.write("called", dict(detail, call=call, target=target), subject=subject)["seq"]
@@ -361,7 +637,8 @@ class _Run:
         self.write("result", dict(detail, call_seq=seq), subject=subject)
 
     def error(self, e, step, exc, **detail):
-        self.write("error", dict(detail, step=step, error="%s: %s" % (type(exc).__name__, str(exc)[:200])),
+        text = templates.redact_link(str(exc))[:200]       # the link out before the cut, so none is cut in half
+        self.write("error", dict(detail, step=step, error="%s: %s" % (type(exc).__name__, text)),
                    subject=e.subject if e is not None else "")
 
     # --- start, reconcile, drain, finish -------------------------------------------------------
@@ -369,20 +646,50 @@ class _Run:
         cfg = self.cfg
         interrupted = [r["run_id"] for r in self.ledger.unended_runs() if r["run_id"] != self.run_id]
         self.ledger.start_run(self.run_id, self.mode, self.now())
-        self.write("observed", {
+        payload = {
             "step": "start", "mode": cfg.mode, "model_source": cfg.model_source, "model": self.model_target,
             "run_name": cfg.run_name, "clock": self.now(), "clock_mode": cfg.clock_mode,
-            "env_set": sorted(n for n in ENV_NAMES if os.environ.get(n)), "interrupted_runs": interrupted,
-            "simulated": cfg.mode != "live"})
+            "env_set": self.env_set(), "interrupted_runs": interrupted, "simulated": cfg.mode != "live"}
+        if self.live:
+            payload.update(fresh_start=cfg.fresh, mail_since=self.mail_since)
+        self.write("observed", payload)
         self.reconcile()
+
+    def env_set(self):
+        """The names set, never a value: live from its env file, otherwise from the environment."""
+        if self.live:
+            from .adapters import live
+            return sorted(n for n in set(ENV_NAMES) | set(live.ENV_NAMES) if (self.live.env.get(n) or "").strip())
+        return sorted(n for n in ENV_NAMES if os.environ.get(n))
 
     def reconcile(self):
         """Ruling 8 and A3: before anything new, every unfinished send is looked up in Sent (never
         sent again blind), every unfinished booking is looked up on the calendar, and every message
-        fetched but never finished is read again through the whole loop."""
+        fetched but never finished is read again through the whole loop. A send cut off mid-send
+        (sending: a kill or a crash came between its mark and the transport's answer) may have gone,
+        so it gets a send's two looks, the wait between them live (one wait for all of them); absent
+        both times it is unknown and never sent again (review 2, finding 1), and the terminal says so."""
+        cut_off = []
         for s in self.ledger.unfinished_sends():
             found = self.look_in_sent(None, s["message_id"], s["template"] or "-")
-            self.ledger.set_send_state(s["message_id"], "confirmed" if found else "unknown")
+            if found:
+                self.ledger.set_send_state(s["message_id"], "confirmed")
+            elif found is False and s["state"] == "sending":
+                cut_off.append(s)
+        if cut_off:
+            wait = caps.SENT_LOOK_WAIT_S if self.live else 0.0
+            if wait > 0:
+                _sleep(wait)
+            for s in cut_off:
+                template = s["template"] or "-"
+                found = self.look_in_sent(None, s["message_id"], template, after_wait_s=wait or None)
+                if found:
+                    self.ledger.set_send_state(s["message_id"], "confirmed")
+                elif found is False:
+                    self.ledger.set_send_state(s["message_id"], "unknown")
+                    self.say("%s  %s was cut off mid-send (a stop or a crash): no copy in Sent after two looks. "
+                             "It may have gone, so it is never sent again." % (templates.fmt_pacific(self.now()),
+                                                                              template))
         for b in self.ledger.unfinished_bookings():
             try:
                 ev = self.get_event(None, b["booking_id"])
@@ -409,6 +716,54 @@ class _Run:
                 return                      # the adapter named an arrival it then did not hand over
             last = self.t
 
+    def passes(self):
+        """cfg.cycles passes over the inbox (None: until stopped), each after a wait for her next
+        cycle. On the sandbox's advancing clock a later pass first steps her clock to her next cycle
+        and reads what is in by then (a judge's new email), before any later arrival. In a run until
+        stopped with the digest on (`run`), each pass ends with the day's digest once it is due."""
+        self.one_pass(first=True)
+        done = 1
+        while self.cfg.cycles is None or done < self.cfg.cycles:
+            self.wait_for_cycle()
+            self.one_pass()
+            done += 1
+
+    def one_pass(self, first=False):
+        """One pass over the inbox, then the day's digest when due. A read that fails is never an
+        empty inbox (Contract 7). A finite run (the demo, traps) ends on it. A run until stopped
+        writes an error line and reads again at her next cycle; caps.MAIL_READ_FAILURES_IN_A_ROW
+        failures running end it on its summary (read_failed). One good read starts the count again."""
+        try:
+            if not first and self.cfg.clock_mode == "advance":
+                self.t = next_cycle(self.t + _dt.timedelta(seconds=1))
+                self.batch(self.fetch())
+            self.drain()
+        except MailError as exc:
+            if self.cfg.cycles is not None:
+                raise
+            self.read_failures += 1
+            limit = caps.MAIL_READ_FAILURES_IN_A_ROW
+            self.error(None, "fetch", exc, failed_in_a_row=self.read_failures, ends_after=limit)
+            if self.read_failures >= limit:
+                raise _ReadsFailed() from None
+            self.say("%s  Inbox not read: %s (error line written). She tries again at her next cycle (%d failed "
+                     "in a row; the run ends at %d)." % (templates.fmt_pacific(self.now()), type(exc).__name__,
+                                                         self.read_failures, limit))
+        else:
+            self.read_failures = 0
+        self.daily_digest()
+
+    def wait_for_cycle(self):
+        """Until her next cycle: the next point on a wall-clock grid of cycle_s seconds. She looks for
+        a halt at least every HALT_POLL_S; under the kill switch the parent kills her sooner."""
+        end = (math.floor(_time() / self.cycle_s) + 1) * self.cycle_s
+        while True:
+            self.check_halt()
+            left = end - _time()
+            if left <= 0:
+                return
+            _sleep(min(left, HALT_POLL_S))
+
     def finish(self):
         s = self.summary
         lines = receipts.read_lines(self.receipts_path)
@@ -426,7 +781,15 @@ class _Run:
         s.verify_ok = receipts.verify(self.receipts_path, finished=True).ok
 
     def write_halted(self, cause):
-        """Unsupervised runs (traps, tests) write their own halted line; under the kill switch the parent does."""
+        """Unsupervised runs (traps, tests) write their own halted line, and so does a worker whose
+        supervisor is gone, HALT first so the halt survives a restart (when even that cannot be
+        written, the line says so); under the kill switch the supervisor writes it."""
+        kept = {}
+        if self.supervisor_gone():
+            try:
+                supervisor.request_stop(self.mode, "supervisor_gone", state_dir=self.halt_dir)
+            except Exception:
+                kept = {"halt_file": "unwritten"}      # she stops all the same; a restart is not refused
         lines = receipts.read_lines(self.receipts_path)
         flight = receipts.in_flight(lines)
         dropped = []
@@ -439,8 +802,8 @@ class _Run:
             dropped.append({"kind": "message", "message": m["key"], "thread": m["thread_key"],
                             "template": None, "booking_id": None})
         why_code = "halt." + cause if ("halt." + cause) in why_mod.CODES else "halt.unreadable"
-        self.write("halted", {"cause": cause, "in_flight": flight or "none", "dropped": dropped,
-                              "summary": "follows"},       # cut the summary and verify fails
+        self.write("halted", dict({"cause": cause, "in_flight": flight or "none", "dropped": dropped,
+                                   "summary": "follows"}, **kept),       # cut the summary and verify fails
                    why=why_mod.why(why_code))
 
     # --- read ---------------------------------------------------------------------------------
@@ -598,7 +961,7 @@ class _Run:
                                            "inspected": False} for a in msg.attachments]
                 payload["links_seen"], payload["opened"] = msg.links_seen, 0
         if not e.sensitive:
-            payload["message_copy"] = self.keep_copy(e)
+            payload.update(self.keep_copy(e))
         self.write("observed", payload, subject=e.subject)
 
     @staticmethod
@@ -610,12 +973,32 @@ class _Run:
         return out
 
     def keep_copy(self, e):
-        name = os.path.join("messages", e.raw_sha256 + ".eml")
+        """Her copy of the mail as it came, named by the first COPY_NAME_HEX hex digits of its sha256
+        (raw_sha256 on the observed line holds all 64), for whoever reads the receipts; returns the
+        observed line's copy fields. The law keeps the meeting link out of it: every form of the
+        link in its bytes becomes "[meeting link]" (copy_redacted), and a copy that would still show
+        the link once a part or header is decoded (base64, an encoded word) is not kept at all
+        (copy_withheld), nor one the check could not run on. A mail without the link is kept byte
+        for byte. Should another mail's copy already hold the short name, this one takes the whole hash."""
+        data, replaced = templates.redact_link_bytes(e.item.raw)
+        try:
+            left = any(templates.has_link(view) for view in mail.decoded_views(data))
+        except Exception:                   # Contract 7: a check that cannot run keeps nothing
+            return {"copy_withheld": "link_check_failed"}
+        if left:
+            return {"copy_withheld": "meeting_link"}
+        name = os.path.join("messages", e.raw_sha256[:COPY_NAME_HEX] + ".eml")
         path = os.path.join(self.run_dir, name)
+        if os.path.exists(path) and _file_bytes(path) != data:
+            name = os.path.join("messages", e.raw_sha256 + ".eml")
+            path = os.path.join(self.run_dir, name)
         if not os.path.exists(path):
             with open(path, "wb") as fh:
-                fh.write(bytes(e.item.raw))
-        return name.replace(os.sep, "/")
+                fh.write(data)
+        fields = {"message_copy": name.replace(os.sep, "/")}
+        if replaced:
+            fields["copy_redacted"] = "meeting_link"
+        return fields
 
     # --- what the screens settled -------------------------------------------------------------
     def close_screened(self, e):
@@ -668,7 +1051,7 @@ class _Run:
         detail = {"ok": a.ok, "source": a.source, "request_sha256": a.request_sha256, "tokens_in": a.tokens_in,
                   "tokens_out": a.tokens_out, "cost_usd": a.cost_usd}
         if not a.ok:
-            detail["error"] = str(getattr(self.model, "last_error", "") or "")[:200]
+            detail["error"] = templates.redact_link(str(getattr(self.model, "last_error", "") or ""))[:200]
         self.result(seq, subject=e.subject, **detail)
         self.summary.model_calls += 1
         self.model_down = not a.ok
@@ -679,10 +1062,11 @@ class _Run:
         e.injection_seen = bool(a.injection_seen)
         self.write("classified", {"cls": a.cls, "date": a.date, "time24": a.time24, "zone": a.zone,
                                   "length_min": a.length_min, "pick": a.pick, "injection_seen": a.injection_seen,
-                                  "side_question": a.side_question, "ok": a.ok, "source": a.source, "raw": a.raw},
+                                  "side_question": a.side_question, "ok": a.ok, "source": a.source,
+                                  "raw": templates.redact_json_text(a.raw)},     # keeps its shape: see there
                    subject=e.subject)
         if self.ledger.spend(self.run_id) >= self.cfg.budget_usd:
-            supervisor.request_stop(self.mode, "budget_cap", state_dir=self.cfg.state_dir)
+            supervisor.request_stop(self.mode, "budget_cap", state_dir=self.halt_dir)
             raise Halted("budget_cap")
         return a
 
@@ -706,7 +1090,8 @@ class _Run:
     def own_effects(self, e):
         """What a message read again after a kill or a stop already did (ruling 8, A3), for policy to
         keep: its hold; its reply, if Sent has it (one never confirmed is looked up now: the lookup
-        failing, it may have gone out, so it is never sent again blind); its booking written down."""
+        failing, or a reply that may have gone out, cut off sending, unknown or handed over, is never
+        sent again blind, and the message is held); its booking written down."""
         h = self.ledger.hold_for_message(e.key)
         if h is not None:
             e.recovered = True
@@ -717,14 +1102,17 @@ class _Run:
             if sent is None:
                 continue
             found = True if sent["state"] == "confirmed" else self.look_in_sent(e, mid, template)
-            if found is None:
-                self.ledger.set_send_state(mid, "unknown")
-                e.recovered = True
-                return {"own_reply_unknown": template}
             if found:
                 self.ledger.set_send_state(mid, "confirmed")
                 e.recovered = True
                 return {"own_reply": template}
+            if found is None or sent["state"] in ledger_mod.NEVER_AGAIN_STATES:
+                # the lookup failed, or it may have gone (cut off sending, unknown, or the server took
+                # it) and Sent shows no copy: it is never sent again (decision 76; review 2, finding 1)
+                if found is False:
+                    self.ledger.set_send_state(mid, "unknown")  # sending looked for: unknown; the rest stay
+                e.recovered = True
+                return {"own_reply_unknown": template}
         b = self.own_booking(e)
         if b is not None:
             e.recovered = True
@@ -932,12 +1320,17 @@ class _Run:
         return self.confirm_booking(e, f, plan, bid, slot)
 
     def confirm_booking(self, e, f, plan, bid, slot):
-        """Her event is written: read it back and re-read its span, then T1 once."""
+        """Her event is written: read it back (held unless exactly as she wrote it), re-read its span, T1 once."""
         now = self.now()
         try:
             mine, others = self.readback(e, bid, slot)
         except _CalendarDown as down:
             return self.hold_code(e, down.code, f)
+        if mine is not None and not _as_written(mine, slot):
+            # The server kept other times or another status than she wrote: nothing goes to the prospect.
+            self.error(e, "readback", CalendarError("her event read back other than she wrote it"),
+                       booking_id=bid)
+            return self.hold_code(e, "hold.internal_error", f)
         if others:
             return self.collision(e, f, plan, bid, slot)
         if mine is None:
@@ -1101,8 +1494,7 @@ class _Run:
             if ev is not None:
                 detail.update(_event_line(ev))
             if expect is not None:
-                detail["fields_match"] = (ev is not None and ev.start_utc == expect.start_utc
-                                          and ev.end_utc == expect.end_utc and ev.status in ("CONFIRMED", ""))
+                detail["fields_match"] = _as_written(ev, expect)
             self.result(seq, subject=subject, **detail)
             return ev
 
@@ -1187,7 +1579,7 @@ class _Run:
         """G1 to G3 stop her: a known halt cause, or fail closed."""
         cause = g.halt_cause
         if g.first_fail == "G3" and cause == "budget_cap":
-            supervisor.request_stop(self.mode, "budget_cap", state_dir=self.cfg.state_dir)
+            supervisor.request_stop(self.mode, "budget_cap", state_dir=self.halt_dir)
             return cause                    # written to disk, so it survives a restart
         if cause in why_mod.HALT_CAUSES:
             return cause
@@ -1293,9 +1685,18 @@ class _Run:
 
     def deliver(self, e, mid, kind, template, to_addr, raw, body, envelope, tslots, before_send=None):
         """Recorded before it is sent; sent once; found in Sent after (one more look); never resent blind.
-        A send an earlier run recorded and never confirmed is looked up in Sent first: found, it is
-        done; the lookup failing, nothing goes out (unknown); confirmed absent, it goes out now under
-        the same Message-ID (ruling 8). True only when her copy is found in Sent."""
+        Right before the transport is called she reads the halt again (G1 passed before the record, and
+        a lookup in Sent can take a while): a halt in force then raises Halted with the send still
+        pending and no send line written, so the run after `resume` sends it once.
+        It is marked sending right before the transport is called: from there it may have gone, and a
+        kill or a crash before the transport's answer is written down leaves it so (review 2, finding
+        1). The answer is read the same for any transport: accepted (a JMAP submission created) is handed_over,
+        written down before the Sent look (decision 76); SendUnknown is unknown, also before any look;
+        MailError (it surely did not go) puts it back to pending. From sending on, it never goes
+        again, whatever Sent shows. A send an earlier run recorded and never confirmed is looked up in
+        Sent first: found, it is done; it may have gone, or the lookup failed, nothing goes out; still
+        pending and confirmed absent, it goes out now under the same Message-ID (ruling 8). True only
+        when her copy is found in Sent."""
         subject = e.subject if e is not None else ""
         old = self.ledger.send(mid)
         if old is not None and old["state"] == "confirmed":
@@ -1311,34 +1712,45 @@ class _Run:
             if found:
                 self.ledger.set_send_state(mid, "confirmed")
                 return True
-            if found is None:
-                self.ledger.set_send_state(mid, "unknown")
-                return False
+            if old["state"] in ledger_mod.NEVER_AGAIN_STATES or found is None:
+                return False                # it went or may have, or the lookup failed: nothing goes out
             if old["body_sha256"] != body_sha:
                 self.ledger.reset_send(mid, body_sha)
         if before_send is not None:
             before_send()
+        self.check_halt()                   # G1 passed before this; a halt since then stops it here, still pending
         seq = self.called("send", target=template, subject=subject, message_id=mid,
                           to="sender" if kind == "send_reply" else "owner",
                           bcc="owner" if kind == "send_reply" else None, body_sha256=body_sha,
                           slots=templates.receipt_slots(tslots))
+        self.ledger.set_send_state(mid, "sending")             # from here it may have gone: never sent again
         try:
             self.mail.send(raw, envelope, mid, template=template)
-            self.result(seq, subject=subject, ok=True, state="handed_over")
         except SendUnknown:
+            self.ledger.set_send_state(mid, "unknown")         # it may have gone, written down before any look
             self.result(seq, subject=subject, ok=False, state="unknown")
         except MailError:
+            self.ledger.send_refused(mid)                       # it surely did not go: pending again
             self.result(seq, subject=subject, ok=False, state="refused")
-            self.ledger.set_send_state(mid, "unknown")
             return False
-        found = self.look_in_sent(e, mid, template) or self.look_in_sent(e, mid, template)
-        self.ledger.set_send_state(mid, "confirmed" if found else "unknown")
+        else:
+            self.ledger.set_send_state(mid, "handed_over")     # the 250, written down before any look
+            self.result(seq, subject=subject, ok=True, state="handed_over")
+        found = self.look_in_sent(e, mid, template)
+        if not found:                       # one more look; live gives the server time to file her copy
+            wait = caps.SENT_LOOK_WAIT_S if self.live else 0.0
+            if wait > 0:
+                _sleep(wait)
+            found = self.look_in_sent(e, mid, template, after_wait_s=wait or None)
+        if found:
+            self.ledger.set_send_state(mid, "confirmed")
         return bool(found)
 
-    def look_in_sent(self, e, mid, template):
+    def look_in_sent(self, e, mid, template, after_wait_s=None):
         """True found, False confirmed absent, None the lookup failed (never read as "not sent")."""
         subject = e.subject if e is not None else ""
-        seq = self.called("sent_lookup", target=template, subject=subject, message_id=mid)
+        extra = {} if after_wait_s is None else {"after_wait_s": after_wait_s}
+        seq = self.called("sent_lookup", target=template, subject=subject, message_id=mid, **extra)
         try:
             found = self.mail.find_in_sent(mid) is True
         except MailError:
@@ -1445,14 +1857,69 @@ class _Run:
                                          cost)
 
     # --- the digest ----------------------------------------------------------------------------
-    def send_digest(self):
-        """S2 at the end of the run, counted from this run's receipts only, at 5:00 PM Pacific or later."""
+    def end_of_run_digest(self):
+        """The demo's S2 at the end of the run, counted from this run's receipts only, at 5:00 PM
+        Pacific or later."""
         if self.t is not None:
             day = zones.to_local(self.t, "Pacific").date()
             self.t = max(self.t, zones.to_utc(_dt.datetime.combine(day, DIGEST_AT), "Pacific"))
         now = self.now()
         lines = receipts.read_lines(self.receipts_path)
-        ds = digest.build(lines, now, verified=receipts.verify(self.receipts_path).ok)
+        self.send_digest(lines, receipts.verify(self.receipts_path).ok, now)
+
+    def daily_digest(self):
+        """A run until stopped (`run`): at her first pass at or after 5:00 PM Pacific, that Pacific
+        date's S2, once. The ledger answers first: once the date's digest went or may have gone
+        (sending, unknown, handed_over or confirmed: decision 76; review 2, finding 1), a pass reads,
+        writes and sends nothing more for it, whatever restarts or kills came between. Receipts or a
+        ledger that cannot answer send nothing: an error line, and her next pass tries again (Contract 7)."""
+        if not (self.cfg.digest and self.cfg.cycles is None):
+            return
+        now = self.now()                # one instant: the date she checks is the date she sends
+        if zones.to_local(now, "Pacific").time() < DIGEST_AT:
+            return
+        try:
+            sent = self.ledger.send(compose.new_message_id(self.cfg.doris_addr, compose.digest_key(now), "S2", 1))
+            if sent is not None and sent["state"] in ledger_mod.NEVER_AGAIN_STATES:
+                return
+            lines, verified = self.digest_window()
+            self.send_digest(lines, verified, now)
+        except (Halted, Refused):
+            raise
+        except Exception as exc:
+            self.error(None, "digest", exc, template="S2")
+            self.say("%s  Digest not sent: %s (error line written). She tries again at her next pass."
+                     % (templates.fmt_pacific(now), type(exc).__name__))
+
+    def digest_window(self):
+        """(receipt lines, verified) for the daily digest: every line this mode's runs wrote after the
+        last digest the server took (before the first, all of them), oldest first, so mail after one
+        digest is in the next and nothing falls between two. The run files are read back from this one
+        until that digest's send line turns up. verified only when every file read verifies; this run's,
+        still open, without its closing line. A file that cannot be read raises, never reads as empty."""
+        chunks, verified = [], True
+        for run in reversed(self.ledger.runs()):
+            path = os.path.join(self.cfg.state_dir, "runs", run["run_id"], "receipts.jsonl")
+            lines = receipts.read_lines(path)
+            verified = receipts.verify(path, finished=run["run_id"] != self.run_id).ok and verified
+            cut = next((i for i in range(len(lines) - 1, -1, -1) if self.digest_taken(lines[i])), None)
+            chunks.append(lines if cut is None else lines[cut + 1:])
+            if cut is not None:
+                break
+        return [line for chunk in reversed(chunks) for line in chunk], verified
+
+    def digest_taken(self, line):
+        """A digest's send line, for a digest the server took (one it refused is no boundary)."""
+        p = line.get("payload") or {}
+        if line.get("kind") != "called" or p.get("call") != "send" or p.get("target") != "S2":
+            return False
+        sent = self.ledger.send(p["message_id"])
+        return sent is not None and sent["state"] in ledger_mod.SENT_STATES
+
+    def send_digest(self, lines, verified, now):
+        """S2 to the owner, counted from these receipt lines (verified: the files they came from
+        verify), dated `now`: through the gate, to the owner only, sent once. The one way a digest goes."""
+        ds = digest.build(lines, now, verified=verified)
         mid = compose.new_message_id(self.cfg.doris_addr, compose.digest_key(now), "S2", 1)
         try:
             raw, body = compose.owner_notice("S2", ds, self.cfg.doris_addr, self.cfg.owner_addr, mid, now)
@@ -1485,24 +1952,27 @@ class _Run:
 
 
 def run(cfg):
-    """One run in this process, until the inbox is drained. Raises Refused when it cannot start,
-    and Halted under the kill switch (the parent writes the halted line)."""
+    """One run in this process: cfg.cycles passes over the inbox (None: until stopped). Raises
+    Refused when it cannot start, and Halted under the kill switch (the parent writes the halted line);
+    a worker whose supervisor is gone writes that line and its summary itself and returns."""
     r = _Run(cfg)
     try:
         r.open()
         try:
             r.start()
-            r.drain()
-            if cfg.digest:
-                r.send_digest()
+            r.passes()
+            if cfg.digest:              # a finite run (the demo); a run until stopped sends each day's in passes()
+                r.end_of_run_digest()
         except Halted as h:
             r.summary.halted = h.cause
-            if cfg.supervised:
-                raise
-            r.write_halted(h.cause)
+            if cfg.supervised and not r.supervisor_gone():
+                raise                       # the supervisor writes the halted line once she is dead
+            r.write_halted(h.cause)         # unsupervised, or her supervisor is gone: nobody else will
         except MailError as exc:
-            r.error(None, "fetch", exc)     # a refused read ends the run, and the summary says so
+            r.error(None, "fetch", exc)     # a finite run's one refused read ends it, and the summary says so
             r.summary.read_failed = True
+        except _ReadsFailed:
+            r.summary.read_failed = True    # a run until stopped: each failure already has its error line
         r.finish()
     finally:
         r.close_handles()

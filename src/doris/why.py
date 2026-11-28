@@ -18,7 +18,7 @@ RULE_WORDS = frozenset({
     "over_60", "open_ended", "all_day", "recurring", "multiple", "zero",
     "calendar_receipt", "bounce", "list", "auto", "self",
     "cc_only", "bcc", "direct_new_thread", "forged_thread",
-    "cli", "stop_file", "watch_button", "budget_cap",
+    "cli", "stop_file", "watch_button", "budget_cap", "signal", "supervisor_gone",
     "sender", "owner", "none", "matched_slot", "ambiguous", "near_miss", "yes_single",
     "send", "booking", "cancel", "move", "digest", "hold_notice",
 })
@@ -113,10 +113,15 @@ CODES = {
     "halt.stop_file": "Halted: a STOP file was found.",
     "halt.watch_button": "Halted: Stop pressed on the watch page.",
     "halt.budget_cap": "Halted: model spend reached the cap of the run.",
+    "halt.signal": "Halted: a stop signal (SIGTERM, SIGHUP or Ctrl+Break) reached the supervisor.",
+    "halt.supervisor_gone": "Halted: her supervisor is gone, so she stopped herself (fail closed).",
     "halt.unreadable": "Halted: a halt file is there but can't be read, so she stops (fail closed).",
 }
 
-HALT_CAUSES = ("cli", "stop_file", "watch_button", "budget_cap")
+# The four ways to stop her (decision 54), and the kill switch's own two: a stop signal on the
+# supervisor (taken as Ctrl+C is) and a supervisor gone (the worker halts itself). Nothing in mail
+# halts her.
+HALT_CAUSES = ("cli", "stop_file", "watch_button", "budget_cap", "signal", "supervisor_gone")
 
 
 class WhyError(ValueError):

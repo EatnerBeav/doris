@@ -2,6 +2,8 @@
 what the loop hands the gate, checked on a run over a fresh copy of the sandbox."""
 
 import datetime as dt
+import email
+import email.policy
 import os
 import shutil
 import tempfile
@@ -9,7 +11,7 @@ import threading
 import unittest
 from unittest import mock
 
-from doris import caps, loop, receipts
+from doris import caps, loop, paths, receipts, templates
 from doris.shapes import Slot
 from tests.unit import demo_sandbox
 
@@ -117,6 +119,134 @@ class TheRunEnds(unittest.TestCase):
         t.start()
         t.join(60)
         self.assertTrue(done, "the run never ended")
+
+
+def sent_and_booked_text(sandbox):
+    """Every text part she sent (decoded) and every calendar file of hers, as one string."""
+    texts = []
+    outbox = os.path.join(sandbox, "outbox")
+    for name in sorted(os.listdir(outbox)):
+        if name.endswith(".eml"):
+            with open(os.path.join(outbox, name), "rb") as fh:
+                msg = email.message_from_bytes(fh.read(), policy=email.policy.default)
+            texts += [p.get_content() for p in msg.walk() if p.get_content_maintype() == "text"]
+    calendar = os.path.join(sandbox, "calendar")
+    for name in sorted(os.listdir(calendar)):
+        if name.startswith("doris-"):
+            with open(os.path.join(calendar, name), encoding="utf-8") as fh:
+                texts.append(fh.read())
+    return "\n".join(texts)
+
+
+class TheMeetingLink(unittest.TestCase):
+    def test_a_sandbox_run_keeps_its_own_fixed_link_whatever_the_environment_says(self):
+        tmp = tempfile.mkdtemp(prefix="doris-loop-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        elsewhere = "https://meet.example/" + "not-for-the-sandbox"
+        with mock.patch.dict(os.environ, {"DORIS_MEETING_LINK": elsewhere}):
+            lines = sandbox_run(tmp)
+            self.assertEqual(templates.meeting_link(), elsewhere)      # the run let go of its link
+        text = sent_and_booked_text(os.path.join(tmp, "sandbox"))
+        self.assertIn("Join: " + templates.PLACEHOLDER_MEETING_LINK, text)
+        self.assertIn("LOCATION:" + templates.PLACEHOLDER_MEETING_LINK, text)
+        self.assertNotIn(elsewhere, text)
+        (summary,) = [l["payload"] for l in lines if l["kind"] == "summary"]
+        self.assertEqual((summary["handled"], summary["held"]), (13, 2))   # G13 passed every booking
+
+
+class TheSentLooks(unittest.TestCase):
+    def test_the_sandbox_looks_twice_with_no_wait_between(self):
+        from tests.unit.test_restart import DORIS, OWNER, mini_sandbox
+        tmp = tempfile.mkdtemp(prefix="doris-loop-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = mini_sandbox(tmp, ("01-priya-request.eml",))
+        with open(os.path.join(root, "inbox", "facts.json"), "w", encoding="utf-8") as fh:
+            fh.write('{"01-priya-request.eml": {"fault": "sent-unconfirmed"}}')
+        waits = []
+        cfg = loop.RunConfig(mode="throwaway", run_name="model-stub-sandbox-test", state_dir=os.path.join(tmp, "state"),
+                             sandbox_root=root, owner_addr=OWNER, doris_addr=DORIS, clock_mode="advance")
+        with mock.patch.object(loop, "_sleep", waits.append):
+            s = loop.run(cfg)
+        self.assertEqual(waits, [])
+        lines = receipts.read_lines(s.receipts_path)
+        looks = [l["payload"] for l in lines if l["kind"] == "called" and l["payload"]["call"] == "sent_lookup"]
+        self.assertEqual([l["target"] for l in looks], ["T1", "T1", "S1"])   # the hidden T1 twice; its notice once
+        self.assertFalse([l for l in looks if "after_wait_s" in l])
+
+
+class ALongSandboxRun(unittest.TestCase):
+    STEP = 0.0                          # how far her wall clock moves at each reading (see the subclass)
+
+    def test_a_later_pass_steps_her_clock_one_cycle_and_reads_the_new_mail(self):
+        from tests.unit.test_restart import DORIS, OWNER, mini_sandbox
+        tmp = tempfile.mkdtemp(prefix="doris-loop-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = mini_sandbox(tmp, ("01-priya-request.eml",))
+        with open(os.path.join(paths.SANDBOX, "inbox", "02-marcus-request.eml"), "rb") as fh:
+            marcus = fh.read()
+        marcus = b"".join(l for l in marcus.splitlines(True) if not l.lower().startswith(b"date:"))
+        clock, dropped = [1000.0], []
+
+        def now():                      # her wall clock, moved on by her waits only (and STEP a reading)
+            clock[0] += self.STEP
+            return clock[0]
+
+        def drop_in(seconds):           # her wait; a judge drops an email (no Date) in while she waits
+            clock[0] += seconds
+            if not dropped:
+                dropped.append(seconds)
+                with open(os.path.join(root, "inbox", "14-judge.eml"), "wb") as fh:
+                    fh.write(marcus)
+
+        cfg = loop.RunConfig(mode="throwaway", run_name="model-stub-sandbox-test", state_dir=os.path.join(tmp, "state"),
+                             sandbox_root=root, owner_addr=OWNER, doris_addr=DORIS, clock_mode="advance",
+                             cycles=2, cycle_s=600.0)
+        with mock.patch.object(loop, "_time", now), mock.patch.object(loop, "_sleep", drop_in):
+            s = loop.run(cfg)
+        self.assertEqual(len(dropped), 1)
+        self.assertEqual(s.handled, 2)
+        observed = [l for l in receipts.read_lines(s.receipts_path) if l["kind"] == "observed" and "from_addr" in l["payload"]]
+        self.assertEqual([l["payload"]["clock"] for l in observed], ["2026-12-01T16:10:00Z", "2026-12-01T16:20:00Z"])
+
+
+class ALongSandboxRunOnASlowMachine(ALongSandboxRun):
+    """Review of 7e1a9fa, item 6 (a CI flake): the test waited on the real clock for a 10 ms cycle, so
+    on a slow machine her next cycle could pass before her wait first slept, the judge's mail never
+    landed, and 1 was handled, not 2. Here each reading of her clock takes 1/64 s; the old test,
+    its clock stepping so, failed every time."""
+    STEP = 1 / 64
+
+
+class HerCopies(unittest.TestCase):
+    """Her copy of each mail is named by the first 16 hex digits of its sha256, so its path fits
+    Windows' default limit (test_path_lengths); the observed line keeps all 64."""
+
+    def copies(self):
+        tmp = tempfile.mkdtemp(prefix="doris-loop-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        lines = sandbox_run(tmp)
+        run_dir = os.path.join(tmp, "state", "runs", "model-stub-sandbox-test")
+        out = []
+        for l in lines:
+            if l["kind"] == "observed" and "message_copy" in l["payload"]:
+                with open(os.path.join(run_dir, l["payload"]["message_copy"]), "rb") as fh:
+                    out.append((l["payload"]["message_copy"], l["payload"]["raw_sha256"], fh.read()))
+        self.assertGreater(len(out), 10)
+        return out
+
+    def test_a_copy_is_named_by_16_hex_digits_and_the_receipt_keeps_all_64(self):
+        for name, sha, data in self.copies():
+            self.assertEqual(name, "messages/%s.eml" % sha[:16])
+            self.assertRegex(sha, r"^[0-9a-f]{64}\Z")
+
+    def test_mails_whose_hashes_share_the_digits_each_keep_their_own_copy(self):
+        with mock.patch.object(loop, "COPY_NAME_HEX", 1):       # 16 names for every mail of the demo day
+            got = self.copies()
+        whole = [(name, sha) for name, sha, _ in got if name == "messages/%s.eml" % sha]
+        self.assertTrue(whole, "no two copies shared a digit")
+        for name, sha, data in got:
+            self.assertIn(name, ("messages/%s.eml" % sha[:1], "messages/%s.eml" % sha))
+        self.assertEqual(len({data for _, _, data in got}), len({sha for _, sha, _ in got}))   # one copy each
 
 
 class TheTerminalLines(unittest.TestCase):

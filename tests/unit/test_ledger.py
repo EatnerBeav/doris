@@ -117,6 +117,41 @@ class OpenAndSchema(Base):
             Ledger(bad)
 
 
+class FreshStart(Base):
+    """Ruling 8: the live ledger is made by a fresh start, which records when it started; her live
+    mail is read from that time on, so the first run never answers the old mail in her inbox."""
+
+    def setUp(self):
+        super().setUp()
+        self.live = os.path.join(self._tmp.name, "state", "live", "ledger.sqlite")
+
+    def test_a_fresh_start_makes_a_ledger_that_already_names_its_start(self):
+        ledger_mod.start_fresh(self.live, T0)
+        with Ledger(self.live, create=False) as db:
+            self.assertEqual(db.fresh_start(), T0)
+
+    def test_a_ledger_that_never_started_fresh_names_no_start(self):
+        self.assertIsNone(self.db.fresh_start())
+
+    def test_a_fresh_start_refuses_a_ledger_already_there_and_leaves_it_alone(self):
+        with self.assertRaises(FileExistsError):
+            ledger_mod.start_fresh(self.path, T0)
+        self.assertIsNone(self.db.fresh_start())
+        ledger_mod.start_fresh(self.live, T0)
+        with self.assertRaises(FileExistsError):
+            ledger_mod.start_fresh(self.live, T0 + H)
+        with Ledger(self.live, create=False) as db:
+            self.assertEqual(db.fresh_start(), T0)
+
+    def test_a_fresh_start_that_cannot_record_its_time_leaves_no_ledger(self):
+        with self.assertRaises(ValueError):
+            ledger_mod.start_fresh(self.live, dt.datetime(2026, 11, 30, 17, 0))      # naive: refused
+        self.assertFalse(os.path.exists(self.live))
+        ledger_mod.start_fresh(self.live, T0)                                     # and it can start after
+        with Ledger(self.live, create=False) as db:
+            self.assertEqual(db.fresh_start(), T0)
+
+
 class CommitsBeforeReturn(Base):
     def test_every_write_is_visible_to_a_second_connection_at_once(self):
         db, other = self.db, self.other()
@@ -269,17 +304,59 @@ class Sends(Base):
         with self.assertRaises(KeyError):
             self.db.set_send_state("<zz@fastmail.com>", "unknown")
 
-    def test_an_unconfirmed_send_can_take_a_new_body_a_confirmed_one_cannot(self):
-        # a send that never reached Sent may go out with fresh slots under the same Message-ID (ruling 8)
+    def test_a_send_that_never_went_can_take_a_new_body_one_that_may_have_gone_cannot(self):
+        # a send the transport never had (pending) may go out with fresh slots under the same
+        # Message-ID (ruling 8); from its sending mark on it may have gone, so it never changes
         self.reply("<a1@fastmail.com>")
-        self.db.set_send_state("<a1@fastmail.com>", "unknown")
         self.db.reset_send("<a1@fastmail.com>", "f" * 64)
         self.assertEqual(self.db.send("<a1@fastmail.com>")["body_sha256"], "f" * 64)
-        self.db.set_send_state("<a1@fastmail.com>", "confirmed")
-        with self.assertRaises(ValueError):
-            self.db.reset_send("<a1@fastmail.com>", "e" * 64)
+        for state in ("sending", "unknown", "handed_over", "confirmed"):
+            self.db.set_send_state("<a1@fastmail.com>", state)
+            with self.assertRaises(ValueError):
+                self.db.reset_send("<a1@fastmail.com>", "e" * 64)
+        self.assertEqual(self.db.send("<a1@fastmail.com>")["body_sha256"], "f" * 64)
         with self.assertRaises(KeyError):
             self.db.reset_send("<zz@fastmail.com>", "e" * 64)
+
+    def test_sending_is_marked_before_the_transport_and_only_its_refusal_takes_it_back(self):
+        # review 2, finding 1: from its sending mark a send may have gone, so it only moves up
+        # (sending, unknown, handed_over, confirmed); the transport refusing it (MailError: it surely
+        # did not go) is the one way back to pending, and only from sending
+        mid = "<a1@fastmail.com>"
+        self.reply(mid)
+        self.db.set_send_state(mid, "sending")
+        self.db.set_send_state(mid, "pending")
+        self.assertEqual(self.db.send(mid)["state"], "sending")
+        self.db.send_refused(mid)
+        self.assertEqual(self.db.send(mid)["state"], "pending")
+        self.db.set_send_state(mid, "sending")
+        self.db.set_send_state(mid, "unknown")
+        for later in ("pending", "sending"):
+            self.db.set_send_state(mid, later)
+        self.db.send_refused(mid)
+        self.assertEqual(self.db.send(mid)["state"], "unknown")
+        self.db.set_send_state(mid, "handed_over")
+        self.db.send_refused(mid)
+        self.db.set_send_state(mid, "unknown")
+        self.assertEqual(self.db.send(mid)["state"], "handed_over")
+        with self.assertRaises(KeyError):
+            self.db.send_refused("<zz@fastmail.com>")
+        self.assertEqual(ledger_mod.NEVER_AGAIN_STATES, ("sending", "unknown", "handed_over", "confirmed"))
+
+    def test_a_send_the_server_took_is_never_taken_back(self):
+        # decision 76: the server taking it is written down as handed_over before the Sent look; from there the
+        # send can only become confirmed, whatever a later look, a restart or the kill switch writes
+        self.reply("<a1@fastmail.com>")
+        self.db.set_send_state("<a1@fastmail.com>", "handed_over")
+        for later in ("unknown", "pending", "handed_over"):
+            self.db.set_send_state("<a1@fastmail.com>", later)
+            self.assertEqual(self.db.send("<a1@fastmail.com>")["state"], "handed_over")
+        with self.assertRaises(ValueError):
+            self.db.reset_send("<a1@fastmail.com>", "f" * 64)
+        self.db.set_send_state("<a1@fastmail.com>", "confirmed")
+        for later in ("unknown", "pending", "handed_over"):
+            self.db.set_send_state("<a1@fastmail.com>", later)
+            self.assertEqual(self.db.send("<a1@fastmail.com>")["state"], "confirmed")
 
     def test_send_kind_is_checked(self):
         with self.assertRaises(ValueError):
@@ -331,6 +408,12 @@ class Sends(Base):
         self.db.set_send_state("<a2@fastmail.com>", "confirmed")
         self.db.set_send_state("<a3@fastmail.com>", "unknown")
         self.assertEqual([s["message_id"] for s in self.db.unfinished_sends()], ["<a1@fastmail.com>", "<a3@fastmail.com>"])
+        self.db.set_send_state("<a1@fastmail.com>", "handed_over")      # the server took it: nothing to redo
+        self.assertEqual([s["message_id"] for s in self.db.unfinished_sends()], ["<a3@fastmail.com>"])
+        self.reply("<a4@fastmail.com>")
+        self.db.set_send_state("<a4@fastmail.com>", "sending")          # cut off mid-send: looked for again
+        self.assertEqual([s["message_id"] for s in self.db.unfinished_sends()],
+                         ["<a3@fastmail.com>", "<a4@fastmail.com>"])
 
 
 class StopList(Base):
@@ -665,6 +748,14 @@ class Runs(Base):
             self.db.start_run("run-3", "demo", T0)
         with self.assertRaises(KeyError):
             self.db.end_run("run-9", T0)
+
+    def test_every_run_in_the_order_it_started(self):
+        # a sandbox restart's clock begins at clock.txt again, so the order is the ledger's, not the clock's
+        self.db.start_run("run-b", "sandbox", T0 + H)
+        self.db.end_run("run-b", T0 + 2 * H)
+        self.db.start_run("run-a", "sandbox", T0)
+        self.assertEqual([(r["run_id"], r["started_utc"], r["ended_utc"]) for r in self.db.runs()],
+                         [("run-b", T0 + H, T0 + 2 * H), ("run-a", T0, None)])
 
 
 class SensitiveSkip(Base):

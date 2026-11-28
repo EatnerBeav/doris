@@ -18,11 +18,8 @@ import unicodedata
 from . import caps, templates
 
 # Characters a reader never sees, removed before the 400 characters are counted (decision 61):
-# Unicode's default-ignorable code points (zero-width, direction and format characters, the soft
-# hyphen, fillers, variation selectors, tags), and every other format character (Cf) with them.
-_INVISIBLES = ("\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e"
-               "\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3"
-               "\U0001d173-\U0001d17a\U000e0000-\U000e0fff")
+# templates.INVISIBLES, the set has_link drops too, and every other format character (Cf) with them.
+_INVISIBLES = templates.INVISIBLES
 _CONTROLS = "\x00-\x08\x0b\x0c\x0e-\x1f\x7f"
 _INVISIBLE = re.compile("[" + _INVISIBLES + "]")
 _CONTROL = re.compile("[" + _CONTROLS + "]")
@@ -286,12 +283,14 @@ def _fit(text, limit):
 
 def safe_excerpt(text, limit, one_line=False):
     """Inbound text made safe to send: invisibles and control characters removed (folded to one
-    line if asked), read only so far (_window), codes blanked, the first `limit` characters kept and
-    defanged. It is echoed as written if no code in it is blanked and it defangs as its folded form
-    does; otherwise folded (a fullwidth link: hxxps://...)."""
-    text = _window(text, limit * SCAN_FACTOR, one_line).strip()
+    line if asked), read only so far (_window), the run's meeting link made "[meeting link]", codes
+    blanked, the first `limit` characters kept and defanged. It is echoed as written if no code in it
+    is blanked, folding shows no meeting link, and it defangs as its folded form does; otherwise
+    folded (a fullwidth link: hxxps://...). The link goes before any cut, so it is never shown whole
+    or cut in half: what she echoes reaches receipts (a quote) and recorded answers (a question)."""
+    text = templates.redact_link(_window(text, limit * SCAN_FACTOR, one_line)).strip()
     folded = _fold(text)
-    blanked = blank_codes(folded)
+    blanked = blank_codes(templates.redact_link(folded))     # the link in wide letters folds to the link
     if blanked == folded and text != folded:
         out, source = _fit(text, limit)
         if _fold(out) == defang(_fold(source)).rstrip():

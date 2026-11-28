@@ -7,7 +7,9 @@ holds any of:
 
   1. a known key shape (Anthropic, OpenAI, GitHub, AWS, Slack, Google, private keys,
      or a long literal assigned to something named like a key, token or password);
-  2. a value from a .env file: the real one lives only on the server, never in git;
+  2. a value from a .env file: the real one lives only on the server, never in git. Settings
+     are left out: a key named like a host, port, user, address, email or zone, and any value
+     that is a plain email address, whatever its key (addresses are in receipts by design);
   3. a term from a private terms file kept outside the repo (DORIS_SCAN_TERMS);
   4. a file that should never be committed at all (.env, private key files).
 
@@ -54,6 +56,9 @@ PLACEHOLDER_WORDS = ("replace", "example", "placeholder", "changeme", "your", "x
 
 # .env keys whose values are settings, not secrets (addresses and hosts appear in real traces).
 NON_SECRET_KEY = re.compile(r"(?:_HOST|_PORT|_USER|_ADDRESS|_EMAIL|_TZ)$|^DORIS_MODEL$|^DORIS_MODE$")
+# A value that is a plain email address and nothing else is a setting whatever its key: smoke run 2's
+# trace was blocked because a stray key held the owner's address and wolf's address holds it.
+PLAIN_ADDRESS = re.compile(r"[A-Za-z0-9._%+\-]+@(?:[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,63}")
 MIN_ENV_VALUE_LEN = 6
 
 FORBIDDEN_NAME = re.compile(r"^(?:\.env(?:\..+)?|id_rsa|id_ed25519|.+\.pem|.+\.p12|.+\.pfx|.+\.key)$", re.I)
@@ -65,7 +70,7 @@ def _git(args):
 
 
 def read_env_values(paths):
-    """Return the secret values from the given .env files (never printed)."""
+    """Return the secret values from the given .env files (never printed), settings left out."""
     values = []
     for path in paths:
         if not path or not os.path.isfile(path):
@@ -80,7 +85,7 @@ def read_env_values(paths):
                 key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip().strip('"').strip("'")
-                if NON_SECRET_KEY.search(key) or len(value) < MIN_ENV_VALUE_LEN:
+                if NON_SECRET_KEY.search(key) or len(value) < MIN_ENV_VALUE_LEN or PLAIN_ADDRESS.fullmatch(value):
                     continue
                 values.append(value)
     return values
