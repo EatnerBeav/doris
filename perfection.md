@@ -103,7 +103,7 @@ Panel average: 75 of 100. Straight 5s are 25 points away.
 - **Evidence:** the audit's counts: 114 rulings, 44 decisions, 17 locked calls, 51 review rounds. `gate.py:5`, `screens.py:4`, `loop.py:5`.
 - **Judges:** 1, 2, 3, and the audit (finding 3).
 - **Files:** every file in `src/doris/`, comments only, and one appendix in AGENT.md: the 18 calendar rulings and 12 locked calls in their own words, where the G, B, T, S and screen numbers are defined, and why the numbering has gaps.
-- **In flight:** no. It touches every file, so the comment pass goes last, after every code change has merged. The appendix can be written now.
+- **In flight:** no. It touches every file, so the comment pass goes last, after every code change has merged. **Appendix done (PR #40):** AGENT.md, "Appendix: the rules the comments cite".
 - **Needs Shane:** no. The appendix is checked against the never-mention list before it is committed.
 
 ### 11. The spine does not read top to bottom (0.9)
@@ -127,7 +127,7 @@ Panel average: 75 of 100. Straight 5s are 25 points away.
 - **Evidence:** judge 1's emails; judge 3's under-24-hours case; the near-miss log, Sat 8:00 AM.
 - **Judges:** 1, and judge 3 in passing.
 - **Files:** `parser.py` (the day and part-of-day steer, the zone-follow word list), `slots.py`, then `policy.py` and `why.py` for the "that time is not available" reply and a true why. `README.md` for the limit.
-- **In flight:** no.
+- **In flight:** no. **Doc line done in AGENT.md's limits (PR #40)**; the README line comes with package A's README pass.
 - **Needs Shane:** no. Steering by what the sender wrote is ruling 2 ("the sender's apparent time first"). It changes offers only, never a direct booking. New zones would be a new feature: US zones and UTC go under Known limits instead.
 
 ### 14. Docs that say something untrue (0.45, and the honesty rule)
@@ -143,7 +143,7 @@ Panel average: 75 of 100. Straight 5s are 25 points away.
   - Not stated anywhere: the hash chain has no anchor outside the file (item 19); the send, notice and calendar caps are per run; "0 human approvals" can only be 0 because no approval path exists, so the hold rate is the number that measures autonomy.
 - **Judges:** 1, 2, 3, and the audit (finding 9).
 - **Files:** `AGENT.md`, `SAFETY.md`, `README.md`, `tests/trap-pack/README.md`. The two source comments go with item 10's pass.
-- **In flight:** no. PR #37 changes one README line.
+- **In flight:** no. PR #37 changes one README line. **Done (PR #40)** for AGENT.md, SAFETY.md and the trap-pack README, all the "not stated" lines included. Left: the README lines (package A's README pass), and for package G `caps.py:38` (the holidays are now listed in AGENT.md's appendix, under ruling 3) and `loop.py:1758`.
 - **Needs Shane:** no.
 
 ### 15. A judge's own email with no key (0.3)
@@ -151,7 +151,7 @@ Panel average: 75 of 100. Straight 5s are 25 points away.
 - **Evidence:** judges' runs. Decision 34 already asks for one clear line saying which key to add.
 - **Judges:** 1, 2, 3.
 - **Files:** `sandbox/README.md`, `README.md`, a ready-to-edit template email in `sandbox/`, `adapters/sandbox.py` (refuse a Date outside the run's window), `model.py` (the stand-in files anything that asks for nothing), `story.py` or `__main__.py` (the one line on how to have it read).
-- **In flight:** in part. PR #36: a filled `.env` is read, and a refused key is said once.
+- **In flight:** in part. PR #36: a filled `.env` is read, and a refused key is said once. **Done (PR #40):** `sandbox/README.md` says the no-key hold first, `sandbox/your-email.eml` is the ready-to-edit template (no facts.json line needed), with a test that runs it through the stand-in day.
 - **Needs Shane:** no.
 
 ### 16. Working files sit in the repo root (0.3)
@@ -188,7 +188,7 @@ From `src/` alone the audit gives Engineering a 4 and names these, with items 10
 - **What:** the chain has no key and no anchor outside the file. Judge 2's 15-line script changed one send, rehashed to the end, and `verify` said ok. SAFETY.md does not state the limit.
 - **Judges:** 2.
 - **Files:** `SAFETY.md` (state it); `story.py` and `__main__.py` (print the head hash at the end of `demo` and in `verify`, so a copy held elsewhere proves the file); the digest's last line is question 2.
-- **In flight:** no. **Needs Shane:** only for the digest line.
+- **In flight:** no. **The limit is stated in SAFETY.md (PR #40).** **Needs Shane:** only for the digest line.
 
 ### 20. Printed commands say `python` (small)
 - **What:** a stock Mac has no `python`; the README says `python3`, and `py` on Windows.
