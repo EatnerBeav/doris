@@ -1,0 +1,25 @@
+2026-11-28T06:52:51Z  Live. Every setting from the env file /root/doris-secrets/.env; model called live (claude-sonnet-5-5). She reads her own inbox every 10 minutes until `python -m doris stop`. A fresh live ledger: she reads only mail that arrives from now on.
+2026-11-28T15:05:07Z  Halted: stop on the command line. The worker was dead 59 ms after the stop. Nothing in flight. Dropped 0 queued item(s). Run `python3 -m doris resume` to go on.
+her loop's receipts (run model-live-live-20261128T065251Z):
+2026-11-28T06:52:51Z  seq 1  run started: mode live, model claude-sonnet-5-5
+2026-11-28T06:52:52Z  seq 4  gate passed
+2026-11-28T06:52:53Z  seq 6  send S2 to the owner: handed_over
+2026-11-28T06:52:54Z  seq 8  her copy in Sent: found
+2026-11-28T07:00:01Z  seq 11  message read
+2026-11-28T07:00:02Z  seq 14  classified meeting_request
+2026-11-28T07:00:02Z  seq 15  decided plan
+2026-11-28T07:00:03Z  seq 18  decided plan
+2026-11-28T07:00:04Z  seq 21  gate passed
+2026-11-28T07:00:06Z  seq 23  send T4 to the sender: handed_over
+2026-11-28T07:00:07Z  seq 25  her copy in Sent: found
+2026-11-28T07:00:07Z  seq 28  decided offer
+2026-11-28T07:20:01Z  seq 35  message read
+2026-11-28T07:20:03Z  seq 38  classified pick
+2026-11-28T07:20:03Z  seq 39  decided plan
+2026-11-28T07:20:04Z  seq 44  gate passed
+2026-11-28T07:20:04Z  seq 46  calendar create: written
+2026-11-28T07:20:05Z  seq 51  gate passed
+2026-11-28T07:20:06Z  seq 53  send T1 to the sender: handed_over
+2026-11-28T07:20:07Z  seq 55  her copy in Sent: found
+2026-11-28T07:20:08Z  seq 58  decided book
+2026-11-28T15:05:07Z  seq 153  halted: cli

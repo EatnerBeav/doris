@@ -1,0 +1,33 @@
+{
+ "commit": "a13caddade05fabe16beac494edc3834fb2ea8a5",
+ "cost_usd": 0.007622,
+ "counts": {
+  "errors": 0,
+  "handled": 2,
+  "held": 0,
+  "human_approvals": 0,
+  "messages": 2,
+  "model_calls": 2,
+  "sends": 3
+ },
+ "ended_utc": "2026-11-28T15:05:07Z",
+ "exit_code": 4,
+ "files": [
+  "manifest.json",
+  "receipts.jsonl",
+  "terminal.log",
+  "timeline.txt"
+ ],
+ "first_failing_step": null,
+ "kind": "run",
+ "mode": "live",
+ "model": "claude-sonnet-5-5",
+ "outcome": "pass",
+ "receipt_chain": {
+  "lines": 153,
+  "ok": true,
+  "reason": "ok"
+ },
+ "run_name": "model-live-live-20261128T065251Z",
+ "started_utc": "2026-11-28T06:52:51Z"
+}

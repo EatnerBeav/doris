@@ -34,21 +34,12 @@ From the kickoff thread (Wolf), Fri Nov 27, 11:55 PM Pacific. That thread is clo
     - fix the 3.9 RFC 2047 encoding of `--in-reply-to`;
     - print a Ctrl-C "may have gone" line.
 
-## Running on our server
+## Our server after the soak (Sat Nov 28, 7:05 AM Pacific)
 
-- **The soak:** tmux session `doris-live`, running `python3 -m doris run --live --fresh` in /root/doris/src since 10:52 PM (checkout detached at a13cadd).
-  - PIDs: 2610638 shell, 2610640 run, 2610641 tee, 2610642 worker.
-  - Log: /root/doris-live-run.log.
-  - Receipts: /root/doris/state/live/runs/model-live-live-20261128T065251Z/.
-- **Its trace:** when it stops, `run --live` writes `traces/live-run-<stamp>/` itself, pass or fail. It holds the receipts, terminal.log, a timeline and a manifest (mode live, start and end, commit, model, measured cost, counts, chain check). It is committed from our server whether it passed or not (decisions 87 and 101).
-- **Who stops it:** the first fresh thread on Saturday morning (live ops), around 7 AM, through the Remote Control session on Shane's PC.
-  1. Run `cd /root/doris/src && python3 -m doris stop`.
-  2. Commit the trace on our server, on branch `traces/live-run-<stamp>`. The hook checks /root/.doris-scan-terms.
-  3. Push it and fold it into main.
-  4. Log it in the near-miss log and decisions.md.
-  5. Add its path to AGENT.md's `run --live` row and to SAFETY.md's "Committed so far".
-
-  Never push from Shane's PC.
+- **The soak is stopped and its trace is on main:** [traces/live-run-20261128T065251Z/](traces/live-run-20261128T065251Z/). Fri 10:52 PM to Sat 7:05 AM on a13cadd: 2 handled (the offer, then the booking Wolf picked), 0 held, 0 errors, 0 human approvals, 3 sends (digest, T4, T1), 2 model calls, $0.0076. `stop` landed in 1 s; the worker was dead 59 ms later, nothing in flight, 0 dropped. Outcome pass; 153 lines, chain verified on our server and on main's code. Committed from our server by /mnt/project-files/doris-v2/ops/doris_stop_soak_on_wide.sh (Remote Control on Shane's PC, which never pushed).
+- **HALT is in force in /root/doris, sandbox and live.** The next live run there starts only after `cd /root/doris/src && python3 -m doris resume` on our server. The live ledger in /root/doris/state/live/ is kept (no `--fresh` next time: it already exists). tmux `doris-live` closed when the run ended.
+- **Smoke age:** the newest passing smoke is Fri 9:50 PM, so `run --live` refuses to start after Sat 9:50 PM until a new smoke passes (overnight.sh in PR #31 runs one first).
+- /root/doris is still detached at a13cadd: check out main before the next live run. Left on our server (scratch, per decision 103): /root/doris-soak-trace (the clone that committed), /root/doris_stop_soak_on_wide.sh, /root/doris-stop-soak.log.
 
 ## Open questions (answered Sat 12:48 AM, decision 103)
 
@@ -62,7 +53,7 @@ From the kickoff thread (Wolf), Fri Nov 27, 11:55 PM Pacific. That thread is clo
 
 ## Next three from the tracker
 
-1. Stop the soak and commit its trace (Sat morning).
+1. Done Sat 7:05 AM: the soak stopped, its trace on main (above).
 2. Done Sat 4:33 AM (PR #29, decision 107): `sandbox/answers.jsonl` from a keyed demo on our server, $0.0337. Re-record with a keyed `demo` after any change to the model request (prompt, model, fields) and once at the freeze; `test_cli.RecordedAnswers` fails until you do.
 3. Done Sat 4:33 AM (PR #29): Trap Pack run 3 on main, $0.0649, graded against the key in RESULTS.md and RUNS.md. A new `traps --record` regenerates RESULTS.md and drops the hand-added "Against the key" column: grade it again, and update the costs and trace paths in README, AGENT.md, SAFETY.md and tracker.md.
 
