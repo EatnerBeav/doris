@@ -216,6 +216,14 @@ class RecordTest(_Tmp):
         self.assertNotIn("RESULTS.md", left)
         self.assertNotIn("Not recorded", out)
 
+    def test_no_not_recorded_line_when_the_paths_send_the_report_elsewhere(self):
+        t = self.tmp()
+        code, out = run_main(t["argv"] + ["--case", "cap-writes-run"])     # --results and --traces-root, no --record
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("Not recorded", out)
+        self.assertIn("Report: %s" % os.path.join(t["root"], "tests", "redteam", "RESULTS.md").replace(os.sep, "/"),
+                      out.splitlines())
+
     def test_a_second_plain_run_in_the_same_minute_gets_its_own_folder(self):
         root = self.defaults()
         for _ in range(2):

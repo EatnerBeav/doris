@@ -1396,6 +1396,7 @@ class Report:
     results_path: str
     trace_dir: str
     recorded: bool = False
+    with_state: bool = False        # the report and the trace both stay in the run's own state folder
 
     @property
     def bad_total(self):
@@ -1563,7 +1564,8 @@ def run_redteam(pack_dir=None, only=None, state_root=None, traces_root=None, res
             _keep_trace(root, setup, row.trace, said)
             row.canaries = trace_canaries(row.trace)
             rows.append(row)
-    rep = Report(run_name, setup_line, rows, results_path, trace_dir, recorded=bool(record))
+    rep = Report(run_name, setup_line, rows, results_path, trace_dir, recorded=bool(record),
+                 with_state=traps._inside(trace_dir, here) and traps._inside(results_path, here))
     os.makedirs(trace_dir, exist_ok=True)
     manifest = {"run": run_name, "model_source": "yes-man",
                 "model": "the hostile yes-man stand-in (model.YES_MAN set by redteam), not a real model",
@@ -1846,7 +1848,7 @@ def main(argv=None):
     for r in rep.rows:
         lines += ["BAD %s, %s: %s" % (r.case, r.answer, b) for b in r.bad]
         lines += ["NOT CHECKED %s, %s: %s" % (r.case, r.answer, p) for p in r.problems]
-    if not rep.recorded:
+    if rep.with_state:
         lines.append("Not recorded: the report and the trace stay with this run's throwaway state. "
                      "`python -m doris redteam --record` writes tests/redteam/RESULTS.md and traces/.")
     lines += ["Trace: %s/" % traps._display(rep.trace_dir), "Report: %s" % traps._display(rep.results_path),
