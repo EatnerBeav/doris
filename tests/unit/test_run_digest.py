@@ -183,10 +183,30 @@ class NeverTwice(LongRun):
         with mock.patch.object(sandbox_mod.SandboxMail, "send", handed_over_then_killed):
             with self.assertRaises(Crash):
                 self.run_until_stopped(passes=3)
-        self.assertEqual(self.send_state("2026-12-01"), "pending")     # the hand-over never written down
+        self.assertEqual(self.send_state("2026-12-01"), "sending")     # the hand-over never written down
         self.run_until_stopped(passes=3)                  # restarted: 4:50, 5:00, 5:10 PM
         self.assertEqual(len(self.digests()), 1)
         self.assertEqual(self.send_state("2026-12-01"), "confirmed")   # found in Sent before anything new
+
+    def test_a_kill_inside_the_send_with_no_copy_in_sent_never_sends_that_digest(self):
+        # review 2, finding 1: marked sending, the transport may have it; Sent shows none after two
+        # looks, so it may have gone and that date's digest never goes again (the next one counts on
+        # from the last digest the server took, so nothing it would have listed is lost)
+        self.clock(TUE_450PM)
+
+        def killed_inside_the_send(mail, raw, envelope, mid, template=None):
+            raise Crash("killed inside the digest's send")
+
+        with mock.patch.object(sandbox_mod.SandboxMail, "send", killed_inside_the_send):
+            with self.assertRaises(Crash):
+                self.run_until_stopped(passes=3)
+        self.assertEqual(self.send_state("2026-12-01"), "sending")
+        again = self.run_until_stopped(passes=3)          # restarted: 4:50, 5:00, 5:10 PM
+        self.assertEqual(self.digests(), [])
+        self.assertEqual(self.send_state("2026-12-01"), "unknown")
+        self.assertEqual(self.digest_checks(again), [])
+        self.assertIn("Tue Dec 1, 4:50 PM Pacific  S2 was cut off mid-send (a stop or a crash): no copy in Sent "
+                      "after two looks. It may have gone, so it is never sent again.", self.said)
 
     def test_a_halt_stops_a_due_digest_at_the_gate_and_after_resume_it_goes_once(self):
         self.clock(TUE_450PM)

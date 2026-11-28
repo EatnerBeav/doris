@@ -32,10 +32,18 @@ SCHEMA_VERSION = 2   # 2: an offer names the send that carries it (offers.messag
 MESSAGE_STATUSES = ("fetched", "processing", "done", "superseded", "dropped", "held", "quarantined")
 UNPROCESSED = ("fetched", "processing")
 SEND_KINDS = ("send_reply", "send_hold_notice", "send_digest")
-SEND_STATES = ("pending", "confirmed", "unknown", "handed_over")
-# Decision 76: a send SMTP accepted (250) is handed_over before the Sent look and is never sent
-# again; from there, and from confirmed, a send only ever moves up to confirmed.
-SENT_STATES = ("handed_over", "confirmed")
+# A send's states, in the only order it moves (up, never down):
+#   pending      recorded before the send; the transport never had it, or refused it (MailError:
+#                it surely did not go), so it may still go out, under the same Message-ID
+#   sending      marked right before the transport is called: cut off there by a kill or a crash,
+#                it may have gone (review 2, finding 1)
+#   unknown      it may have gone: SendUnknown, or cut off sending and absent from Sent after two looks
+#   handed_over  the transport took it (SMTP's 250), written down before the Sent look (decision 76)
+#   confirmed    her copy is in Sent
+# From sending on, a send never goes again; the transport's refusal is the one way back to pending.
+SEND_STATES = ("pending", "sending", "unknown", "handed_over", "confirmed")
+SENT_STATES = ("handed_over", "confirmed")                          # the server took it
+NEVER_AGAIN_STATES = ("sending", "unknown", "handed_over", "confirmed")   # it went, or may have
 BOOKING_STATES = ("intent", "written", "confirmed", "cancelled", "gone", "collision_unresolved", "removed",
                   "unconfirmed", "blocked")   # blocked: the gate stopped it, never written
 LIVE_BOOKING_STATES = ("intent", "written", "confirmed", "unconfirmed", "collision_unresolved")
@@ -367,21 +375,21 @@ class Ledger:
         return True
 
     def reset_send(self, message_id, body_sha256):
-        """A new body for a send that never reached Sent (state pending or unknown, and the loop looked
-        first): it goes out under the same Message-ID (ruling 8). A send the server took (handed_over)
-        or that is confirmed in Sent never changes."""
+        """A new body for a send the transport never had (pending; the loop looked in Sent first): it
+        goes out under the same Message-ID (ruling 8). One that may have gone (sending, unknown), that
+        the server took (handed_over) or that is confirmed in Sent never changes."""
         with self._tx() as con:
             row = con.execute("SELECT state FROM sends WHERE mid_norm = ?", (norm_id(message_id),)).fetchone()
             if row is None:
                 raise KeyError(message_id)
-            if row["state"] in SENT_STATES:
+            if row["state"] != "pending":
                 raise ValueError("send %s is %s; it never changes" % (norm_id(message_id), row["state"]))
             con.execute("UPDATE sends SET body_sha256 = ? WHERE mid_norm = ?",
                         (_text(body_sha256, "body_sha256"), norm_id(message_id)))
 
     def set_send_state(self, message_id, state):
-        """A send's state. One the server took (handed_over) only moves up to confirmed, and a confirmed
-        one stays: any other state asked for later is not written (decision 76)."""
+        """A send's state, only ever up SEND_STATES' order: one asked for below where it stands is not
+        written (decision 76: handed_over only becomes confirmed; review 2: sending never pending)."""
         if state not in SEND_STATES:
             raise ValueError("send state must be one of %s, not %r" % (", ".join(SEND_STATES), state))
         mid = norm_id(message_id)
@@ -389,9 +397,20 @@ class Ledger:
             row = con.execute("SELECT state FROM sends WHERE mid_norm = ?", (mid,)).fetchone()
             if row is None:
                 raise KeyError(message_id)
-            if row["state"] == "confirmed" or (row["state"] == "handed_over" and state != "confirmed"):
+            if SEND_STATES.index(state) <= SEND_STATES.index(row["state"]):
                 return
             con.execute("UPDATE sends SET state = ? WHERE mid_norm = ?", (state, mid))
+
+    def send_refused(self, message_id):
+        """The transport refused a send it was handed (MailError: it surely did not go): sending goes
+        back to pending. A send in any other state stays as it is."""
+        mid = norm_id(message_id)
+        with self._tx() as con:
+            row = con.execute("SELECT state FROM sends WHERE mid_norm = ?", (mid,)).fetchone()
+            if row is None:
+                raise KeyError(message_id)
+            if row["state"] == "sending":
+                con.execute("UPDATE sends SET state = 'pending' WHERE mid_norm = ?", (mid,))
 
     def send(self, message_id) -> Optional[dict]:
         row = self._one("SELECT * FROM sends WHERE mid_norm = ?", (norm_id(message_id),))
@@ -433,8 +452,8 @@ class Ledger:
                          (_ts(since, "since"),))[0]
 
     def unfinished_sends(self) -> List[dict]:
-        """Sends pending or unknown, oldest first: looked up in Sent before anything else on restart."""
-        return [self._send(r) for r in self._all("SELECT * FROM sends WHERE state IN ('pending', 'unknown') "
+        """Sends pending, sending or unknown, oldest first: looked up in Sent before anything else on restart."""
+        return [self._send(r) for r in self._all("SELECT * FROM sends WHERE state IN ('pending', 'sending', 'unknown') "
                                                  "ORDER BY rowid")]
 
     # --- Stop list -----------------------------------------------------------------------------

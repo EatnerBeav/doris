@@ -282,17 +282,44 @@ class Sends(Base):
         with self.assertRaises(KeyError):
             self.db.set_send_state("<zz@fastmail.com>", "unknown")
 
-    def test_an_unconfirmed_send_can_take_a_new_body_a_confirmed_one_cannot(self):
-        # a send that never reached Sent may go out with fresh slots under the same Message-ID (ruling 8)
+    def test_a_send_that_never_went_can_take_a_new_body_one_that_may_have_gone_cannot(self):
+        # a send the transport never had (pending) may go out with fresh slots under the same
+        # Message-ID (ruling 8); from its sending mark on it may have gone, so it never changes
         self.reply("<a1@fastmail.com>")
-        self.db.set_send_state("<a1@fastmail.com>", "unknown")
         self.db.reset_send("<a1@fastmail.com>", "f" * 64)
         self.assertEqual(self.db.send("<a1@fastmail.com>")["body_sha256"], "f" * 64)
-        self.db.set_send_state("<a1@fastmail.com>", "confirmed")
-        with self.assertRaises(ValueError):
-            self.db.reset_send("<a1@fastmail.com>", "e" * 64)
+        for state in ("sending", "unknown", "handed_over", "confirmed"):
+            self.db.set_send_state("<a1@fastmail.com>", state)
+            with self.assertRaises(ValueError):
+                self.db.reset_send("<a1@fastmail.com>", "e" * 64)
+        self.assertEqual(self.db.send("<a1@fastmail.com>")["body_sha256"], "f" * 64)
         with self.assertRaises(KeyError):
             self.db.reset_send("<zz@fastmail.com>", "e" * 64)
+
+    def test_sending_is_marked_before_the_transport_and_only_its_refusal_takes_it_back(self):
+        # review 2, finding 1: from its sending mark a send may have gone, so it only moves up
+        # (sending, unknown, handed_over, confirmed); the transport refusing it (MailError: it surely
+        # did not go) is the one way back to pending, and only from sending
+        mid = "<a1@fastmail.com>"
+        self.reply(mid)
+        self.db.set_send_state(mid, "sending")
+        self.db.set_send_state(mid, "pending")
+        self.assertEqual(self.db.send(mid)["state"], "sending")
+        self.db.send_refused(mid)
+        self.assertEqual(self.db.send(mid)["state"], "pending")
+        self.db.set_send_state(mid, "sending")
+        self.db.set_send_state(mid, "unknown")
+        for later in ("pending", "sending"):
+            self.db.set_send_state(mid, later)
+        self.db.send_refused(mid)
+        self.assertEqual(self.db.send(mid)["state"], "unknown")
+        self.db.set_send_state(mid, "handed_over")
+        self.db.send_refused(mid)
+        self.db.set_send_state(mid, "unknown")
+        self.assertEqual(self.db.send(mid)["state"], "handed_over")
+        with self.assertRaises(KeyError):
+            self.db.send_refused("<zz@fastmail.com>")
+        self.assertEqual(ledger_mod.NEVER_AGAIN_STATES, ("sending", "unknown", "handed_over", "confirmed"))
 
     def test_a_send_the_server_took_is_never_taken_back(self):
         # decision 76: SMTP's 250 is written down as handed_over before the Sent look; from there the
@@ -361,6 +388,10 @@ class Sends(Base):
         self.assertEqual([s["message_id"] for s in self.db.unfinished_sends()], ["<a1@fastmail.com>", "<a3@fastmail.com>"])
         self.db.set_send_state("<a1@fastmail.com>", "handed_over")      # the server took it: nothing to redo
         self.assertEqual([s["message_id"] for s in self.db.unfinished_sends()], ["<a3@fastmail.com>"])
+        self.reply("<a4@fastmail.com>")
+        self.db.set_send_state("<a4@fastmail.com>", "sending")          # cut off mid-send: looked for again
+        self.assertEqual([s["message_id"] for s in self.db.unfinished_sends()],
+                         ["<a3@fastmail.com>", "<a4@fastmail.com>"])
 
 
 class StopList(Base):

@@ -282,7 +282,8 @@ def _held_elsewhere(exc):
 # Calls the server may already have accepted when the kill landed. They cannot be pulled back,
 # so they are marked in the ledger and reconciled on resume (ruling 8, A3). Value: how to mark.
 UNCONFIRMED_CALLS = {
-    "send": ("set_send_state", "unknown"),                    # looked up in Sent by Message-ID
+    "send": ("set_send_state", "sending"),                    # cut off mid-send: never sent again; on resume
+                                                              # looked up in Sent twice by Message-ID
     "calendar_create": ("set_booking_state", "unconfirmed"),  # looked up by booking ID
     "calendar_delete": ("set_booking_state", "unconfirmed"),
 }

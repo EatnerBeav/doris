@@ -322,11 +322,27 @@ class SecondOffer(Restart):
         add(self.root, "02b-marcus-decline.eml", self.DECLINE, {"forwarded": "no"})
 
     def test_killed_after_the_second_offer_was_written_down_before_the_send(self):
-        s2 = self.crash_then_run(sandbox_mod.SandboxMail, "send",
-                                 lambda cal, raw, envelope, mid, template=None: template == "T3")
+        marks = []
+
+        def at_the_second_sending_mark(db, message_id, state):    # T3's: written down, not yet sending
+            marks.extend([message_id] if state == "sending" else [])
+            return state == "sending" and len(marks) == 2
+
+        s2 = self.crash_then_run(ledger_mod.Ledger, "set_send_state", at_the_second_sending_mark)
         self.assertEqual(self.templates_sent(self.MARCUS), ["T2", "T3"])
         self.assertEqual(self.offers(), 2)
         self.assertEqual(self.closing(s2, "marcus"), ["reoffer"])
+
+    def test_killed_inside_the_transports_send_it_may_have_gone_so_it_is_held_never_sent_again(self):
+        # review 2, finding 1: once marked sending the transport may have it; Sent shows no T3 after
+        # two looks, so it never goes out again and the owner is told once
+        s2 = self.crash_then_run(sandbox_mod.SandboxMail, "send",
+                                 lambda cal, raw, envelope, mid, template=None: template == "T3")
+        self.assertEqual(self.templates_sent(self.MARCUS), ["T2"])
+        self.assertEqual(self.closing(s2, "marcus"), ["hold:send_unconfirmed"])
+        self.assertEqual([t for t in self.templates_sent(OWNER) if t == "S1"], ["S1"])
+        self.assertEqual(self.closing(self.run_once(), "marcus"), [])         # and a later run leaves it be
+        self.assertEqual(self.templates_sent(self.MARCUS), ["T2"])
 
 
 class CancelAndMove(Restart):

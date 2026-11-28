@@ -577,10 +577,31 @@ class _Run:
     def reconcile(self):
         """Ruling 8 and A3: before anything new, every unfinished send is looked up in Sent (never
         sent again blind), every unfinished booking is looked up on the calendar, and every message
-        fetched but never finished is read again through the whole loop."""
+        fetched but never finished is read again through the whole loop. A send cut off mid-send
+        (sending: a kill or a crash came between its mark and the transport's answer) may have gone,
+        so it gets a send's two looks, the wait between them live (one wait for all of them); absent
+        both times it is unknown and never sent again (review 2, finding 1), and the terminal says so."""
+        cut_off = []
         for s in self.ledger.unfinished_sends():
             found = self.look_in_sent(None, s["message_id"], s["template"] or "-")
-            self.ledger.set_send_state(s["message_id"], "confirmed" if found else "unknown")
+            if found:
+                self.ledger.set_send_state(s["message_id"], "confirmed")
+            elif found is False and s["state"] == "sending":
+                cut_off.append(s)
+        if cut_off:
+            wait = caps.SENT_LOOK_WAIT_S if self.live else 0.0
+            if wait > 0:
+                _sleep(wait)
+            for s in cut_off:
+                template = s["template"] or "-"
+                found = self.look_in_sent(None, s["message_id"], template, after_wait_s=wait or None)
+                if found:
+                    self.ledger.set_send_state(s["message_id"], "confirmed")
+                elif found is False:
+                    self.ledger.set_send_state(s["message_id"], "unknown")
+                    self.say("%s  %s was cut off mid-send (a stop or a crash): no copy in Sent after two looks. "
+                             "It may have gone, so it is never sent again." % (templates.fmt_pacific(self.now()),
+                                                                              template))
         for b in self.ledger.unfinished_bookings():
             try:
                 ev = self.get_event(None, b["booking_id"])
@@ -968,7 +989,8 @@ class _Run:
     def own_effects(self, e):
         """What a message read again after a kill or a stop already did (ruling 8, A3), for policy to
         keep: its hold; its reply, if Sent has it (one never confirmed is looked up now: the lookup
-        failing, it may have gone out, so it is never sent again blind); its booking written down."""
+        failing, or a reply that may have gone out, cut off sending, unknown or handed over, is never
+        sent again blind, and the message is held); its booking written down."""
         h = self.ledger.hold_for_message(e.key)
         if h is not None:
             e.recovered = True
@@ -983,10 +1005,11 @@ class _Run:
                 self.ledger.set_send_state(mid, "confirmed")
                 e.recovered = True
                 return {"own_reply": template}
-            if found is None or sent["state"] == "handed_over":
-                # the lookup failed, or the server took it and Sent shows no copy: it may have gone
-                # out, so it is never sent again (decision 76 for the second)
-                self.ledger.set_send_state(mid, "unknown")      # the ledger keeps handed_over as it is
+            if found is None or sent["state"] in ledger_mod.NEVER_AGAIN_STATES:
+                # the lookup failed, or it may have gone (cut off sending, unknown, or the server took
+                # it) and Sent shows no copy: it is never sent again (decision 76; review 2, finding 1)
+                if found is False:
+                    self.ledger.set_send_state(mid, "unknown")  # sending looked for: unknown; the rest stay
                 e.recovered = True
                 return {"own_reply_unknown": template}
         b = self.own_booking(e)
@@ -1516,11 +1539,15 @@ class _Run:
 
     def deliver(self, e, mid, kind, template, to_addr, raw, body, envelope, tslots, before_send=None):
         """Recorded before it is sent; sent once; found in Sent after (one more look); never resent blind.
-        SMTP's acceptance is written down (handed_over) before the Sent look, and a send in that state
-        never goes again, whatever Sent shows (decision 76). A send an earlier run recorded and never
-        confirmed is looked up in Sent first: found, it is done; handed over, it is not sent again; the
-        lookup failing, nothing goes out (unknown); confirmed absent, it goes out now under the same
-        Message-ID (ruling 8). True only when her copy is found in Sent."""
+        It is marked sending right before the transport is called: from there it may have gone, and a
+        kill or a crash before the transport's answer is written down leaves it so (review 2, finding
+        1). The answer is read the same for any transport: accepted (SMTP's 250) is handed_over,
+        written down before the Sent look (decision 76); SendUnknown is unknown, also before any look;
+        MailError (it surely did not go) puts it back to pending. From sending on, it never goes
+        again, whatever Sent shows. A send an earlier run recorded and never confirmed is looked up in
+        Sent first: found, it is done; it may have gone, or the lookup failed, nothing goes out; still
+        pending and confirmed absent, it goes out now under the same Message-ID (ruling 8). True only
+        when her copy is found in Sent."""
         subject = e.subject if e is not None else ""
         old = self.ledger.send(mid)
         if old is not None and old["state"] == "confirmed":
@@ -1536,11 +1563,8 @@ class _Run:
             if found:
                 self.ledger.set_send_state(mid, "confirmed")
                 return True
-            if old["state"] == "handed_over":
-                return False                # the server took it once; it never goes again
-            if found is None:
-                self.ledger.set_send_state(mid, "unknown")
-                return False
+            if old["state"] in ledger_mod.NEVER_AGAIN_STATES or found is None:
+                return False                # it went or may have, or the lookup failed: nothing goes out
             if old["body_sha256"] != body_sha:
                 self.ledger.reset_send(mid, body_sha)
         if before_send is not None:
@@ -1549,13 +1573,15 @@ class _Run:
                           to="sender" if kind == "send_reply" else "owner",
                           bcc="owner" if kind == "send_reply" else None, body_sha256=body_sha,
                           slots=templates.receipt_slots(tslots))
+        self.ledger.set_send_state(mid, "sending")             # from here it may have gone: never sent again
         try:
             self.mail.send(raw, envelope, mid, template=template)
         except SendUnknown:
+            self.ledger.set_send_state(mid, "unknown")         # it may have gone, written down before any look
             self.result(seq, subject=subject, ok=False, state="unknown")
         except MailError:
+            self.ledger.send_refused(mid)                       # it surely did not go: pending again
             self.result(seq, subject=subject, ok=False, state="refused")
-            self.ledger.set_send_state(mid, "unknown")
             return False
         else:
             self.ledger.set_send_state(mid, "handed_over")     # the 250, written down before any look
@@ -1566,7 +1592,8 @@ class _Run:
             if wait > 0:
                 _sleep(wait)
             found = self.look_in_sent(e, mid, template, after_wait_s=wait or None)
-        self.ledger.set_send_state(mid, "confirmed" if found else "unknown")   # unknown never undoes handed_over
+        if found:
+            self.ledger.set_send_state(mid, "confirmed")
         return bool(found)
 
     def look_in_sent(self, e, mid, template, after_wait_s=None):
@@ -1690,10 +1717,10 @@ class _Run:
 
     def daily_digest(self):
         """A run until stopped (`run`): at her first pass at or after 5:00 PM Pacific, that Pacific
-        date's S2, once. The ledger answers first: once the server took the date's digest (handed_over
-        or confirmed, decision 76), a pass reads, writes and sends nothing more for it, whatever
-        restarts or kills came between. Receipts or a ledger that cannot answer send nothing: an error
-        line, and her next pass tries again (Contract 7)."""
+        date's S2, once. The ledger answers first: once the date's digest went or may have gone
+        (sending, unknown, handed_over or confirmed: decision 76; review 2, finding 1), a pass reads,
+        writes and sends nothing more for it, whatever restarts or kills came between. Receipts or a
+        ledger that cannot answer send nothing: an error line, and her next pass tries again (Contract 7)."""
         if not (self.cfg.digest and self.cfg.cycles is None):
             return
         now = self.now()                # one instant: the date she checks is the date she sends
@@ -1701,7 +1728,7 @@ class _Run:
             return
         try:
             sent = self.ledger.send(compose.new_message_id(self.cfg.doris_addr, compose.digest_key(now), "S2", 1))
-            if sent is not None and sent["state"] in ledger_mod.SENT_STATES:
+            if sent is not None and sent["state"] in ledger_mod.NEVER_AGAIN_STATES:
                 return
             lines, verified = self.digest_window()
             self.send_digest(lines, verified, now)

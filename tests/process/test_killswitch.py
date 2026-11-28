@@ -210,7 +210,7 @@ class KillMidCallTest(Base):
         self.assertTrue(halted["payload"]["in_flight"]["unconfirmed"])
         self.assertTrue(self.receipts_mod().verify(self.receipts).ok)
         if self.backend == "fake":
-            self.assertEqual(fake_worker.JsonLedger(self.ledger).db["sends"]["<s1@fastmail.com>"]["state"], "unknown")
+            self.assertEqual(fake_worker.JsonLedger(self.ledger).db["sends"]["<s1@fastmail.com>"]["state"], "sending")
 
 
 class RestartTest(Base):

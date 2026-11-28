@@ -29,7 +29,7 @@ from doris import __main__ as cli
 from doris import caps, compose, ledger as ledger_mod
 from doris import loop, model as model_mod, netguard, paths, receipts, sentrecord, smoke, supervisor, templates
 from doris.adapters import live
-from doris.shapes import MailError
+from doris.shapes import MailError, SendUnknown
 from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, FakeSMTP, u
 
 LINK = "https://meet.example/" + "live-loop-room"
@@ -640,6 +640,309 @@ class HandedOverTest(LiveFixture):
             self.assertTrue(s.verify_ok)
         self.assertEqual(len(self.to(OWNER)), 1)
         self.assertEqual(send_states(self.state), ["handed_over"])
+
+
+def held_outcomes(summary):
+    return [l["payload"]["outcome"] for l in receipts.read_lines(summary.receipts_path) if l["kind"] == "held"]
+
+
+class SendingTest(LiveFixture):
+    """Review 2, finding 1: a send is marked sending in the ledger right before the transport is
+    called, so a kill between SMTP's 250 and its handed_over record can no longer leave it pending
+    and send it twice. Cut off there, it may have gone: the next run looks for it in Sent twice (the
+    wait between, live); found, it is done; not found, it is never sent again and the message is held
+    for the owner. The transport's answer is read the same for any transport: MailError means it
+    surely did not go (pending again), SendUnknown that it may have gone (unknown, before any look)."""
+
+    def setUp(self):
+        super().setUp()
+        self.waits = []
+        patch = mock.patch.object(loop, "_sleep", self.waits.append)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def to(self, address):
+        return [data for _, rcpts, data in self.smtp.delivered if rcpts[0] == address]
+
+    def killed_after_the_250(self):
+        """Her 4:10 cycle dies right after SMTP's 250 for T1, before handed_over is written down;
+        the next run at 4:20."""
+        self.go(fresh=True)
+        self.inbox.add(request(1), u(2026, 12, 1, 16, 2))
+        self.clock = u(2026, 12, 1, 16, 10)
+        real = ledger_mod.Ledger.set_send_state
+
+        def dies_before_the_record(db, message_id, state):
+            if state == "handed_over":
+                raise Crash("killed after the 250, before it was written down")
+            return real(db, message_id, state)
+
+        with mock.patch.object(ledger_mod.Ledger, "set_send_state", dies_before_the_record):
+            with self.assertRaises(Crash):
+                self.go()
+        self.assertEqual(len(self.to(PROSPECT)), 1)
+        self.assertEqual(send_states(self.state), ["sending"])          # never pending once the transport has it
+        del self.waits[:]
+        self.clock = u(2026, 12, 1, 16, 20)
+        return self.go()
+
+    def test_cut_off_after_the_250_with_no_copy_in_sent_it_is_never_sent_again_and_held(self):
+        self.smtp.on_deliver = None                                     # as Fastmail may: nothing filed in Sent
+        s = self.killed_after_the_250()
+        self.assertEqual(len(self.to(PROSPECT)), 1)                     # one T1, never a second
+        lookups = sent_lookups(s)
+        self.assertEqual(lookups[:2], [(None, False), (caps.SENT_LOOK_WAIT_S, False)])   # reconcile: two looks
+        self.assertEqual(self.waits[0], caps.SENT_LOOK_WAIT_S)
+        self.assertEqual(held_outcomes(s), ["hold:send_unconfirmed"])
+        self.assertEqual(len(self.to(OWNER)), 1)                        # its one notice
+        self.assertEqual(send_states(self.state), ["unknown", "handed_over"])
+        self.assertIn("Tue Dec 1, 8:20 AM Pacific  T1 was cut off mid-send (a stop or a crash): no copy in Sent "
+                      "after two looks. It may have gone, so it is never sent again.", self.said)
+        self.clock = u(2026, 12, 1, 16, 30)
+        again = self.go()
+        self.assertEqual((len(self.to(PROSPECT)), len(self.to(OWNER))), (1, 1))
+        self.assertEqual(sent_lookups(again), [(None, False)])          # unknown: one look, no wait, nothing sent
+        self.assertTrue(again.verify_ok)
+
+    def test_cut_off_after_the_250_her_copy_in_sent_settles_it_at_the_restart(self):
+        s = self.killed_after_the_250()
+        self.assertEqual(len(self.to(PROSPECT)), 1)
+        self.assertEqual(sent_lookups(s)[0], (None, True))
+        self.assertEqual(send_states(self.state), ["confirmed"])
+        self.assertEqual((s.handled, s.held, len(self.to(OWNER))), (1, 0, 0))
+
+    def test_cut_off_after_the_250_a_copy_filed_during_the_wait_is_found_on_the_second_look(self):
+        delivered = []
+        self.smtp.on_deliver = lambda sender, rcpts, message: delivered.append(message)
+
+        def files_late(seconds):
+            self.waits.append(seconds)
+            for message in delivered:
+                self.sent.add(message, self.clock)
+            del delivered[:]
+
+        with mock.patch.object(loop, "_sleep", files_late):
+            s = self.killed_after_the_250()
+        self.assertEqual(sent_lookups(s)[:2], [(None, False), (caps.SENT_LOOK_WAIT_S, True)])
+        self.assertEqual(send_states(self.state), ["confirmed"])
+        self.assertEqual((len(self.to(PROSPECT)), held_outcomes(s)), (1, []))
+
+    def test_a_refused_send_surely_did_not_go_and_is_pending_again(self):
+        real = live.LiveMail.send
+
+        def refuses_t1(mail, raw, envelope, message_id, template=None):
+            if template == "T1":
+                raise MailError("554 refused")
+            return real(mail, raw, envelope, message_id, template=template)
+
+        with mock.patch.object(live.LiveMail, "send", refuses_t1):
+            s = self.started_fresh_then_asked()
+        self.assertEqual(self.to(PROSPECT), [])
+        lines = receipts.read_lines(s.receipts_path)
+        sends = set(l["seq"] for l in lines if l["kind"] == "called" and l["payload"]["call"] == "send")
+        results = [l["payload"]["state"] for l in lines if l["kind"] == "result" and l["payload"]["call_seq"] in sends]
+        self.assertEqual(results, ["refused", "handed_over"])          # T1 refused, then the hold notice
+        self.assertEqual(send_states(self.state), ["pending", "confirmed"])
+        self.assertEqual(held_outcomes(s), ["hold:send_unconfirmed"])
+
+    def test_a_send_that_may_have_gone_is_unknown_before_any_look_and_never_sent_again(self):
+        self.smtp.on_deliver = None
+        real = live.LiveMail.send
+        states_at_look = []
+        real_look = live.LiveMail.find_in_sent
+
+        def times_out_after_data(mail, raw, envelope, message_id, template=None):
+            real(mail, raw, envelope, message_id, template=template)
+            if template == "T1":
+                raise SendUnknown("timed out after DATA")
+
+        def look(mail, message_id):
+            states_at_look.append(send_states(self.state)[0])
+            return real_look(mail, message_id)
+
+        with mock.patch.object(live.LiveMail, "send", times_out_after_data), \
+                mock.patch.object(live.LiveMail, "find_in_sent", look):
+            s = self.started_fresh_then_asked()
+        self.assertEqual(states_at_look[0], "unknown")
+        self.assertEqual(send_states(self.state)[0], "unknown")
+        self.assertEqual(held_outcomes(s), ["hold:send_unconfirmed"])
+        self.clock = u(2026, 12, 1, 16, 20)
+        self.go()
+        self.assertEqual(len(self.to(PROSPECT)), 1)
+
+
+class Steps(object):
+    """A kill at the k-th step of a run (review 2's probe, as a test): before and after each ledger
+    write, each mail and calendar call and each receipt line. where names the step it landed on."""
+    LEDGER = ("record_fetch", "record_message", "set_message_status", "record_send", "reset_send", "set_send_state",
+              "send_refused", "create_offer", "set_offer_slots", "use_offer", "close_offers", "record_booking",
+              "set_booking_state", "record_hold", "enqueue_action", "start_action", "finish_action", "start_run",
+              "end_run")
+    MAIL = ("send", "find_in_sent", "file", "fetch_new")
+    CALENDAR = ("query", "get", "create_only", "delete")
+    SENDING = ("after Ledger.set_send_state(sending)", "before LiveMail.send")   # marked sending, not yet sent
+
+    def __init__(self, k):
+        self.k, self.n, self.where = k, 0, None
+
+    def point(self, label):
+        self.n += 1
+        if self.n == self.k:
+            self.where = label
+            raise Crash(label)
+
+    def wrap(self, cls, name):
+        real = getattr(cls, name)
+
+        def wrapped(obj, *args, **kwargs):
+            label = "%s.%s" % (cls.__name__, name) + ("(%s)" % (args[1],) if name == "set_send_state" else "")
+            self.point("before " + label)
+            out = real(obj, *args, **kwargs)
+            self.point("after " + label)
+            return out
+        return mock.patch.object(cls, name, wrapped)
+
+    @contextlib.contextmanager
+    def armed(self):
+        patches = ([self.wrap(ledger_mod.Ledger, n) for n in self.LEDGER] + [self.wrap(live.LiveMail, n) for n in self.MAIL]
+                   + [self.wrap(live.LiveCalendar, n) for n in self.CALENDAR] + [self.wrap(receipts.ReceiptWriter, "write")])
+        for p in patches:
+            p.start()
+        try:
+            yield self
+        finally:
+            for p in patches:
+                p.stop()
+
+
+class KillAtEveryStepTest(LiveFixture):
+    """Review 2, finding 1: a kill at every step of a book-and-reply pass, then two more runs. Never
+    two replies, two notices or two events; every chain verifies; no send is left pending or sending.
+    With her copy filed in Sent, the prospect gets T1 unless the kill landed between its sending mark
+    and the transport (then the owner is told instead); with none filed, the owner is told once."""
+    FILE_SENT = True
+
+    def setUp(self):
+        super().setUp()
+        if not self.FILE_SENT:
+            self.smtp.on_deliver = None
+        patch = mock.patch.object(loop, "_sleep", lambda seconds: None)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def to(self, address):
+        return [data for _, rcpts, data in self.smtp.delivered if rcpts[0] == address]
+
+    def fresh_world(self):
+        """A live ledger started fresh at 4:00 PM (the first one's copy, after the first), nothing in
+        any box, and Priya's request in at 4:02; her clock at 4:10."""
+        state, fresh = os.path.join(self.dir, "state"), os.path.join(self.dir, "fresh-state")
+        shutil.rmtree(state, True)
+        for box in (self.inbox, self.sent):
+            box.messages.clear()
+        del self.smtp.delivered[:]
+        del self.dav.requests[:]
+        self.dav.resources.clear()
+        if os.path.isdir(fresh):
+            shutil.copytree(fresh, state)
+        else:
+            self.prove_smoke(self.smoke_record())
+            self.clock = u(2026, 12, 1, 16, 0)
+            self.go(fresh=True)
+            shutil.copytree(state, fresh)
+        self.inbox.add(request(1), u(2026, 12, 1, 16, 2))
+        self.clock = u(2026, 12, 1, 16, 10)
+
+    def test_a_kill_at_any_step_never_sends_or_books_twice(self):
+        k = 0
+        while True:
+            k += 1
+            self.fresh_world()
+            with Steps(k).armed() as steps:
+                try:
+                    self.go()
+                except Crash:
+                    pass
+            if steps.where is None:
+                break                       # the pass ended before step k: every step has had its kill
+            after = []
+            for minute in (20, 30):
+                self.clock = u(2026, 12, 1, 16, minute)
+                after.append(self.go())
+            to_p, to_o = len(self.to(PROSPECT)), len(self.to(OWNER))
+            with self.subTest(k=k, where=steps.where):
+                self.assertLessEqual(to_p, 1)                   # never two replies
+                self.assertLessEqual(to_o, 1)                   # never two notices
+                self.assertEqual(len([r for r in self.dav.requests if r[0] == "PUT"]), 1)
+                self.assertEqual(len(self.dav.resources), 1)
+                self.assertTrue(all(s.verify_ok for s in after))
+                self.assertFalse(set(send_states(self.state)) & {"pending", "sending"}, send_states(self.state))
+                if self.FILE_SENT:
+                    self.assertEqual(to_p + to_o, 1)
+                else:
+                    self.assertGreaterEqual(to_p + to_o, 1)
+                if to_p == 0 or (to_o == 0 and not self.FILE_SENT):
+                    self.assertIn(steps.where, Steps.SENDING)
+        self.assertGreater(k, 100)
+
+
+class KillAtEveryStepNoSentCopyTest(KillAtEveryStepTest):
+    FILE_SENT = False
+
+
+class DigestKillTest(LiveFixture):
+    """Review 2, finding 1, the digest's send: a kill at every step of a run that sends the day's
+    digest (an empty inbox: S2 is its one send), then two more runs that would send it. Never two
+    digests; none only when the kill landed between its sending mark and the transport."""
+    FILE_SENT = True
+
+    def setUp(self):
+        super().setUp()
+        if not self.FILE_SENT:
+            self.smtp.on_deliver = None
+        patch = mock.patch.object(loop, "_sleep", lambda seconds: None)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_a_kill_at_any_step_of_the_digest_never_sends_it_twice(self):
+        k = 0
+        state, fresh = os.path.join(self.dir, "state"), os.path.join(self.dir, "fresh-state")
+        while True:
+            k += 1
+            shutil.rmtree(state, True)
+            self.sent.messages.clear()
+            del self.smtp.delivered[:]
+            if os.path.isdir(fresh):
+                shutil.copytree(fresh, state)
+            else:
+                self.prove_smoke(self.smoke_record(u(2026, 12, 2, 0, 0)))
+                self.clock = u(2026, 12, 2, 1, 0)                # Tue Dec 1, 5:00 PM Pacific
+                self.go(fresh=True)
+                shutil.copytree(state, fresh)
+            self.clock = u(2026, 12, 2, 1, 10)
+            with Steps(k).armed() as steps:
+                try:
+                    self.go(digest=True)
+                except Crash:
+                    pass
+            if steps.where is None:
+                break
+            after = []
+            for minute in (20, 30):
+                self.clock = u(2026, 12, 2, 1, minute)
+                after.append(self.go(digest=True))
+            digests = len(self.smtp.delivered)
+            with self.subTest(k=k, where=steps.where):
+                self.assertLessEqual(digests, 1)
+                self.assertTrue(all(s.verify_ok for s in after))
+                self.assertFalse(set(send_states(self.state)) & {"pending", "sending"}, send_states(self.state))
+                if digests == 0:
+                    self.assertIn(steps.where, Steps.SENDING)
+        self.assertGreater(k, 20)
+
+
+class DigestKillNoSentCopyTest(DigestKillTest):
+    FILE_SENT = False
 
 
 class FakeTime(object):

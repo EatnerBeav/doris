@@ -440,11 +440,11 @@ class RecordHaltTest(StateDirTest):
         self.assertIn(("set_booking_state", "doris-b1", "unconfirmed"), led.calls)
         self.assertTrue(led.closed)
 
-    def test_a_send_in_flight_is_marked_unknown_by_its_message_id(self):
+    def test_a_send_in_flight_is_marked_sending_by_its_message_id(self):
         rec = FakeReceipts([line(3, "called", call="send", target="T2", message_id="<s1@fastmail.com>")])
         led = FakeLedger()
         out = self.record("watch_button", rec, led)
-        self.assertIn(("set_send_state", "<s1@fastmail.com>", "unknown"), led.calls)
+        self.assertIn(("set_send_state", "<s1@fastmail.com>", "sending"), led.calls)
         self.assertTrue(out["payload"]["in_flight"]["unconfirmed"])
         self.assertEqual(out["why"]["code"], "halt.watch_button")
 
