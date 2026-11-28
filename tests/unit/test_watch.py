@@ -209,6 +209,12 @@ def press(server):
     return ask(server, "POST", "/stop", form_headers(server), "token=" + token_of(page.decode("utf-8")))
 
 
+def state_json_tip(server, run, after, tip):
+    status, _, body = ask(server, "GET", "/state?run=%s&after=%d&tip=%s" % (run, after, tip))
+    assert status == 200, (status, body)
+    return json.loads(body.decode("ascii"))
+
+
 def state_json(server, run="", after=0):
     status, headers, body = ask(server, "GET", "/state?run=%s&after=%d" % (run, after))
     assert status == 200, (status, body)
@@ -511,6 +517,60 @@ class Panes(TempState):
         self.assertEqual(self.look()["rows"][-1]["what"],
                          "A cut-off line (11 bytes after line 1) was moved aside to receipts.jsonl.torn-1.")
 
+    def test_receipts_that_cannot_be_read_show_no_counts(self):
+        path = write_run(self.state, "model-live-live-20261128T010000Z", [
+            start_line("model-live-live-20261128T010000Z", source="live", mode="live"),
+            ("called", {"call": "model", "target": "claude-test", "source": "live"}),
+            ("result", {"call_seq": 2, "ok": True, "cost_usd": 4.2, "source": "live"}),
+        ], mode="live")
+        with open(path, "rb") as fh:
+            data = fh.read()
+        with open(path, "wb") as fh:
+            fh.write(data.replace(b'"step":"start"', b'"step":"stort"', 1))
+        snap = self.look()
+        self.assertEqual(snap["state"], "broken")
+        self.assertEqual([p["value"] for p in snap["panes"][1:]], ["?", "?", "?"])
+        self.assertNotIn("$0.0000", json.dumps(snap))
+
+    def test_counts_before_a_break_say_so(self):
+        path = write_run(self.state, "model-replayed-sandbox-20261128T010000Z", busy_day())
+        with open(path, "rb") as fh:
+            lines = fh.read().split(b"\n")
+        lines[10] = b"{not json"
+        with open(path, "wb") as fh:
+            fh.write(b"\n".join(lines))
+        snap = self.look()
+        self.assertEqual(snap["panes"][3]["value"], "$0.0012 (recorded)")
+        self.assertTrue(snap["panes"][3]["note"].endswith("From the 10 lines before the break only."))
+
+    def test_bytes_after_the_closing_line_are_not_still_being_written(self):
+        name = "model-stub-sandbox-20261128T010000Z"
+        path = write_run(self.state, name, [
+            start_line(name, "stub"),
+            ("summary", {"handled": 0, "held": 0, "human_approvals": 0, "errors": 0, "quarantined": 0, "sends": 0,
+                         "hold_notices": 0, "bookings": 0, "model_calls": 0, "cost_usd": 0.0, "halted": None,
+                         "read_failed": False}),
+        ])
+        with open(path, "ab") as fh:
+            fh.write(b'{"hash":"12')
+        self.assertFalse(receipts.verify(path, finished=True).ok)
+        snap = self.look()
+        self.assertFalse(snap["chain_ok"])
+        self.assertEqual(snap["state"], "broken")
+        self.assertIn("after its closing line", snap["chain"])
+
+    def test_a_run_folder_whose_name_is_not_text_still_shows_the_page(self):
+        name = "model-replayed-sandbox-2026\udcff"
+        try:
+            write_run(self.state, name, busy_day())
+        except (OSError, UnicodeError):
+            self.skipTest("this file system will not hold that name")
+        snap = self.look()
+        self.assertEqual(snap["run"], "model-replayed-sandbox-2026\ufffd")
+        page = watch.render_page(snap, token="t", nonce="n")
+        page.encode("utf-8")
+        json.dumps(snap, ensure_ascii=False).encode("utf-8")
+
     def test_a_long_run_shows_its_newest_lines_and_says_how_many_more(self):
         write_run(self.state, "model-replayed-sandbox-20261128T010000Z", busy_day())
         with mock.patch.object(watch, "MAX_ROWS", 5):
@@ -608,6 +668,44 @@ class Server(TempState):
         write_run(self.state, newer, [start_line(newer, "stub")], started=time.time() + 5)
         self.assertEqual(state_json(self.server)["pressed"], "")
         self.assertNotIn("Stop pressed", ask(self.server, "GET", "/")[2].decode("utf-8"))
+
+    def test_a_press_that_failed_somewhere_is_said_until_watch_closes(self):
+        name = "model-stub-live-20261128T010000Z"
+        write_run(self.state, name, [start_line(name, "stub", "live")], mode="live", started=time.time() - 60)
+        real = supervisor.request_stop
+
+        def request_stop(mode, cause="cli", state_dir=None):
+            if mode == "live":
+                raise OSError("read-only folder")
+            return real(mode, cause, state_dir)
+        with mock.patch.object(supervisor, "request_stop", side_effect=request_stop):
+            self.assertEqual(press(self.server)[0], 500)
+        newer = "model-stub-live-20261128T020000Z"
+        write_run(self.state, newer, [start_line(newer, "stub", "live")], mode="live", started=time.time() + 5)
+        self.assertIn("NOT halted: live (OSError)", state_json(self.server)["pressed"])
+
+    def test_a_press_is_not_dropped_for_a_run_with_no_config(self):
+        self.assertEqual(press(self.server)[0], 303)
+        folder = os.path.join(self.state, "sandbox", "runs", "model-stub-sandbox-20261128T020000Z")
+        os.makedirs(folder)
+        writer = receipts.ReceiptWriter(os.path.join(folder, "receipts.jsonl"), "r", "sandbox", clock=lambda: T0)
+        writer.write("halted", halted_payload(1), why=why("halt.watch_button"))
+        self.assertIn("Stop pressed", state_json(self.server)["pressed"])
+
+    def test_a_file_rewritten_to_the_same_length_is_sent_afresh(self):
+        name = "model-replayed-sandbox-20261128T010000Z"
+        path = write_run(self.state, name, busy_day())
+        first = state_json(self.server)
+        tip = first["rows"][-1]["hash"]
+        shutil.rmtree(os.path.dirname(path))
+        write_run(self.state, name, [start_line(name)] + busy_day()[1:17] + [
+            ("called", {"call": "calendar_query", "target": "span", "attempt": 2})])
+        status, _, body = ask(self.server, "GET", "/state?run=%s&after=18&tip=%s" % (name, tip))
+        again = json.loads(body.decode("ascii"))
+        self.assertTrue(again["reset"])
+        self.assertEqual(len(again["rows"]), 18)
+        same = state_json_tip(self.server, name, 18, again["rows"][-1]["hash"])
+        self.assertEqual((same["reset"], same["rows"]), (False, []))
 
     def test_a_page_left_open_across_a_restart_reloads_itself(self):
         earlier = serve(self)                               # an earlier start of watch, on another port

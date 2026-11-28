@@ -322,10 +322,14 @@ def _chain(path):
         return [], False, "The receipt file can't be read (%s)." % exc.__class__.__name__, None
     whole, torn = receipts._split(data)          # noqa: SLF001 - verify's own steps, on this one read
     result, good = receipts._check(whole)        # noqa: SLF001
+    shown = _text(path, 400)
     if not result.ok:
         reason = result.reason.split(": ", 1)[-1]
         return good, False, ("Chain BROKEN at line %d: %s. Check it with python -m doris verify %s"
-                             % (result.first_bad_seq, reason, path)), result.first_bad_seq
+                             % (result.first_bad_seq, reason, shown)), result.first_bad_seq
+    if torn and good and good[-1]["kind"] in receipts.CLOSING_KINDS and not receipts._summary_follows(good[-1]):  # noqa: SLF001
+        return good, False, ("Chain BROKEN after its closing line (line %d): %d bytes follow it that are not a whole "
+                             "line. Check it with python -m doris verify %s" % (len(good), len(torn), shown)), len(good) + 1
     if torn:
         return good, True, ("Chain verified through line %d; the line after it is still being written, "
                             "or was cut short." % len(good)), None
@@ -486,9 +490,17 @@ def snapshot(run):
         {"label": LABELS[2], "value": str(len(decisions)), "note": _decision_note(decisions)},
         {"label": LABELS[3], "value": cost[0], "note": cost[1]},
     ]
+    if not chain_ok and not lines:          # nothing to count from: no number at all, never a zero
+        for pane in panes[1:]:
+            pane.update(value="?", note="No line can be trusted.")
+    elif not chain_ok:
+        only = " From the %s before the break only." % ("line" if len(lines) == 1 else "%d lines" % len(lines))
+        for pane in panes[1:]:
+            pane["note"] += only
     more = ("Showing the newest %d of %d lines. The receipt file holds every one." % (MAX_ROWS, len(rows))
             if len(rows) > MAX_ROWS else "")
-    return {"run": run.name, "title": "Doris watch: " + run.name, "run_line": "Run %s" % run.name,
+    name = _text(run.name, 200)          # a folder name is bytes on disk, not always text
+    return {"run": name, "title": "Doris watch: " + name, "run_line": "Run %s" % name,
             "source": " ".join(w for w in (MODE_WORDS.get(mode, ""), SOURCE_WORDS.get(source, "")) if w),
             "status": status, "chain": chain, "chain_ok": chain_ok, "state": state, "panes": panes,
             "rows": rows, "after": max([r["seq"] for r in rows] or [0]), "more": more, "empty": ""}
@@ -496,9 +508,10 @@ def snapshot(run):
 
 def unreadable(run, exc):
     """The page when a run's receipts can't be shown at all: still the page, so still its Stop button."""
-    path = os.path.join(run.folder, "receipts.jsonl") if run is not None else ""
-    return {"run": run.name if run is not None else "", "title": "Doris watch: receipts not shown",
-            "run_line": "Run %s" % run.name if run is not None else "", "source": "",
+    path = _text(os.path.join(run.folder, "receipts.jsonl"), 400) if run is not None else ""
+    name = _text(run.name, 200) if run is not None else ""
+    return {"run": name, "title": "Doris watch: receipts not shown",
+            "run_line": "Run %s" % name if run is not None else "", "source": "",
             "status": "The receipts could not be shown (%s). The Stop button still works. Check them with "
                       "python -m doris verify %s" % (exc.__class__.__name__, path),
             "chain": "", "chain_ok": False, "state": "unreadable",
@@ -739,7 +752,7 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
   <div class="scroll"><table>
     <thead><tr><th scope="col">Line</th><th scope="col">Time (UTC)</th><th scope="col">Step</th>
       <th scope="col">Message</th><th scope="col">What happened</th><th scope="col">Why</th></tr></thead>
-    <tbody id="steps" data-run="$run" data-after="$after">$rows</tbody>
+    <tbody id="steps" data-run="$run" data-after="$after" data-tip="$tip">$rows</tbody>
   </table></div>
 </section>
 </main>
@@ -752,6 +765,7 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
   var steps = document.getElementById("steps");
   var run = steps.getAttribute("data-run") || "";
   var after = parseInt(steps.getAttribute("data-after"), 10) || 0;
+  var tip = steps.getAttribute("data-tip") || "";
 
   function put(id, value) {
     var el = document.getElementById(id);
@@ -793,6 +807,7 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
       steps.insertBefore(row(s.rows[i]), steps.firstChild);
     }
     while (steps.childNodes.length > MAX_ROWS) { steps.removeChild(steps.lastChild); }
+    if (s.rows.length) { tip = s.rows[s.rows.length - 1].hash; } else if (s.reset) { tip = ""; }
     run = s.run;
     after = s.after;
     if (document.title !== s.title) { document.title = s.title; }
@@ -817,7 +832,8 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
         "cannot reach her. Stop her on the command line: python -m doris stop");
   }
   function poll() {
-    fetch("/state?run=" + encodeURIComponent(run) + "&after=" + after, {cache: "no-store", credentials: "same-origin"})
+    fetch("/state?run=" + encodeURIComponent(run) + "&after=" + after + "&tip=" + encodeURIComponent(tip),
+          {cache: "no-store", credentials: "same-origin"})
       .then(function (response) {
         if (!response.ok) { throw new Error("watch answered " + response.status); }
         return response.json();
@@ -853,6 +869,7 @@ def render_page(snap, token, nonce, pressed="", now=None):
               "state": _e(snap["state"]), "pressed": _e(pressed), "empty": _e(snap["empty"]),
               "after": int(snap["after"]), "poll": int(POLL_MS), "max_rows": int(MAX_ROWS),
               "boot": _e(boot_id(token)), "checked": _e(checked_words(now)), "more": _e(snap["more"]),
+              "tip": _e(snap["rows"][-1]["hash"] if snap["rows"] else ""),
               "rows": "".join(_row_html(r) for r in reversed(snap["rows"][-MAX_ROWS:]))}
     for i, pane in enumerate(snap["panes"]):
         fields.update({"label%d" % i: _e(pane["label"]), "value%d" % i: _e(pane["value"]),
@@ -882,7 +899,7 @@ class WatchServer(ThreadingHTTPServer):
         self.token = secrets.token_urlsafe(32)
         self.boot = boot_id(self.token)
         self.say = say or _say
-        self.pressed, self.pressed_ns = "", 0
+        self.pressed, self.pressed_ns, self.pressed_failed = "", 0, False
         self._lock = threading.Lock()
         self._cache = None
         self._unread = ""
@@ -893,8 +910,9 @@ class WatchServer(ThreadingHTTPServer):
 
     def view(self):
         """(the newest run's snapshot, the line about a press of Stop). The snapshot is read again only when
-        the receipt file has changed. The press line stays until a run with receipts starts after the press:
-        that run got past the halt, so `resume` had cleared it."""
+        the receipt file has changed. The press line stays until a run with receipts whose config.json was
+        written after the press: that run got past the halt, so `resume` had cleared it. A press that failed
+        anywhere is said until watch closes."""
         run = newest_run()
         key = None
         if run is not None:
@@ -905,21 +923,27 @@ class WatchServer(ThreadingHTTPServer):
                 key = None
         with self._lock:
             cached = self._cache[1] if key is not None and self._cache is not None and self._cache[0] == key else None
-            pressed, pressed_ns = self.pressed, self.pressed_ns
+            pressed, pressed_ns, failed = self.pressed, self.pressed_ns, self.pressed_failed
         snap = cached
         if snap is None:
             try:
                 snap = snapshot(run)
             except Exception as exc:        # noqa: BLE001 - an odd line must never take the Stop button away
                 snap = unreadable(run, exc)
-                if snap["status"] != self._unread:
-                    self._unread = snap["status"]
+                with self._lock:
+                    news, self._unread = snap["status"] != self._unread, snap["status"]
+                if news:
                     self.say(snap["status"])
                 key = None
             with self._lock:
                 self._cache = (key, snap) if key is not None else None
-        if pressed and run is not None and run.has_receipts and run.started > pressed_ns:
-            pressed = ""
+        if pressed and not failed and run is not None and run.has_receipts:
+            try:                            # its config.json: written before the halt check, never by a halt
+                configured = os.stat(os.path.join(run.folder, "config.json")).st_mtime_ns
+            except OSError:
+                configured = None
+            if configured is not None and configured > pressed_ns:
+                pressed = ""                # a press that failed anywhere is said until watch closes
         return snap, pressed
 
     def press(self):
@@ -927,7 +951,7 @@ class WatchServer(ThreadingHTTPServer):
         now = time.time_ns()
         words = pressed_words(done, failed, _dt.datetime.fromtimestamp(now / 1e9, _dt.timezone.utc))
         with self._lock:
-            self.pressed, self.pressed_ns = words, now
+            self.pressed, self.pressed_ns, self.pressed_failed = words, now, bool(failed)
         self.say(words)
         return not failed, words
 
@@ -972,7 +996,7 @@ class _Handler(BaseHTTPRequestHandler):
             nonce = secrets.token_urlsafe(16)
             snap, pressed = self.server.view()
             page = render_page(snap, self.server.token, nonce, pressed)
-            return self._reply(200, "text/html; charset=utf-8", page.encode("utf-8"), nonce=nonce)
+            return self._reply(200, "text/html; charset=utf-8", page.encode("utf-8", "replace"), nonce=nonce)
         if url.path == "/state":
             return self._state(parse_qs(url.query))
         if url.path == "/stop":
@@ -985,7 +1009,10 @@ class _Handler(BaseHTTPRequestHandler):
         run = query.get("run", [""])[0]
         after = query.get("after", ["0"])[0]
         after = int(after) if re.fullmatch(r"[0-9]{1,9}", after) else 0
-        reset = run != snap["run"] or after > snap["after"] or after == 0
+        tip = query.get("tip", [""])[0]
+        rows = snap["rows"]
+        reset = run != snap["run"] or after > snap["after"] or after == 0 or (     # rewritten under the page
+            tip != "" and rows[after - 1]["seq"] == after and rows[after - 1]["hash"] != tip)
         out = dict(snap, reset=reset, pressed=pressed, boot=self.server.boot,
                    checked=checked_words(_dt.datetime.now(_dt.timezone.utc)),
                    rows=snap["rows"][-MAX_ROWS:] if reset else [r for r in snap["rows"] if r["seq"] > after])
