@@ -33,6 +33,7 @@ NAME_WIDTH = 24                 # the name column on the terminal; longer names 
 WIDTH = 100                     # the terminal's width when it can't be read (a pipe, a file, CI)
 CALENDAR_CALLS = ("calendar_query", "calendar_create", "calendar_get", "calendar_delete")
 UNREADABLE = "(unreadable message)"
+BOOKING = "booking:"                             # the subject of a check of one of her bookings (ruling 17)
 SENSITIVE = "(sensitive mail, unread)"           # as the loop's own line shows it
 MAX_COST = 1e6                                   # a recorded cost past this is no cost the story adds up
 MAX_MINUTES = 24 * 60
@@ -127,6 +128,7 @@ class _Message:
         self.replies = []        # (send line, found in Sent: True, False or None)
         self.notices = []
         self.failed = []         # error words of calendar calls that came back failed
+        self.booking = False     # a check of one of her bookings (ruling 17), not an email
 
 
 # --- the story --------------------------------------------------------------------------------------
@@ -173,7 +175,12 @@ def build(lines):
         if m is None:
             p = _payload(line) if line is not None else {}
             thread = p.get("thread") if isinstance(p.get("thread"), str) else subject
-            m = messages[subject] = _Message(subject, _who(p), thread)
+            who, check = _who(p), subject.startswith(BOOKING) or p.get("step") == "booking_check"
+            if check:                   # told on the thread of the email that made the booking, under its name
+                made = messages.get(bookings.get(subject[len(BOOKING):], {}).get("subject"))
+                thread, who = (made.thread, made.who) if made is not None else (subject, "(one of her bookings)")
+            m = messages[subject] = _Message(subject, who, thread)
+            m.booking = check
             if thread not in by_thread:
                 by_thread[thread] = []
                 threads.append(thread)
@@ -254,9 +261,12 @@ def build(lines):
     one_day = len({_day(t) for t in stamps}) <= 1
     when = (lambda t: _clock(t)) if one_day else _full
 
-    # the counts
-    held = [m for m in messages.values() if m.close is not None and m.close.get("kind") == "held"]
-    closed = [m for m in messages.values() if m.close is not None and m.close.get("kind") == "decided"]
+    # the counts: emails, then her bookings' checks that were held apart
+    emails = [m for m in messages.values() if not m.booking]
+    held_all = [m for m in messages.values() if m.close is not None and m.close.get("kind") == "held"]
+    held = [m for m in held_all if not m.booking]
+    closed = [m for m in emails if m.close is not None and m.close.get("kind") == "decided"]
+    gone = len(held_all) - len(held)
     answered = noreply = unconfirmed = 0
     for m in closed:
         template = _payload(m.close).get("template")
@@ -273,12 +283,14 @@ def build(lines):
                 and (b["there"] is True or (b["booked"] and b["there"] is None))]
     handled = "%d handled by her (%d answered, %d needed no reply%s)" % (
         len(closed), answered, noreply, ", %d closed without a confirmed reply" % unconfirmed if unconfirmed else "")
-    unfinished = len(messages) - len(closed) - len(held)
+    unfinished = len(emails) - len(closed) - len(held)
     approved = _plural(approvals, "human approval")
     if messages:
-        headline = "%s came in: %s, %d held for %s%s. %s on his calendar. %s." % (
-            _plural(len(messages), "email"), handled, len(held), OWNER,
-            ", %d not finished" % unfinished if unfinished else "", _plural(len(standing), "meeting"), approved)
+        headline = "%s came in: %s, %d held for %s%s. %s on his calendar.%s %s." % (
+            _plural(len(emails), "email"), handled, len(held), OWNER,
+            ", %d not finished" % unfinished if unfinished else "", _plural(len(standing), "meeting"),
+            " %s he removed by hand %s held for him." % (_plural(gone, "booking"), "is" if gone == 1 else "are")
+            if gone else "", approved)
     elif inbox:
         headline = "No new mail: the inbox held %s, none of them new to her. %s." % (_plural(inbox, "message"), approved)
     else:
@@ -287,7 +299,7 @@ def build(lines):
 
     # needs the owner
     rows, all_noticed = [], True
-    for m in held:
+    for m in held_all:
         code = _code(m.close)
         reason = _hold_reason(m.close)
         if any(found for _, found in m.notices):
@@ -303,8 +315,8 @@ def build(lines):
             all_noticed = False
         t = _time(m.close.get("ts"))
         rows.append([when(t) if t else "?", m.who, reason])
-    title = "Needs %s (%d)" % (OWNER, len(held))
-    if held and not any(m.replies for m in held):     # these emails, not their threads: Marcus got times before
+    title = "Needs %s (%d)" % (OWNER, len(held_all))
+    if held_all and not any(m.replies for m in held_all):     # these emails, not their threads: Marcus got times before
         title += ": she sent no reply to these"
         if all_noticed:
             title += "; for each, a notice with a draft reply went to him"
@@ -568,7 +580,7 @@ def _halt_words(line, at, when, mode):
     if isinstance(flight, dict):
         call = flight.get("call") if isinstance(flight.get("call"), str) else "a call"
         out.append("Cut off mid-call: %s." % call)
-    elif flight == "none":
+    elif flight == "none" or ("in_flight" in p and flight is None):    # the loop writes "none", the supervisor null
         out.append("Nothing was in flight.")
     else:
         out.append("What was in flight is not recorded.")
@@ -687,6 +699,16 @@ def _earlier_runs(path):
             break
         found.append((other, good, torn))
     return found[::-1], None
+
+
+def with_earlier_runs(receipts_path, run_lines):
+    """This run's verified lines after those of the day's earlier stopped runs, so the watch page tells the
+    same day as lines(). On any trouble reading the earlier runs, this run's lines alone."""
+    try:
+        earlier, _unverified = _earlier_runs(receipts_path)
+    except Exception:                            # noqa: BLE001 - the page shows this run, as it did before
+        return list(run_lines)
+    return [l for _p, done, _t in earlier for l in done] + list(run_lines)
 
 
 def lines(receipts_path, width=None):

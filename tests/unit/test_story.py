@@ -18,7 +18,7 @@ import unittest
 
 from unittest import mock
 
-from doris import loop, paths, receipts, story, why
+from doris import loop, paths, receipts, story, templates, why
 from tests.unit import demo_sandbox
 
 OWNER = "whizz@fastmail.com"
@@ -380,12 +380,14 @@ class WhatTheReceiptsBack(unittest.TestCase):
         self.assertNotIn("listed below", s["needs"]["rows"][0][2])
 
     def test_the_halt_line_claims_nothing_in_flight_only_when_the_line_says_none(self):
-        for flight, words in (("none", "Nothing was in flight."), (None, "What was in flight is not recorded.")):
+        missing = object()
+        for flight, words in (("none", "Nothing was in flight."), (None, "Nothing was in flight."),
+                              (missing, "What was in flight is not recorded.")):
             with self.subTest(flight):
                 d = booked_day()
                 payload = {"cause": "watch_button", "dropped": []}
-                if flight is not None:
-                    payload["in_flight"] = flight
+                if flight is not missing:
+                    payload["in_flight"] = flight          # the loop writes "none", the supervisor null
                 d.add("halted", payload, "", why.why("halt.watch_button"), ts="2026-12-01T18:31:00Z")
                 self.assertIn(words, story.build(d.lines)["halt"])
 
@@ -497,6 +499,25 @@ class AStopInTheDay(unittest.TestCase):
         self.assertNotIn("Old Mail", text)
         self.assertIn("Receipts: %d lines in 2 runs, each chain verified." % (len(first.lines) + len(second.lines)),
                       text)
+
+
+class ABookingFoundGone(unittest.TestCase):
+    """Ruling 17: a booking of hers found gone is held for Shane under subject booking:<id>; it is not an email."""
+
+    def test_a_booking_he_removed_is_held_for_him_and_is_not_an_email(self):
+        d = booked_day()
+        d.call("booking:doris-aaa", "calendar_get", "doris-aaa", {"ok": True, "found": False})
+        d.add("observed", {"step": "booking_check", "booking_id": "doris-aaa"}, "booking:doris-aaa")
+        d.add("held", {"outcome": "hold:owner_removed", "template": "-"}, "booking:doris-aaa",
+              why.why("hold.owner_removed"), ts="2026-12-01T18:00:00Z")
+        d.send("booking:doris-aaa", "S1", {"reason": "hold.owner_removed"}, to="owner")
+        s = story.build(d.lines)
+        self.assertEqual(s["headline"], "1 email came in: 1 handled by her (1 answered, 0 needed no reply), 0 held "
+                                        "for Shane. 0 meetings on his calendar. 1 booking he removed by hand is held "
+                                        "for him. 0 human approvals.")
+        self.assertEqual(s["needs"]["rows"], [["10:00 AM", "Priya Raman", templates.HOLD_REASONS["hold.owner_removed"]]])
+        self.assertEqual(s["threads"]["rows"], [["Priya Raman", "Asked for Wed Dec 2, 11:00 AM: booked. Held for "
+                                                 "Shane: %s." % templates.HOLD_REASONS["hold.owner_removed"]]])
 
 
 class NothingNew(unittest.TestCase):
