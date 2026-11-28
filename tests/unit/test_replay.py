@@ -277,7 +277,15 @@ class BrokenChain(unittest.TestCase):
 
 
 class TrapPackRun1(unittest.TestCase):
-    """The committed trace of Trap Pack run 1 (model called live): one receipt file per item."""
+    """The committed trace of Trap Pack run 1 (model called live): one receipt file per item.
+
+    The suite points paths.TRACES at a throwaway folder (tests/__init__.py) so no test writes into the
+    repository's traces/; replay only reads, so these tests point it back at the committed folder."""
+
+    def setUp(self):
+        patch = mock.patch.object(paths, "TRACES", os.path.join(paths.REPO, "traces"))
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def test_the_committed_trace_steps_through_end_to_end(self):
         folder = os.path.join(paths.TRACES, RUN1)
