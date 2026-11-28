@@ -9,7 +9,8 @@ the same files after any number of demos, a Trap Pack run or a judge's own mail 
 
 The committed set is what the fixtures generator writes (tests/tools/build_demo_fixtures.py, which
 test_fixtures.py checks against the committed files byte for byte) and the hand-written README.md,
-never what happens to be on disk.
+never what happens to be on disk. It is also exactly what git tracks under sandbox/: run as
+`python -m tests.unit.demo_sandbox` from the repository root, this module checks that (CI does).
 
 Standard library only, and no import of doris: test_fixtures.py checks the fixtures without it.
 """
@@ -20,10 +21,13 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SANDBOX = os.path.join(os.path.dirname(TESTS), "sandbox")      # the repository's own, as doris.paths has it
+REPO = os.path.dirname(TESTS)
+SANDBOX = os.path.join(REPO, "sandbox")      # the repository's own, as doris.paths has it
 GENERATOR = os.path.join(TESTS, "tools", "build_demo_fixtures.py")
 HAND_WRITTEN = ("README.md",)              # committed beside the generated fixtures, not generated
 FACTS = "inbox/facts.json"
@@ -77,3 +81,58 @@ def copy_committed(dest, source=SANDBOX):
         else:
             shutil.copyfile(src, out)
     return dest
+
+
+def git_sandbox_files(repo=REPO):
+    """What git tracks under repo's sandbox/ (`git ls-files sandbox`), as sorted "/"-separated paths
+    under sandbox/. None when git cannot say for repo: git is not installed, or repo is not the top
+    of a git checkout (a `git archive` copy, even one unpacked inside some other checkout)."""
+    def git(*args):
+        return subprocess.run(["git", "-C", repo] + list(args), stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=60)
+    try:
+        prefix = git("rev-parse", "--show-prefix")       # "" at the top of a checkout
+        if prefix.returncode != 0 or prefix.stdout.strip():
+            return None
+        listed = git("ls-files", "-z", "--", "sandbox")
+    except OSError:
+        return None
+    if listed.returncode != 0:
+        return None
+    paths = listed.stdout.decode("utf-8", "surrogateescape").split("\0")
+    return tuple(sorted(p[len("sandbox/"):] for p in paths if p))
+
+
+def sandbox_drift(tracked):
+    """How the files git tracks under sandbox/ differ from committed_files(), in words; "" if not."""
+    committed = set(committed_files())
+    problems = []
+    extra = sorted(set(tracked) - committed)
+    missing = sorted(committed - set(tracked))
+    if extra:
+        problems.append("committed under sandbox/ but not in demo_sandbox.committed_files(), so no test "
+                        "reads it: " + ", ".join(extra))
+    if missing:
+        problems.append("in demo_sandbox.committed_files() but not committed: " + ", ".join(missing))
+    return "\n".join(problems)
+
+
+def main():
+    tracked = git_sandbox_files()
+    if tracked is None:
+        print("sandbox check: git cannot list sandbox/ in %s (no git, or not the top of a git checkout)"
+              % REPO, file=sys.stderr)
+        return 2
+    problem = sandbox_drift(tracked)
+    if problem:
+        print("sandbox check: " + problem.replace("\n", "\nsandbox check: "), file=sys.stderr)
+        print("Remove the file from git, or have tests/tools/build_demo_fixtures.py write it (or list it in "
+              "HAND_WRITTEN in tests/unit/demo_sandbox.py) and test it.", file=sys.stderr)
+        return 1
+    print("sandbox check: git tracks the %d files of the committed sandbox under sandbox/, and no others"
+          % len(tracked))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

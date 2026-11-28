@@ -3,7 +3,7 @@
 A judge who follows sandbox/README.md drops their own .eml into sandbox/inbox and adds a line for it to
 inbox/facts.json; a demo leaves her sends, her booking and a staged event behind. The demo-day tests
 must still run on the committed fixtures only: the demo's fifteen emails and their facts, the owner's
-calendar, an empty outbox.
+calendar, an empty outbox. And the committed fixtures are exactly what git tracks under sandbox/.
 
 All of that is planted in a temporary copy of the sandbox, never in the repository's own.
 """
@@ -11,6 +11,7 @@ All of that is planted in a temporary copy of the sandbox, never in the reposito
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -71,6 +72,44 @@ class ACopyOfASandboxAJudgeHasUsed(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(os.path.join(self.copy, "calendar"))),
                          demo_sandbox.owner_ics_files(os.path.join(demo_sandbox.SANDBOX, "calendar")))
         self.assertEqual(os.listdir(os.path.join(self.copy, "outbox")), [".gitkeep"])
+
+
+def git(*args):
+    return subprocess.run(["git"] + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+
+class GitTracksTheCommittedSandboxAndNothingElse(unittest.TestCase):
+    """Every test copies only the files demo_sandbox says are committed, so a file committed under
+    sandbox/ beside them (a stray .eml, a judge's mail added by mistake) would reach every clone with
+    no test reading it. Here git and demo_sandbox must agree. Outside a git checkout (a `git archive`
+    copy) the check stands aside; CI runs it where it cannot: `python -m tests.unit.demo_sandbox`."""
+
+    def test_git_ls_files_sandbox_is_the_committed_set(self):
+        tracked = demo_sandbox.git_sandbox_files()
+        if tracked is None:
+            self.skipTest("git cannot list sandbox/ here: no git, or not the top of a git checkout")
+        problem = demo_sandbox.sandbox_drift(tracked)
+        if problem:
+            self.fail(problem)
+
+    def test_a_stray_file_is_named_and_a_copy_in_another_checkout_stands_aside(self):
+        if shutil.which("git") is None:
+            self.skipTest("no git")
+        tmp = tempfile.mkdtemp(prefix="doris-git-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        git("init", "-q", tmp)
+        demo_sandbox.copy_committed(os.path.join(tmp, "sandbox"))
+        write(os.path.join(tmp, "sandbox", "inbox", JUDGE_NAME), JUDGE_EML)
+        git("-C", tmp, "add", "sandbox")
+        self.assertEqual(demo_sandbox.sandbox_drift(demo_sandbox.git_sandbox_files(tmp)),
+                         "committed under sandbox/ but not in demo_sandbox.committed_files(), so no test "
+                         "reads it: inbox/" + JUDGE_NAME)
+        git("-C", tmp, "rm", "-q", "--cached", os.path.join("sandbox", "clock.txt"))
+        self.assertIn("in demo_sandbox.committed_files() but not committed: clock.txt",
+                      demo_sandbox.sandbox_drift(demo_sandbox.git_sandbox_files(tmp)))
+        # An archive copy unpacked inside some other checkout: git answers for that checkout, not this.
+        copy = demo_sandbox.copy_committed(os.path.join(tmp, "unpacked", "sandbox"))
+        self.assertIsNone(demo_sandbox.git_sandbox_files(os.path.dirname(copy)))
 
 
 if __name__ == "__main__":

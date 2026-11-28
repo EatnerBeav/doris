@@ -32,6 +32,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # test_demo_sandbox's git check, which skips where git cannot answer; here it cannot skip.
+      - name: Git tracks only the committed sandbox
+        run: python -m tests.unit.demo_sandbox
       # A judge's order on one leg: the demo and the Trap Pack first, their output left in the
       # checkout, then the suite. The condition keeps every leg's name and the other legs as they were.
       - name: Demo and Trap Pack before the suite
