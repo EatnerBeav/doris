@@ -22,15 +22,18 @@ and one inline style, each allowed by a fresh nonce per response.
 
 import argparse
 import datetime as _dt
+import hashlib
 import hmac
 import html
 import json
+import math
 import os
 import re
 import secrets
 import string
 import sys
 import threading
+import time
 import unicodedata
 from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -48,8 +51,9 @@ WATCHED_MODES = ("sandbox", "live")
 LABELS = ("Current step", "Tool calls", "Decisions", "Cost so far")    # the brief's four, in its words
 MAX_BODY = 1024                     # the Stop form is one token
 CLIP = 120                          # email text is cut to this many characters on the page
+MAX_ROWS = 1000                     # the page holds the newest lines; the receipt file holds every one
 
-Run = namedtuple("Run", "name folder mode")
+Run = namedtuple("Run", "name folder mode started has_receipts")
 
 
 # ------------------------------------------------------------------------------------------
@@ -66,8 +70,11 @@ def _started(folder):
 
 
 def newest_run():
-    """The run started last under state/<mode>/runs, for the sandbox and live, or None."""
-    best = None
+    """The run started last under state/<mode>/runs, for the sandbox and live, or None. A run with receipts
+    comes first: a run refused at the start (a halt in force, or another run holding the ledger) leaves a
+    folder with its config.json and no receipts, and must not hide the run that is going. A folder with no
+    receipts is watched only when no run has any (one starting, before its first line)."""
+    best = {True: None, False: None}
     for mode in WATCHED_MODES:
         runs = paths.runs_dir(mode)
         try:
@@ -77,9 +84,13 @@ def newest_run():
         for name in names:
             folder = os.path.join(runs, name)
             started = _started(folder)
-            if started is not None and (best is None or (started, name) > best[0]):
-                best = ((started, name), Run(name, folder, mode))
-    return best[1] if best is not None else None
+            if started is None:
+                continue
+            has = os.path.exists(os.path.join(folder, "receipts.jsonl"))
+            if best[has] is None or (started, name) > best[has][0]:
+                best[has] = ((started, name), Run(name, folder, mode, started, has))
+    pick = best[True] or best[False]
+    return pick[1] if pick is not None else None
 
 
 # ------------------------------------------------------------------------------------------
@@ -112,6 +123,21 @@ def _text(value, limit=CLIP):
 
 def _int(value):
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _str(value):
+    return value if isinstance(value, str) else None
+
+
+def _usd(value):
+    """A cost in dollars as a float, or None when it is not a plain finite number of at least zero."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        value = float(value)
+    except OverflowError:
+        return None
+    return value if math.isfinite(value) and value >= 0 else None
 
 
 def _payload(line):
@@ -162,9 +188,9 @@ def _dropped_words(dropped):
 
 
 def _tally(p):
-    return ("%d handled, %d held, %s, %d sent to prospects, %s, %s, %s"
+    return ("%d handled, %d held, %s, %s, %d sent to prospects, %s, %s, %s"
             % (_int(p.get("handled")), _int(p.get("held")), _s(_int(p.get("human_approvals")), "human approval"),
-               _int(p.get("sends")), _s(_int(p.get("hold_notices")), "hold notice"),
+               _s(_int(p.get("errors")), "error"), _int(p.get("sends")), _s(_int(p.get("hold_notices")), "hold notice"),
                _s(_int(p.get("bookings")), "booking"), _s(_int(p.get("model_calls")), "model call")))
 
 
@@ -217,16 +243,22 @@ def _what(kind, p):
         text = "Answer to line %s: %s" % (_token(p.get("call_seq"), "none"), "ok" if ok else "failed")
         if not ok and p.get("error"):
             text += " (%s)" % _token(p.get("error"))
-        cost = p.get("cost_usd")
-        if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0:
+        cost = _usd(p.get("cost_usd"))
+        if cost:
             text += ", $%.4f" % cost
+        elif "cost_usd" in p and cost is None:
+            text += ", a cost that can't be read"
         return text + "."
     if kind == "halted":
         text = "Cause %s; %s; %s." % (_token(p.get("cause")), _flight_words(p.get("in_flight")),
                                       _dropped_words(p.get("dropped")))
-        if isinstance(p.get("stop_to_dead_ms"), int):
-            text += " Worker dead %d ms after the stop." % p["stop_to_dead_ms"]
+        dead = p.get("stop_to_dead_ms")
+        if isinstance(dead, int) and not isinstance(dead, bool) and 0 <= dead < 10 ** 9:
+            text += " Worker dead %d ms after the stop." % dead
         return text
+    if kind == "error" and "moved_to" in p:     # the writer's own line: a cut-off line moved aside, on reopening
+        return "A cut-off line (%d bytes after line %s) was moved aside to %s." % (
+            _int(p.get("torn_bytes")), _token(p.get("after_seq")), _token(p.get("moved_to")))
     if kind == "error":
         error = p.get("error")
         name = error.split(":", 1)[0] if isinstance(error, str) else None
@@ -280,28 +312,33 @@ SOURCE_WORDS = {
 
 
 def _chain(path):
-    """(lines, chain verified or only still being written, the chain in words), read now."""
+    """(the lines that verified, the chain ok or only still being written, the chain in words, the line it
+    breaks at or None), from one read of the file and the verify command's own check. Only lines that
+    verify are shown or counted: nothing past a break can be trusted."""
     try:
-        lines = receipts.read_lines(path)
-    except (OSError, ValueError):
-        lines = []
-    result = receipts.verify(path)
-    if result.ok:
-        notes = result.reason[len("ok; "):] if result.reason.startswith("ok; ") else ""
-        return lines, True, "Chain verified: %d lines, each hash matching the line before it%s." % (
-            result.lines, " (%s)" % notes if notes else "")
-    if result.reason.startswith("torn tail") and result.first_bad_seq == result.lines + 1:
-        return lines, True, ("Chain verified through line %d; the line after it is still being written, "
-                             "or was cut short." % result.lines)
-    if result.first_bad_seq is None:
-        return lines, False, "Chain not checked: %s." % result.reason
-    return lines, False, ("Chain BROKEN at line %d: %s. Check it with python -m doris verify %s"
-                          % (result.first_bad_seq, result.reason, path))
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as exc:
+        return [], False, "The receipt file can't be read (%s)." % exc.__class__.__name__, None
+    whole, torn = receipts._split(data)          # noqa: SLF001 - verify's own steps, on this one read
+    result, good = receipts._check(whole)        # noqa: SLF001
+    if not result.ok:
+        reason = result.reason.split(": ", 1)[-1]
+        return good, False, ("Chain BROKEN at line %d: %s. Check it with python -m doris verify %s"
+                             % (result.first_bad_seq, reason, path)), result.first_bad_seq
+    if torn:
+        return good, True, ("Chain verified through line %d; the line after it is still being written, "
+                            "or was cut short." % len(good)), None
+    moved = ["a cut-off line moved aside at line %d" % l["seq"] for l in good
+             if l["kind"] == "error" and l["subject"] == "torn-tail"]
+    return good, True, "Chain verified: %d lines, each hash matching the line before it%s." % (
+        len(good), " (%s)" % "; ".join(moved) if moved else ""), None
 
 
 def _unanswered(lines):
     """The newest called line with no result naming it, or None."""
-    answered = {_payload(l).get("call_seq") for l in lines if l.get("kind") == "result"}
+    answered = {cs for cs in (_payload(l).get("call_seq") for l in lines if l.get("kind") == "result")
+                if isinstance(cs, int) and not isinstance(cs, bool)}
     for line in reversed(lines):
         if line.get("kind") == "called" and line.get("seq") not in answered:
             return line
@@ -313,35 +350,75 @@ def _call_words(line):
     return "%s %s" % (_token(p.get("call")), _token(p.get("target")))
 
 
-def _cost(source, lines):
-    total = sum(_payload(l)["cost_usd"] for l in lines if l.get("kind") == "result"
-                and isinstance(_payload(l).get("cost_usd"), (int, float))
-                and not isinstance(_payload(l).get("cost_usd"), bool))
+def _cost(source, lines, model_calls):
+    """The Cost so far pane: (value, note), worded as the terminal words a run's cost."""
+    total, unread = 0.0, []
+    for line in lines:
+        p = _payload(line)
+        if line.get("kind") != "result" or "cost_usd" not in p:
+            continue
+        cost = _usd(p["cost_usd"])
+        if cost is None:
+            unread.append(str(_int(line.get("seq"))))
+        else:
+            total += cost
+    note = _s(model_calls, "model call") + "."
+    if unread:
+        note += (" The cost on line %s can't be read." % unread[0] if len(unread) == 1 else
+                 " The costs on lines %s can't be read." % ", ".join(unread))
     if source == "stub":
-        return "none (stub)"                       # as the terminal says it
-    return "$%.4f%s" % (total, " (recorded)" if source == "replayed" else "")
+        return "none (stub)", note                 # as the terminal says it
+    if unread:
+        return "unknown", note
+    return "$%.4f%s" % (total, " (recorded)" if source == "replayed" else ""), note
+
+
+_WHY_KINDS_WORDS = (("plan", "plan"), ("close", "close"), ("decision", "decision"), ("checked", "gate check"),
+                    ("held", "hold"), ("halted", "halt"))
+
+
+def _decision_note(decisions):
+    """What the Decisions pane counts (every line with a why), and the latest why."""
+    if not decisions:
+        return "None yet. Each one shows its why below."
+    counts = dict.fromkeys(k for k, _ in _WHY_KINDS_WORDS)
+    for line in decisions:
+        kind, p = line.get("kind"), _payload(line)
+        key = kind if kind != "decided" else ("plan" if p.get("step") == "plan" else
+                                              "close" if "outcome" in p else "decision")
+        counts[key] = (counts[key] or 0) + 1
+    parts = [_s(counts[k], word) for k, word in _WHY_KINDS_WORDS if counts[k]]
+    return "Lines with a why: %s. Latest: %s" % (", ".join(parts), _text(_why(decisions[-1]).get("text"), 400))
+
+
+def _clock(ns):
+    return _dt.datetime.fromtimestamp(ns / 1e9, _dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def snapshot(run):
     """Everything the page shows for this run (None: no run yet), as plain strings: the title, the run's
-    words, the four panes, and one row per receipt line, oldest first."""
+    words, the four panes, and one row per receipt line that verified, oldest first."""
     if run is None:
         return {"run": "", "title": "Doris watch: no run yet", "run_line": "No run yet.", "source": "",
                 "status": "", "chain": "", "chain_ok": True, "state": "none",
                 "panes": [{"label": label, "value": "\u2014", "note": ""} for label in LABELS],
-                "rows": [], "after": 0,
+                "rows": [], "after": 0, "more": "",
                 "empty": "No run yet. Start one with python -m doris demo, or python -m doris run; this page "
                          "picks it up as soon as it starts."}
     path = os.path.join(run.folder, "receipts.jsonl")
+    landed = None
     if os.path.exists(path):
-        raw, chain_ok, chain = _chain(path)
+        lines, chain_ok, chain, broken_at = _chain(path)
+        try:
+            landed = os.stat(path).st_mtime_ns
+        except OSError:
+            landed = None
     else:
-        raw, chain_ok, chain = [], True, "No receipt line yet."
-    lines = [l for l in raw if isinstance(l, dict)]
+        lines, chain_ok, chain, broken_at = [], True, "No receipt line yet.", None
     start = next((l for l in lines if l.get("kind") == "observed" and _payload(l).get("step") == "start"), None)
     named = _RUN_NAME.match(run.name)
-    source = _payload(start).get("model_source") if start else (named.group(1) if named else None)
-    mode = _payload(start).get("mode") if start else run.mode
+    source = _str(_payload(start).get("model_source")) if start else (named.group(1) if named else None)
+    mode = (_str(_payload(start).get("mode")) if start else None) or run.mode
     rows = [row(l) for l in lines]
 
     tally = count_outcomes([dict(l, payload=_payload(l)) for l in lines])
@@ -356,45 +433,77 @@ def snapshot(run):
     failed = sum(1 for l in lines if l.get("kind") == "result" and _payload(l).get("ok") is not True)
     decisions = [l for l in lines if l.get("kind") in receipts.WHY_KINDS]
     model_calls = sum(1 for l in calls if _payload(l).get("call") == "model")
+    since = " Last line landed at %s." % _clock(landed) if landed is not None else ""
 
     if last is None:
-        state, status, current = "starting", "Starting: no receipt line yet.", ("Starting.", "")
-    elif halted is not None:            # a halted line closes the run (her own is followed by her summary)
-        state, status = "halted", "Halted: %s before the stop." % counts
-        current = (_text(_why(halted).get("text"), 400) or "Halted.", _halt_note(halted))
-    elif last_kind == "summary":
-        state, status = "finished", "Finished: %s." % counts
-        current = (status, "Line %d." % rows[-1]["seq"])
-    elif flight is not None:
-        state, status = "waiting", "In progress, no closing line yet: %s so far." % counts
-        current = ("Tool call: %s, waiting." % _call_words(flight), "Line %d, since %s."
-                   % (_int(flight.get("seq")), _time(flight.get("ts"))))
+        current = ("Starting.", "")
+    elif flight is not None and last_kind not in receipts.CLOSING_KINDS:
+        current = ("Tool call: %s, no answer yet." % _call_words(flight),
+                   "Line %d. No result line answers it yet." % _int(flight.get("seq")))
     else:
-        state, status = "running", "In progress, no closing line yet: %s so far." % counts
         r = rows[-1]
         current = (r["what"], "Line %d, %s.%s" % (r["seq"], r["step"], " Why: " + r["why"] if r["why"] else ""))
 
+    if not chain_ok and broken_at is None:
+        state, status = "unreadable", chain
+    elif not chain_ok:
+        state = "broken"
+        if not lines:
+            status = "Chain broken at line %d: no line can be trusted, so none is shown." % broken_at
+            current = ("Nothing to show: no line can be trusted.", "")
+        else:
+            status = "Chain broken at line %d: only the %s before it %s shown and counted." % (
+                broken_at, "line" if len(lines) == 1 else "%d lines" % len(lines), "is" if len(lines) == 1 else "are")
+    elif last is None:
+        state, status = "starting", "Starting: no receipt line yet."
+    elif halted is not None:            # a halted line closes the run (her own is followed by her summary)
+        state, status = "halted", "Halted: %s before the stop." % counts
+        current = (_text(_why(halted).get("text"), 400) or "Halted.", _halt_note(halted))
+    elif last_kind == "summary" and _payload(last).get("read_failed") is True:
+        state = "ended"
+        status = "Ended: the inbox could not be read, so the run ended there (%s before it)." % counts
+        current = ("Ended: the inbox could not be read.", "Line %d." % rows[-1]["seq"])
+    elif last_kind == "summary":
+        state, status = "finished", "Finished: %s." % counts
+        current = (status, "Line %d." % rows[-1]["seq"])
+    else:
+        state = "waiting" if flight is not None else "running"
+        status = "No closing line yet: %s so far.%s" % (counts, since)
+
     closed = last_kind in receipts.CLOSING_KINDS
     if flight is not None and not closed:
-        call_note = "1 waiting: %s (line %d)." % (_call_words(flight), _int(flight.get("seq")))
+        call_note = "1 with no answer yet: %s (line %d)." % (_call_words(flight), _int(flight.get("seq")))
     elif flight is not None:
         call_note = "Cut off by the stop: %s (line %d)." % (_call_words(flight), _int(flight.get("seq")))
     elif calls:
         call_note = "All answered%s." % ("; %d came back failed" % failed if failed else "")
     else:
         call_note = "None yet."
-    decision_note = ("Latest why: %s" % _text(_why(decisions[-1]).get("text"), 400) if decisions
-                     else "None yet. Each one shows its why below.")
+    cost = _cost(source, lines, model_calls)
     panes = [
         {"label": LABELS[0], "value": current[0], "note": current[1]},
         {"label": LABELS[1], "value": str(len(calls)), "note": call_note},
-        {"label": LABELS[2], "value": str(len(decisions)), "note": decision_note},
-        {"label": LABELS[3], "value": _cost(source, lines), "note": _s(model_calls, "model call") + "."},
+        {"label": LABELS[2], "value": str(len(decisions)), "note": _decision_note(decisions)},
+        {"label": LABELS[3], "value": cost[0], "note": cost[1]},
     ]
+    more = ("Showing the newest %d of %d lines. The receipt file holds every one." % (MAX_ROWS, len(rows))
+            if len(rows) > MAX_ROWS else "")
     return {"run": run.name, "title": "Doris watch: " + run.name, "run_line": "Run %s" % run.name,
             "source": " ".join(w for w in (MODE_WORDS.get(mode, ""), SOURCE_WORDS.get(source, "")) if w),
             "status": status, "chain": chain, "chain_ok": chain_ok, "state": state, "panes": panes,
-            "rows": rows, "after": max([r["seq"] for r in rows] or [0]), "empty": ""}
+            "rows": rows, "after": max([r["seq"] for r in rows] or [0]), "more": more, "empty": ""}
+
+
+def unreadable(run, exc):
+    """The page when a run's receipts can't be shown at all: still the page, so still its Stop button."""
+    path = os.path.join(run.folder, "receipts.jsonl") if run is not None else ""
+    return {"run": run.name if run is not None else "", "title": "Doris watch: receipts not shown",
+            "run_line": "Run %s" % run.name if run is not None else "", "source": "",
+            "status": "The receipts could not be shown (%s). The Stop button still works. Check them with "
+                      "python -m doris verify %s" % (exc.__class__.__name__, path),
+            "chain": "", "chain_ok": False, "state": "unreadable",
+            "panes": [{"label": label, "value": "?", "note": ""} for label in LABELS],
+            "rows": [], "after": 0, "more": "", "empty": ""}
 
 
 def _halt_note(line):
@@ -405,13 +514,18 @@ def _halt_note(line):
 # ------------------------------------------------------------------------------------------
 # Stop: what `python -m doris stop` does
 # ------------------------------------------------------------------------------------------
-def stop_now():
+def stop_modes():
+    """The modes `python -m doris stop` halts, from that command itself."""
+    from . import __main__ as cli          # here, not at the top: the command line imports this module
+    return tuple(cli.STOP_MODES)
+
+
+def stop_now(modes):
     """What `python -m doris stop` does, from the page: supervisor.request_stop for each of that command's
     modes, in its order, with the cause watch_button. Every mode is tried even when one fails.
     Returns ([(mode, cause in force)], [(mode, error class name)])."""
-    from . import __main__ as cli          # here, not at the top: the command line imports this module
     done, failed = [], []
-    for mode in cli.STOP_MODES:
+    for mode in modes:
         try:
             done.append((mode, supervisor.request_stop(mode, CAUSE)))
         except Exception as exc:           # noqa: BLE001 - the other mode is still stopped, and this is said
@@ -424,7 +538,7 @@ _WHERE = {"sandbox": "the sandbox", "live": "live"}
 
 def pressed_words(done, failed, now):
     """The page's one line about a press of its Stop button."""
-    words = ["Stop pressed at %s UTC." % now.strftime("%H:%M:%S")]
+    words = ["Stop pressed %s UTC." % now.strftime("%Y-%m-%d %H:%M:%S")]
     if done:
         if all(cause == CAUSE for _, cause in done):
             words.append("Halted in %s." % " and ".join(_WHERE.get(m, m) for m, _ in done))
@@ -456,8 +570,8 @@ def stop_refusal(host, origin, fetch_site, content_type, body, token):
     """Why a POST to /stop is not the page's own Stop, or None when it is."""
     if not host_ok(host):
         return 403, "it names another host"
-    if origin is not None and origin.lower() != "http://" + host.lower():
-        return 403, "it came from another site"
+    if origin is not None and origin.lower() not in ("http://" + host.lower(), "https://" + host.lower()):
+        return 403, "it came from another site"     # https: the page behind a TLS proxy on this computer
     if fetch_site is not None and fetch_site.lower() != "same-origin":
         return 403, "the browser says it came from another site"
     if (content_type or "").split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
@@ -467,7 +581,8 @@ def stop_refusal(host, origin, fetch_site, content_type, body, token):
     except (UnicodeDecodeError, ValueError):
         sent = []
     if len(sent) != 1 or not hmac.compare_digest(sent[0].encode("ascii", "replace"), token.encode("ascii")):
-        return 403, "it does not carry this page's token"
+        return 403, ("it does not carry this page's token (a page left open from an earlier start of watch "
+                     "carries an old one: reload the page, then press Stop)")
     return None
 
 
@@ -538,7 +653,8 @@ body[data-chain="broken"] #chain { color: var(--ink); background: var(--alarm-bg
 .stop button:active { filter: brightness(.85); }
 .stop p { margin: 0; font-size: .9rem; }
 #pressed { grid-column: 1 / -1; font-weight: 600; max-width: calc(104px + 16px + 22rem); }
-#pressed:empty, #lost:empty, #empty:empty { display: none; }
+#pressed:empty, #lost:empty, #empty:empty, #more:empty { display: none; }
+#checked { font-size: .85rem; color: var(--muted); }
 main { padding: 0 28px 40px; }
 #lost { margin: 16px 0 0; padding: 8px 12px; background: var(--alarm-bg); font-weight: 700; }
 .panes {
@@ -548,7 +664,10 @@ main { padding: 0 28px 40px; }
 .pane { padding: 14px 18px 16px; border-left: 1px solid var(--rule); background: var(--pane); }
 .pane:first-child { border-left: 4px solid var(--rule); }
 body[data-state="waiting"] .pane:first-child { border-left-color: var(--amber-bar); }
-body[data-state="halted"] .pane:first-child { border-left-color: var(--signal); }
+body[data-state="halted"] .pane:first-child, body[data-state="ended"] .pane:first-child,
+body[data-state="broken"] .pane:first-child, body[data-state="unreadable"] .pane:first-child { border-left-color: var(--signal); }
+body[data-state="ended"] #status, body[data-state="broken"] #status, body[data-state="unreadable"] #status {
+  background: var(--alarm-bg); padding: 4px 8px; }
 body[data-state="finished"] .pane:first-child { border-left-color: var(--ok); }
 .pane h2 { margin: 0 0 6px; font-size: .95rem; font-weight: 600; color: var(--muted); }
 .pane .value { margin: 0; font-size: 1.9rem; line-height: 1.15; font-weight: 600; overflow-wrap: anywhere; }
@@ -585,7 +704,7 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
 }
 </style>
 </head>
-<body data-chain="$chain_state" data-state="$state">
+<body data-chain="$chain_state" data-state="$state" data-boot="$boot">
 <header>
   <div>
     <h1>Doris watch</h1>
@@ -593,6 +712,7 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
     <p id="source">$source</p>
     <p id="status">$status</p>
     <p id="chain">$chain</p>
+    <p id="checked">$checked</p>
   </div>
   <form class="stop" method="post" action="/stop">
     <input type="hidden" name="token" value="$token">
@@ -615,6 +735,7 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
   <p class="lede">One row per receipt line, as it lands. A decision's why is written by code from a fixed list,
     never by the model or an email.</p>
   <p id="empty">$empty</p>
+  <p id="more">$more</p>
   <div class="scroll"><table>
     <thead><tr><th scope="col">Line</th><th scope="col">Time (UTC)</th><th scope="col">Step</th>
       <th scope="col">Message</th><th scope="col">What happened</th><th scope="col">Why</th></tr></thead>
@@ -626,6 +747,8 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
 (function () {
   "use strict";
   var POLL_MS = $poll;
+  var MAX_ROWS = $max_rows;
+  var boot = document.body.getAttribute("data-boot");
   var steps = document.getElementById("steps");
   var run = steps.getAttribute("data-run") || "";
   var after = parseInt(steps.getAttribute("data-after"), 10) || 0;
@@ -661,12 +784,15 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
   }
   function show(s) {
     var i;
+    // watch was started again: this page's Stop token is void, so load the page afresh (and its new token)
+    if (s.boot !== boot) { window.location.reload(); return; }
     if (s.reset) {
       while (steps.firstChild) { steps.removeChild(steps.firstChild); }
     }
     for (i = 0; i < s.rows.length; i += 1) {
       steps.insertBefore(row(s.rows[i]), steps.firstChild);
     }
+    while (steps.childNodes.length > MAX_ROWS) { steps.removeChild(steps.lastChild); }
     run = s.run;
     after = s.after;
     if (document.title !== s.title) { document.title = s.title; }
@@ -675,7 +801,9 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
     put("status", s.status);
     put("chain", s.chain);
     put("pressed", s.pressed);
+    put("checked", s.checked);
     put("empty", s.empty);
+    put("more", s.more);
     for (i = 0; i < s.panes.length; i += 1) {
       put("pane-" + i + "-value", s.panes[i].value);
       put("pane-" + i + "-note", s.panes[i].note);
@@ -706,14 +834,26 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
 """)
 
 
-def render_page(snap, token, nonce, pressed=""):
-    """The whole page for one snapshot: every value escaped, the rows newest first."""
+def boot_id(token):
+    """Names one start of watch, so a page left open across a restart knows to reload. Not the token, and
+    the token can't be worked out from it."""
+    return hashlib.sha256(b"doris-watch-boot:" + token.encode("ascii")).hexdigest()[:16]
+
+
+def checked_words(now):
+    return "Page updated %s UTC." % now.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def render_page(snap, token, nonce, pressed="", now=None):
+    """The whole page for one snapshot: every value escaped, the newest rows first."""
+    now = now or _dt.datetime.now(_dt.timezone.utc)
     fields = {"title": _e(snap["title"]), "nonce": _e(nonce), "token": _e(token), "run": _e(snap["run"]),
               "run_line": _e(snap["run_line"]), "source": _e(snap["source"]), "status": _e(snap["status"]),
               "chain": _e(snap["chain"]), "chain_state": "ok" if snap["chain_ok"] else "broken",
               "state": _e(snap["state"]), "pressed": _e(pressed), "empty": _e(snap["empty"]),
-              "after": int(snap["after"]), "poll": int(POLL_MS),
-              "rows": "".join(_row_html(r) for r in reversed(snap["rows"]))}
+              "after": int(snap["after"]), "poll": int(POLL_MS), "max_rows": int(MAX_ROWS),
+              "boot": _e(boot_id(token)), "checked": _e(checked_words(now)), "more": _e(snap["more"]),
+              "rows": "".join(_row_html(r) for r in reversed(snap["rows"][-MAX_ROWS:]))}
     for i, pane in enumerate(snap["panes"]):
         fields.update({"label%d" % i: _e(pane["label"]), "value%d" % i: _e(pane["value"]),
                        "note%d" % i: _e(pane["note"])})
@@ -737,19 +877,24 @@ class WatchServer(ThreadingHTTPServer):
     allow_reuse_address = os.name != "nt"      # Windows would let a second server share the port
 
     def __init__(self, port, say=None):
+        self.stop_modes = stop_modes()        # at start: a failure to find them shows now, not on a press
         super().__init__((HOST, port), _Handler)
         self.token = secrets.token_urlsafe(32)
+        self.boot = boot_id(self.token)
         self.say = say or _say
-        self.pressed = ""
+        self.pressed, self.pressed_ns = "", 0
         self._lock = threading.Lock()
         self._cache = None
+        self._unread = ""
 
     @property
     def url(self):
         return "http://%s:%d/" % (HOST, self.server_address[1])
 
-    def snapshot(self):
-        """The newest run's snapshot, read again only when its receipt file has changed."""
+    def view(self):
+        """(the newest run's snapshot, the line about a press of Stop). The snapshot is read again only when
+        the receipt file has changed. The press line stays until a run with receipts starts after the press:
+        that run got past the halt, so `resume` had cleared it."""
         run = newest_run()
         key = None
         if run is not None:
@@ -759,18 +904,32 @@ class WatchServer(ThreadingHTTPServer):
             except OSError:
                 key = None
         with self._lock:
-            if key is not None and self._cache is not None and self._cache[0] == key:
-                return self._cache[1]
-        snap = snapshot(run)
-        with self._lock:
-            self._cache = (key, snap) if key is not None else None
-        return snap
+            cached = self._cache[1] if key is not None and self._cache is not None and self._cache[0] == key else None
+            pressed, pressed_ns = self.pressed, self.pressed_ns
+        snap = cached
+        if snap is None:
+            try:
+                snap = snapshot(run)
+            except Exception as exc:        # noqa: BLE001 - an odd line must never take the Stop button away
+                snap = unreadable(run, exc)
+                if snap["status"] != self._unread:
+                    self._unread = snap["status"]
+                    self.say(snap["status"])
+                key = None
+            with self._lock:
+                self._cache = (key, snap) if key is not None else None
+        if pressed and run is not None and run.has_receipts and run.started > pressed_ns:
+            pressed = ""
+        return snap, pressed
 
     def press(self):
-        done, failed = stop_now()
-        self.pressed = pressed_words(done, failed, _dt.datetime.now(_dt.timezone.utc))
-        self.say(self.pressed)
-        return not failed
+        done, failed = stop_now(self.stop_modes)
+        now = time.time_ns()
+        words = pressed_words(done, failed, _dt.datetime.fromtimestamp(now / 1e9, _dt.timezone.utc))
+        with self._lock:
+            self.pressed, self.pressed_ns = words, now
+        self.say(words)
+        return not failed, words
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -799,8 +958,7 @@ class _Handler(BaseHTTPRequestHandler):
         for key, value in extra:
             self.send_header(key, value)
         self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
+        self.wfile.write(body)
 
     def _text(self, status, text, extra=()):
         self._reply(status, "text/plain; charset=utf-8", (text + "\n").encode("utf-8"), extra=extra)
@@ -812,7 +970,8 @@ class _Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         if url.path == "/":
             nonce = secrets.token_urlsafe(16)
-            page = render_page(self.server.snapshot(), self.server.token, nonce, self.server.pressed)
+            snap, pressed = self.server.view()
+            page = render_page(snap, self.server.token, nonce, pressed)
             return self._reply(200, "text/html; charset=utf-8", page.encode("utf-8"), nonce=nonce)
         if url.path == "/state":
             return self._state(parse_qs(url.query))
@@ -822,13 +981,14 @@ class _Handler(BaseHTTPRequestHandler):
         return self._text(404, "Not here. This page shows her receipts and has one action: Stop.")
 
     def _state(self, query):
-        snap = self.server.snapshot()
+        snap, pressed = self.server.view()
         run = query.get("run", [""])[0]
         after = query.get("after", ["0"])[0]
-        after = int(after) if after.isdigit() and len(after) < 10 else 0
-        reset = run != snap["run"] or after > snap["after"]
-        out = dict(snap, reset=reset, pressed=self.server.pressed,
-                   rows=snap["rows"] if reset else [r for r in snap["rows"] if r["seq"] > after])
+        after = int(after) if re.fullmatch(r"[0-9]{1,9}", after) else 0
+        reset = run != snap["run"] or after > snap["after"] or after == 0
+        out = dict(snap, reset=reset, pressed=pressed, boot=self.server.boot,
+                   checked=checked_words(_dt.datetime.now(_dt.timezone.utc)),
+                   rows=snap["rows"][-MAX_ROWS:] if reset else [r for r in snap["rows"] if r["seq"] > after])
         body = json.dumps(out, ensure_ascii=True, separators=(",", ":")).encode("ascii")
         return self._reply(200, "application/json", body)
 
@@ -848,10 +1008,11 @@ class _Handler(BaseHTTPRequestHandler):
                                self.server.token)
         if refusal is not None:
             return self._refuse(*refusal)
-        if self.server.press():
-            return self._reply(303, "text/plain; charset=utf-8", (self.server.pressed + "\n").encode("utf-8"),
+        ok, words = self.server.press()
+        if ok:
+            return self._reply(303, "text/plain; charset=utf-8", (words + "\n").encode("utf-8"),
                                extra=(("Location", "/"),))
-        return self._text(500, self.server.pressed)
+        return self._text(500, words)
 
     def _refuse(self, status, why):
         text = "Refused a Stop request: %s. Nothing was stopped." % why

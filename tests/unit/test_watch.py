@@ -9,6 +9,7 @@ for a POST from the page itself. Covers `watch-shows-why` and `watch-escapes-hos
 import ast
 import contextlib
 import datetime as _dt
+import hashlib
 import html
 import http.client
 import io
@@ -110,6 +111,25 @@ def halted_payload(seq):
         "in_flight": {"seq": seq, "call": "calendar_create", "target": "doris-b2", "unconfirmed": True},
         "ledger": "ok", "requested_utc": "2026-12-01T16:10:00Z", "stop_to_dead_ms": 112, "torn_tail": None,
         "worker_exit": -9}
+
+
+def forge(path, kind, payload, subject="", why_=None):
+    """Append one line chained the way the writer chains, with a payload the writer itself would refuse:
+    anyone can recompute the hashes, so verify passes it and the page must still show itself."""
+    lines = receipts.read_lines(path)
+    last = lines[-1]
+    line = {"ts": last["ts"], "run_id": last["run_id"], "mode": last["mode"], "seq": last["seq"] + 1,
+            "kind": kind, "subject": subject, "payload": payload, "prev": last["hash"]}
+    if why_ is not None:
+        line["why"] = why_
+    line["hash"] = hashlib.sha256(last["hash"].encode("ascii") + receipts.canonical(line)).hexdigest()
+    with open(path, "ab") as fh:
+        fh.write(receipts.canonical(line) + b"\n")
+
+
+def boot_of(page):
+    (boot,) = re.findall(r'data-boot="([0-9a-f]+)"', page)
+    return boot
 
 
 class TempState(unittest.TestCase):
@@ -245,12 +265,15 @@ class SandboxDay(unittest.TestCase):
         self.assertEqual([p["label"] for p in panes], ["Current step", "Tool calls", "Decisions", "Cost so far"])
         for label in ("Current step", "Tool calls", "Decisions", "Cost so far"):
             self.assertIn("<h2>%s</h2>" % label, self.page)
-        self.assertEqual(panes[0]["value"], "Finished: 13 handled, 2 held, 0 human approvals.")
+        finished = "Finished: %d handled, %d held, %s." % (
+            summary["handled"], summary["held"],
+            "1 human approval" if summary["human_approvals"] == 1 else "%d human approvals" % summary["human_approvals"])
+        self.assertEqual(panes[0]["value"], finished)
         self.assertEqual(panes[1]["value"], str(sum(1 for l in self.lines if l["kind"] == "called")))
         self.assertEqual(panes[2]["value"], str(sum(1 for l in self.lines if l["kind"] in receipts.WHY_KINDS)))
         self.assertEqual(panes[3]["value"], "none (stub)")                 # as the terminal says it
         self.assertEqual(panes[3]["note"], "%d model calls." % summary["model_calls"])
-        self.assertEqual(self.snap["status"], "Finished: 13 handled, 2 held, 0 human approvals.")
+        self.assertEqual(self.snap["status"], finished)
         self.assertTrue(self.snap["chain_ok"], self.snap["chain"])
         self.assertIn("%d lines" % len(self.lines), self.snap["chain"])
 
@@ -282,16 +305,21 @@ class Panes(TempState):
         self.assertIn("<h2>Current step</h2>", page)
 
     def test_a_waiting_call_is_the_current_step_and_the_cost_sums_the_models_answers(self):
-        write_run(self.state, "model-replayed-sandbox-20261128T010000Z", busy_day())
+        path = write_run(self.state, "model-replayed-sandbox-20261128T010000Z", busy_day())
+        os.utime(path, (1795219200, 1795219200))
         snap = self.look()
         current, calls, decisions, cost = snap["panes"]
         self.assertEqual(snap["state"], "waiting")
-        self.assertEqual(current["value"], "Tool call: calendar_query span, waiting.")
-        self.assertEqual((calls["value"], calls["note"]), ("5", "1 waiting: calendar_query span (line 18)."))
+        # the trace shows a call with no answer, not that she is alive: it says when its last line landed
+        self.assertEqual(current["value"], "Tool call: calendar_query span, no answer yet.")
+        self.assertEqual(current["note"], "Line 18. No result line answers it yet.")
+        self.assertEqual((calls["value"], calls["note"]), ("5", "1 with no answer yet: calendar_query span (line 18)."))
         self.assertEqual((decisions["value"], decisions["note"]),
-                         ("4", "Latest why: Held: money in the sender's own words."))
+                         ("4", "Lines with a why: 1 plan, 1 close, 1 gate check, 1 hold. "
+                               "Latest: Held: money in the sender's own words."))
         self.assertEqual((cost["value"], cost["note"]), ("$0.0042 (recorded)", "2 model calls."))
-        self.assertEqual(snap["status"], "In progress, no closing line yet: 1 handled, 1 held, 0 human approvals so far.")
+        self.assertEqual(snap["status"], "No closing line yet: 1 handled, 1 held, 0 human approvals so far. "
+                                         "Last line landed at 2026-11-21 00:00:00 UTC.")
         self.assertIn("replayed", snap["source"])
 
     def test_a_live_run_costs_what_was_measured(self):
@@ -395,6 +423,104 @@ class Panes(TempState):
         self.assertIn("stub", snap["source"])
 
 
+    def test_a_line_that_is_not_json_shows_the_lines_before_it_never_a_fresh_run(self):
+        path = write_run(self.state, "model-replayed-sandbox-20261128T010000Z", busy_day())
+        with open(path, "rb") as fh:
+            lines = fh.read().split(b"\n")
+        lines[3] = b"{not json"
+        with open(path, "wb") as fh:
+            fh.write(b"\n".join(lines))
+        snap = self.look()
+        self.assertFalse(snap["chain_ok"])
+        self.assertEqual(snap["state"], "broken")
+        self.assertIn("BROKEN at line 4", snap["chain"])
+        self.assertEqual([r["seq"] for r in snap["rows"]], [1, 2, 3])
+        self.assertEqual(snap["status"], "Chain broken at line 4: only the 3 lines before it are shown and counted.")
+        self.assertEqual(snap["panes"][1]["value"], "1")
+        self.assertNotIn("Starting", json.dumps(snap))
+
+    def test_a_first_line_that_cannot_be_trusted_is_never_starting(self):
+        path = write_run(self.state, "model-replayed-sandbox-20261128T010000Z", busy_day())
+        with open(path, "rb") as fh:
+            data = fh.read()
+        with open(path, "wb") as fh:
+            fh.write(data.replace(b'"step":"start"', b'"step":"stort"', 1))
+        snap = self.look()
+        self.assertEqual((snap["state"], snap["rows"]), ("broken", []))
+        self.assertEqual(snap["status"], "Chain broken at line 1: no line can be trusted, so none is shown.")
+
+    def test_odd_values_in_a_rechained_line_never_take_the_page_away(self):
+        name = "model-replayed-sandbox-20261128T010000Z"
+        path = write_run(self.state, name, [
+            start_line(name),
+            ("called", {"call": "model", "target": "claude-test", "source": "replayed"}),
+        ])
+        forge(path, "result", {"call_seq": [2], "ok": True, "cost_usd": 10 ** 400})
+        forge(path, "result", {"call_seq": {}, "ok": [], "cost_usd": [0.5]})
+        forge(path, "called", {"call": [], "target": {}, "attempt": [3], "to": {}})
+        forge(path, "observed", {"step": "start", "mode": [], "model_source": {}})
+        forge(path, "decided", {"outcome": [], "template": {}, "booking_id": []}, why_={"code": [], "text": {}})
+        forge(path, "halted", {"cause": [], "in_flight": {"seq": [], "call": {}}, "dropped": [[], {"kind": []}],
+                               "stop_to_dead_ms": 10 ** 400}, why_={"code": "halt.cli", "text": []})
+        self.assertTrue(receipts.verify(path).ok)
+        snap = self.look()
+        self.assertEqual(len(snap["rows"]), 8)
+        self.assertEqual(snap["panes"][3]["value"], "unknown")
+        self.assertEqual(snap["panes"][3]["note"], "1 model call. The costs on lines 3, 4 can't be read.")
+        page = watch.render_page(snap, token="t", nonce="n")
+        self.assertIn('name="token"', page)
+        json.dumps(snap)
+
+    def test_a_refused_run_does_not_hide_the_run_that_is_going(self):
+        now = time.time()
+        going = "model-stub-sandbox-20261128T010000Z"
+        write_run(self.state, going, [start_line(going, "stub")], started=now - 10)
+        refused = os.path.join(self.state, "sandbox", "runs", "model-stub-sandbox-20261128T010005Z")
+        os.makedirs(refused)
+        with open(os.path.join(refused, "config.json"), "w", encoding="utf-8") as fh:
+            fh.write("{}")              # a second demo refused while this one holds the ledger leaves this
+        self.assertEqual(watch.newest_run().name, going)
+        self.assertEqual(self.look()["state"], "running")
+
+    def test_a_run_that_ended_on_read_failures_is_not_finished(self):
+        name = "model-stub-sandbox-20261128T010000Z"
+        write_run(self.state, name, [
+            start_line(name, "stub"),
+            ("called", {"call": "mail_fetch", "target": "inbox"}),
+            ("result", {"call_seq": 2, "ok": False, "error": "MailError"}),
+            ("error", {"step": "mail_fetch", "error": "MailError: %s" % MAIL_WORDS}),
+            ("summary", {"handled": 0, "held": 0, "human_approvals": 0, "errors": 1, "quarantined": 0, "sends": 0,
+                         "hold_notices": 0, "bookings": 0, "model_calls": 0, "cost_usd": 0.0, "halted": None,
+                         "read_failed": True}),
+        ])
+        snap = self.look()
+        self.assertEqual(snap["state"], "ended")
+        self.assertEqual(snap["status"], "Ended: the inbox could not be read, so the run ended there "
+                                         "(0 handled, 0 held, 0 human approvals before it).")
+        self.assertEqual(snap["panes"][0]["value"], "Ended: the inbox could not be read.")
+        self.assertIn("1 error", snap["rows"][-1]["what"])
+        self.assertNotIn("Finished", json.dumps(snap))
+
+    def test_a_cut_off_line_the_writer_moved_aside_is_named(self):
+        name = "model-stub-sandbox-20261128T010000Z"
+        write_run(self.state, name, [
+            start_line(name, "stub"),
+            ("error", {"torn_bytes": 11, "torn_sha256": "ab" * 32, "moved_to": "receipts.jsonl.torn-1",
+                       "after_seq": 1}, "torn-tail"),
+        ])
+        self.assertEqual(self.look()["rows"][-1]["what"],
+                         "A cut-off line (11 bytes after line 1) was moved aside to receipts.jsonl.torn-1.")
+
+    def test_a_long_run_shows_its_newest_lines_and_says_how_many_more(self):
+        write_run(self.state, "model-replayed-sandbox-20261128T010000Z", busy_day())
+        with mock.patch.object(watch, "MAX_ROWS", 5):
+            snap = self.look()
+            page = watch.render_page(snap, token="t", nonce="n")
+        self.assertEqual(len(snap["rows"]), 18)
+        self.assertEqual([int(s) for s in re.findall(r'<td class="seq">(\d+)<span', page)], [18, 17, 16, 15, 14])
+        self.assertIn("Showing the newest 5 of 18 lines.", page)
+
+
 # ---------------------------------------------------------------------------------------------------
 # The server: 127.0.0.1 only, its own assets only, and a Stop only from its own page
 # ---------------------------------------------------------------------------------------------------
@@ -466,10 +592,60 @@ class Server(TempState):
         self.assertEqual(supervisor.halt_cause("sandbox"), "watch_button")
         self.assertEqual(supervisor.halt_cause("live"), "watch_button")
         page = ask(self.server, "GET", "/")[2].decode("utf-8")
-        self.assertIn("Stop pressed at", page)
+        self.assertRegex(page, r"Stop pressed \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC")
         self.assertIn("python -m doris resume", page)
         self.assertEqual(len(self.said), 1)
         self.assertIn("Stop pressed", self.said[0])
+
+    def test_the_press_is_not_said_once_a_newer_run_has_started(self):
+        name = "model-stub-sandbox-20261128T010000Z"
+        write_run(self.state, name, [start_line(name, "stub")], started=time.time() - 60)
+        self.assertEqual(press(self.server)[0], 303)
+        self.assertIn("Stop pressed", state_json(self.server)["pressed"])
+        for mode in cli.STOP_MODES:
+            self.assertTrue(supervisor.resume(mode).ok)
+        newer = "model-stub-sandbox-20261128T020000Z"
+        write_run(self.state, newer, [start_line(newer, "stub")], started=time.time() + 5)
+        self.assertEqual(state_json(self.server)["pressed"], "")
+        self.assertNotIn("Stop pressed", ask(self.server, "GET", "/")[2].decode("utf-8"))
+
+    def test_a_page_left_open_across_a_restart_reloads_itself(self):
+        earlier = serve(self)                               # an earlier start of watch, on another port
+        old = ask(earlier, "GET", "/")[2].decode("utf-8")
+        page = ask(self.server, "GET", "/")[2].decode("utf-8")
+        state = state_json(self.server)
+        self.assertNotEqual(boot_of(old), boot_of(page))
+        self.assertEqual(state["boot"], boot_of(page))
+        self.assertNotIn(token_of(page), json.dumps(state))
+        self.assertNotIn(boot_of(page), token_of(page))
+        self.assertRegex(page, r"s\.boot !== boot\) \{ window\.location\.reload\(\);")
+        status, _, body = ask(self.server, "POST", "/stop", form_headers(self.server), "token=" + token_of(old))
+        self.assertEqual(status, 403)
+        self.assertIn("reload the page", body.decode("utf-8"))
+        self.nothing_halted()
+
+    def test_the_page_keeps_its_stop_button_when_the_receipts_cannot_be_shown(self):
+        write_run(self.state, "model-replayed-sandbox-20261128T010000Z", busy_day())
+        with mock.patch.object(watch, "snapshot", side_effect=TypeError("unhashable type: 'list'")):
+            status, _, body = ask(self.server, "GET", "/")
+            page = body.decode("utf-8")
+            self.assertEqual(status, 200)
+            self.assertIn('name="token"', page)
+            self.assertIn("could not be shown (TypeError)", page)
+            self.assertEqual(state_json(self.server)["state"], "unreadable")
+            self.assertEqual(ask(self.server, "POST", "/stop", form_headers(self.server),
+                                 "token=" + token_of(page))[0], 303)
+        self.assertEqual(supervisor.halt_cause("sandbox"), "watch_button")
+
+    def test_an_odd_after_is_answered_from_the_start(self):
+        status, _, body = ask(self.server, "GET", "/state?after=%C2%B2")
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body.decode("ascii"))["reset"])
+
+    def test_a_press_through_a_local_tls_proxy_is_the_pages_own(self):
+        page = ask(self.server, "GET", "/")[2].decode("utf-8")
+        headers = dict(form_headers(self.server), Origin="https://127.0.0.1:%d" % self.server.server_address[1])
+        self.assertEqual(ask(self.server, "POST", "/stop", headers, "token=" + token_of(page))[0], 303)
 
     def test_the_stop_button_makes_the_calls_stop_makes(self):
         calls = []
@@ -615,7 +791,7 @@ class StopMidCall(unittest.TestCase):
                 while time.monotonic() < deadline:
                     snap = state_json(server)
                     # the model's own call waits too, for an instant; the stop is meant for the slow calendar
-                    if snap["state"] == "waiting" and "calendar_query" in snap["panes"][0]["value"]:
+                    if snap["panes"][0]["value"] == "Tool call: calendar_query span, no answer yet.":
                         seen["waiting"] = snap["panes"][0]["value"]
                         break
                     time.sleep(0.05)
@@ -632,7 +808,7 @@ class StopMidCall(unittest.TestCase):
             thread.join(WAIT_S)
             for mode in cli.STOP_MODES:
                 self.assertTrue(supervisor.resume(mode).ok)
-        self.assertEqual(seen.get("waiting"), "Tool call: calendar_query span, waiting.", out)
+        self.assertEqual(seen.get("waiting"), "Tool call: calendar_query span, no answer yet.", out)
         self.assertEqual(code, supervisor.EXIT_HALTED, out)
         lines = receipts.read_lines(os.path.join(state, "sandbox", "runs", after["run"], "receipts.jsonl"))
         self.assertTrue(receipts.verify(os.path.join(state, "sandbox", "runs", after["run"], "receipts.jsonl"),
