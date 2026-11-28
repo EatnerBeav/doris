@@ -1,7 +1,7 @@
 # Tracker
 
 Every item the judges score, one line each: **status** · item · owner · due (Pacific).
-Updated Fri Nov 27, 11:45 PM (kickoff thread's last update; see HANDOFF.md). Re-checked against the law's Never cut, commands and Dates and the Brief check tab after the smoke. Kept current on main as items move.
+Updated Sat Nov 28, 1:00 AM (demo-fresh thread: PR #23 merged, Shane's answers to HANDOFF.md, decision 103). Re-checked against the law's Never cut, commands and Dates and the Brief check tab after the smoke. Kept current on main as items move.
 
 Status words: **done** (on main, tested) · **in review** (built, in a pull request) · **building** · **blocked** (says on what) · **not started**.
 
@@ -31,9 +31,11 @@ Status words: **done** (on main, tested) · **in review** (built, in a pull requ
 No new features; the law and the scope stand. Bar: first place, and would Steve Jobs ship it.
 
 - **in review** · Judge experience: a stranger runs the README's one command and understands what they saw in 60 seconds; fresh-clone runs on Linux and Windows, every stumble fixed · judge-experience thread · Sat 10:00 AM
-  - README PR #19 (draft) and a judge-path CI walk; waits on branch demo-fresh (a rerun starts the day fresh, honest digest line, paths from where you run, template names) and the story wiring.
-- **in review** · Demo value: when `demo` ends, the owner's view in plain words, all from the receipts · demo-value thread · Sat 12:00 PM
-  - story.py in PR #18; its one call into `demo` goes in on branch demo-fresh. The watch-page half follows PR #16.
+  - README PR #19 (draft) and a judge-path CI walk. Unblocked: PR #23 merged (a rerun starts the day fresh, honest digest line, paths from where you run, template names, the story at the end). sandbox/README.md's "mail she has already read is skipped" is false after a finished day; its fix goes in #19, which owns that file.
+- **done** · Demo value: when `demo` ends, the owner's view in plain words, all from the receipts · demo-value thread · Sat 12:00 PM
+  - story.py in PR #18, printed at the end of `demo` by PR #23 (decision 102).
+- **not started** · The same story as a section on the watch page · demo-value thread · Sat 2:00 PM
+  - Built and tested but not on GitHub: /mnt/project-files/doris-v2/patches/watch-story-section.patch, to rebase on main and open as its own PR with one Fable review.
 - **in review** · The video: a 3:00-max script and shot list Shane narrates; credit Shane Bornstein and Wolf (Claude), his CTO; Hire the Machines only · video thread · rehearsal Sat afternoon, filming Sun
   - PR #20 (docs/video/), decision 99; Shane to confirm.
 
@@ -43,10 +45,12 @@ No new features; the law and the scope stand. Bar: first place, and would Steve 
 - **not started** · tests/trap-pack/RESULTS.md carries the grade against the key beside each generated verdict and links RUNS.md; run 2's trace lands on main beside run 1's (rows 9.3 wrong, 9.4, 9.5) · Wolf · Sat 12:00 PM
 - **not started** · The follow-up named in the receipt and the digest when an offer is filed (row 6.2; with the nudge) · nudge thread · Sat 2:00 PM
 - **not started** · A loop test pinning the calendar failing twice into a clean hold (behaviour right, no test) · Wolf · Sat 2:00 PM
-- **not started** · The form's team field: the one registered person in the field, "Wolf (Claude), his CTO" in the free-text fields (row 10.2, recommendation) · Shane · Sun 6:00 PM
+- **done** · The form's team field: the one registered person in the field, "Wolf (Claude), his CTO" in the free-text fields (row 10.2; Shane's call, decision 103) · Steve submits · Sun night
 - **not started** · Daily check of the registration inbox for judges' questions, Nov 30 to Dec 10 (row 5.8) · Wolf (project chat) · Mon 9:30 AM
 - **not started** · Near Miss write-up drafted from the log, posted and tagged (row 10.3) · Wolf drafts, Shane posts · draft Fri Dec 4, post by Mon Dec 7 10:00 AM
-- **not started** · GitHub repo description reads "walk awayfrom" (missing space); Shane's OK to change the public setting · Wolf · Sat
+- **blocked** · GitHub repo description reads "walk awayfrom" (missing space); Shane said fix it now (decision 103), but repo settings can't be changed with Wolf's tools: Shane fixes it at https://github.com/EatnerBeav/doris (gear beside About) · Shane · Sat
+
+- **blocked** · The law's ruling 13 conflicts with decision 77; the one-line law fix is queued for Steve's morning (decision 103), built around · Steve · Sat morning
 
 ## Safety bonus: audit trail, live monitoring, kill switch, guardrails
 
@@ -64,7 +68,7 @@ No new features; the law and the scope stand. Bar: first place, and would Steve 
 - **done** · Booking re-check before the write, read back after (gate G11, ruling 4) · Wolf
 - **done** · Sensitive-mail screen before the model: filed unread, no reply, a sender-only digest line · Wolf
 - **done** · The digest: once a day, the ratio first, only what needs the owner · Wolf
-- **not started** · Model bill capped at the provider too, by a spend limit Shane sets on the key (the code cap is done) · Shane · Sat 12:00 PM
+- **blocked** · Model bill capped at the provider too, by a spend limit set on the key (the code cap is done); queued for Steve's morning (decision 103), built around · Steve · Sat morning
 - **done** · The never-mention list checked on trace commits from our server · Wolf
   - Found tonight: the server's scan had no private terms file. Added (Shane's yes); the whole repo and Trap Pack run 2's trace re-scanned clean.
 - **done** · SAFETY.md: the five verbs (send, delete, overwrite, pay, deploy) · docs thread · final pass Sun
