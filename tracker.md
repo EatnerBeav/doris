@@ -1,16 +1,17 @@
 # Tracker
 
 Every item the judges score, one line each: **status** · item · owner · due (Pacific).
-Updated Fri Nov 27, 8:40 PM. Kept current on main as items move.
+Updated Fri Nov 27, 9:35 PM. Kept current on main as items move.
 
 Status words: **done** (on main, tested) · **in review** (built, in a pull request) · **building** · **blocked** (says on what) · **not started**.
 
 ## Tonight and the live runs
 
 - **building** · PR #2 merged to main: live mail and calendar, the live loop, the digest, kill-switch hardening, JMAP sending · Wolf · Fri 11:30 PM
-  - JMAP sending is on the `live` branch; two Windows CI fixes, a final review and CI remain.
-- **building** · Tonight's end-to-end live smoke: a test mail to the owner, the forward to Doris, her reply over JMAP, the read-back · Wolf · Fri 10:00 PM
-  - Run 1 (8:29 PM) failed at the first JMAP call, nothing sent: our host check refused Fastmail's regional API host. Fix in progress, then run 2. [Run 1 trace](https://github.com/EatnerBeav/doris/tree/traces/live-smoke-20261128T042934Z/traces/live-smoke-20261128T042934Z).
+  - On `live`: JMAP sending, the regional-host fix, the Windows CI fixes. Left: the secret-scan and smoke fixes below, a last review, CI, merge.
+- **building** · Tonight's end-to-end live smoke: a test mail to the owner, the forward to Doris, her reply over JMAP, the read-back · Wolf · Fri 11:00 PM
+  - Run 1 (8:29 PM) failed at the first JMAP call, nothing sent: our host check refused Fastmail's regional API host. Fixed. [Run 1 trace](https://github.com/EatnerBeav/doris/tree/traces/live-smoke-20261128T042934Z/traces/live-smoke-20261128T042934Z).
+  - Run 2 (9:15 PM): the whole mail path passed live (forward to Doris in 31 s, her reply over JMAP for $0.004, read back in Sent and in wolf's inbox). Failed on the CalDAV test event (a reused test ID) and the secret scan wrongly blocked its trace on an address. Both being fixed, then run 3; run 2's trace is committed unchanged once the scan fix lands.
 - **blocked** · Live booking · Wolf · Sat 2:00 PM
   - On PR #2 and the smoke.
 - **blocked** · Overnight run · Wolf · Sat 8:00 PM start
