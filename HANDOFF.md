@@ -17,23 +17,10 @@ From the kickoff thread (Wolf), Fri Nov 27, 11:55 PM Pacific. That thread is clo
 
 ## Open, and its exact state
 
-- **Branch `demo-fresh`** (c83e77f, pushed, no PR). It holds 8 commits on PR #17's 060242c, with 215 targeted tests passing on 3.x and 3.9; the full suite hasn't run. The commits:
-  - a second `demo` after a finished day starts fresh and keeps the old day in `state/old/`; after a halt it continues the day instead;
-  - an honest digest line;
-  - a line when the staged timeout starts;
-  - paths printed from the working folder;
-  - help that says `python3`;
-  - stand-in wording and template names;
-  - #17's two review fixes: the meeting-link check on raw bodies, and `stop` trying every mode.
-
-  **Next:**
-  1. Merge main in.
-  2. Wire the story at the end of `demo()`: after `code = supervise(...)`, add `from . import story` and `for line in story.lines(os.path.join(run_dir, "receipts.jsonl")): _say(line)`, then `return code`. Add a test.
-  3. Open a PR with base main and get one Fable review.
-  4. Merge on green CI.
-  5. Tell the README thread.
-- **PR #19** (README, draft) waits on demo-fresh. **PR #20** (video docs) and **PR #21** (brief-compliance.md) belong to their threads.
+- **PR #23 (branch `demo-fresh`) merged** Sat Nov 28 by the demo-fresh thread (decisions 100 and 102): a second `demo` after a finished day starts fresh and keeps the old day in `state/old/`; the owner's story prints at the end of `demo`; a half-moved day is refused, never sent twice; the honest digest line and the terminal wording. One Fable review, its three real findings fixed; full suite 2,234 passed; CI green on all legs.
+- **PR #19** (README, draft) is unblocked; it also owns the fix to sandbox/README.md's "mail she has already read is skipped", false after a finished day. **PR #20** (video docs) and **PR #21** (brief-compliance.md) belong to their threads.
 - **Queued lows:**
+  - From PR #23's review: the fresh-day move doesn't hold ledger.lock; `stop` calls an unreadable HALT "NOT halted" (the supervisor treats it as halted); the story's "sandbox/outbox/" and "python -m doris" don't paste from src/; the halted-run CLI test races a stopper thread.
   - `stop` says "killed mid-call" even for the smoke's unsupervised loop.
   - The supervisor should re-read HALT after its last refused replace.
   - `smoke_left_out` should search positively.
@@ -62,18 +49,15 @@ From the kickoff thread (Wolf), Fri Nov 27, 11:55 PM Pacific. That thread is clo
 
   Never push from Shane's PC.
 
-## Open questions
+## Open questions (answered Sat 12:48 AM, decision 103)
 
-1. **Shane:** OK to delete the leftover scratch on our server? That's /root/doris-fresh-20261128T020557Z, /root/doris-jmap, /root/doris-merge-pr6-20261128T042704Z, /root/doris-traps-run2, /tmp/jmap_hosts_check.py and /tmp/jmap_session_check.py, plus a doris-fresh folder in his PC's Temp.
-2. **Shane:** the provider spend limit on the key.
-3. **Shane:** the form's team field (recommendation on the tracker).
-4. **Shane:** OK to fix the repo description typo.
-5. **Shane:** ruling 13 conflicts with decision 77; the one-line law fix has been sent to him.
-6. **Steve or Wolf:** keep the S2 line "Failed inbox reads: [k]." (decision 89)?
-7. **Wolf:** confirm #17's trade-offs:
-   - files already in the inbox at the first look are read as they are;
-   - one extra IMAP SEARCH per fetch;
-   - the legacy smoke cleanup pins two 2028 dates.
+1. Scratch on our server and Shane's PC: leave it all alone until after Mon 10 AM.
+2. **Queued for Steve's morning:** the provider spend limit on the key. Build around it.
+3. The form's team field: the tracker's recommendation; Steve submits Sunday.
+4. Repo description typo: Shane said fix it now; Wolf's tools can't change repo settings, so Shane does it at https://github.com/EatnerBeav/doris (gear beside About).
+5. **Queued for Steve's morning:** the ruling 13 vs decision 77 law fix. Build around it.
+6. Keep the S2 line "Failed inbox reads: [k]."
+7. #17's trade-offs accepted as they are.
 
 ## Next three from the tracker
 
