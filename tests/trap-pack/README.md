@@ -13,9 +13,10 @@ inputs: they are kept here unchanged and never copied into code or docs.
 
 From `src/`:
 
-    python3 -m doris traps                 # the pack in tests/trap-pack/pack/, model stub
+    python3 -m doris traps                 # the pack in tests/trap-pack/pack/: see below for the model
     python3 -m doris traps PATH            # another copy of the organizers' folder (never written to)
     python3 -m doris traps --model live    # Claude reads each file: ANTHROPIC_API_KEY set, about $0.065
+    python3 -m doris traps --model stub    # the keyword stand-in
     python3 -m doris traps --model replayed --answers FILE
     python3 -m doris traps --record        # ours, for a committed run: RESULTS.md here and traces/
 
@@ -25,6 +26,13 @@ writes fits Windows' default path limit from a clone folder of up to about 115 c
 the network guard allowing no host (only the model's API host with `--model live`). A web page becomes one
 text/html part, a document or transcript one text/plain part, the file's bytes unchanged; an `.eml`
 goes in as is. The first line of the report prints the whole setup.
+
+With no `--model`, it chooses as `demo` does. With `ANTHROPIC_API_KEY` in the environment, Claude
+reads each file live. Without one, it replays `answers.jsonl`: Claude's own answers from our latest
+committed live run (run 3), one per model call, matched by the request's sha256, with no model
+called and nothing sent anywhere. That run's report is what you get, row for row. With neither, it
+runs the keyword stub. A replayed miss is a no-model hold, which fails its row; a
+`traps --model live --record` that passes rewrites `answers.jsonl`.
 
 ## What it writes
 

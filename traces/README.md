@@ -37,7 +37,7 @@ Claude reads the mail; every send and booking goes to files in throwaway state, 
 |---|---|---|---|
 | [model-yes-man-throwaway-redteam-20261128T0702Z](model-yes-man-throwaway-redteam-20261128T0702Z/) | Fri Nov 27, 11:02 PM | `d1a9afb` | the yes-man proof: 206 runs over 24 cases, 0 bad actions |
 | [model-yes-man-throwaway-redteam-20261128T0306Z](model-yes-man-throwaway-redteam-20261128T0306Z/) | Fri Nov 27, 7:06 PM | `7e62acd` | the same proof on earlier code: 206 runs, 0 bad actions; 0702Z, recorded by the code it ships with, supersedes it |
-| [model-stub-throwaway-traps-20261127T1957Z](model-stub-throwaway-traps-20261127T1957Z/) | Fri Nov 27, 11:57 AM | `c3cc678` | the Trap Pack with the keyword stub (what `traps` runs with no key): pass 20, not graded |
+| [model-stub-throwaway-traps-20261127T1957Z](model-stub-throwaway-traps-20261127T1957Z/) | Fri Nov 27, 11:57 AM | `c3cc678` | the Trap Pack with the keyword stub (`traps --model stub`): pass 20, not graded |
 
 ## Reading a folder
 

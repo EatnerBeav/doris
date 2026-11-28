@@ -851,6 +851,55 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(code, 1)
 
 
+class DefaultSourceTest(unittest.TestCase):
+    def test_as_the_demo_chooses(self):
+        self.assertEqual(traps.default_source({}, True), "replayed")
+        self.assertEqual(traps.default_source({}, False), "stub")
+        self.assertEqual(traps.default_source({"ANTHROPIC_API_KEY": "k"}, True), "live")
+        self.assertEqual(traps.default_source({"ANTHROPIC_API_KEY": "k"}, False), "live")
+        self.assertEqual(traps.default_source({"ANTHROPIC_API_KEY": "  "}, True), "replayed")
+
+
+class RecordedTrapAnswers(unittest.TestCase):
+    """The committed tests/trap-pack/answers.jsonl answers every model call the pack makes, through the
+    real loop. A change to the request (the system prompt, the model, the fields sent) or to how an item
+    reaches the model would turn a judge's no-key run into no-model holds, which fail their rows; this
+    fails first. Re-record with a keyed `traps --model live --record`, which rewrites the file."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def lines(self):
+        path = traps.answers_file()
+        self.assertTrue(os.path.isfile(path), "tests/trap-pack/answers.jsonl is missing: no-key traps runs the stub")
+        with open(path, encoding="utf-8") as fh:
+            return [json.loads(l) for l in fh if l.strip()]
+
+    def test_the_file_is_one_run_with_one_answer_per_call(self):
+        lines = self.lines()
+        self.assertEqual(len(lines), 15)
+        self.assertEqual(len({l["request_sha256"] for l in lines}), 15)
+        self.assertEqual(len({l["run_id"] for l in lines}), 1)
+        self.assertEqual(len({l["model_id"] for l in lines}), 1)
+
+    def test_a_no_key_run_replays_every_call_and_every_row_passes(self):
+        self.lines()
+        rep = traps.run_traps(traps.paths.TRAP_PACK, model_source="replayed", answers_path=traps.answers_file(),
+                              model_id="claude-some-other-model",
+                              state_root=os.path.join(self.tmp.name, "state"),
+                              traces_root=os.path.join(self.tmp.name, "traces"),
+                              results_path=os.path.join(self.tmp.name, "RESULTS.md"))
+        self.assertEqual([(r.item, r.verdict) for r in rep.rows if r.verdict != "pass"], [])
+        classified = []
+        for r in rep.rows:
+            with open(os.path.join(r.trace, "receipts.jsonl"), encoding="utf-8") as fh:
+                classified += [json.loads(l)["payload"] for l in fh if '"classified"' in l]
+        classified = [c for c in classified if isinstance(c, dict) and "source" in c]
+        self.assertEqual(len(classified), 15)
+        self.assertEqual({(c["source"], c["ok"]) for c in classified}, {("replayed", True)})
+
+
 class WhereItWrites(unittest.TestCase):
     """A judge's `python -m doris traps` leaves the committed report and traces alone and the tree
     clean: its report and traces go under state/ (gitignored), and it says where. Only --record (our
@@ -867,13 +916,82 @@ class WhereItWrites(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def main(self, *args):
+    def main(self, *args, env=None, loop=None):
         out = io.StringIO()
         act = lambda ctx: {"outcome": "quarantine", "screen": 1, "why": "Quarantined."}
+        self.loop = loop or FakeLoop(act)
         with contextlib.redirect_stdout(out), \
                 unittest.mock.patch.dict(os.environ, {traps.paths.SHOWN_FROM: os.path.join(self.repo, "src")}):
-            code = traps.main([self.pack] + list(args), deps=fake_deps(FakeLoop(act)))
+            for name in ("ANTHROPIC_API_KEY", "DORIS_MODEL"):
+                os.environ.pop(name, None)
+            os.environ.update(env or {})
+            code = traps.main([self.pack] + list(args), deps=fake_deps(self.loop))
         return code, out.getvalue()
+
+    def write_answers(self, run_id="model-live-throwaway-traps-20261128T1233Z", model_id="claude-recorded-model"):
+        path = os.path.join(self.repo, "tests", "trap-pack", "answers.jsonl")
+        write(path, (json.dumps({"model_id": model_id, "raw": "{}", "request_sha256": "x" * 64,
+                                 "run_id": run_id}) + "\n").encode("utf-8"))
+        return path
+
+    def test_with_recorded_answers_and_no_key_it_replays_them_with_their_model(self):
+        # Brief row 9.2: the keyword stub offered times to five trap senders the model files silently.
+        # With no key, a judge's run replays our latest live run's own answers, as the demo does.
+        path = self.write_answers()
+        code, out = self.main(env={"DORIS_MODEL": "claude-some-other-model"})
+        self.assertEqual(code, 0, out)
+        (run,) = os.listdir(os.path.join(self.repo, "state", "throwaway", "traces"))
+        self.assertTrue(run.startswith("model-replayed-throwaway-traps-"), run)
+        self.assertIn("model replayed (the model's answers recorded in run model-live-throwaway-traps-20261128T1233Z, "
+                      "replayed; no model called)", out.splitlines()[0])
+        self.assertEqual({(c.model_source, c.answers_path, c.model_id) for c in self.loop.configs},
+                         {("replayed", path, "claude-recorded-model")})
+
+    def test_with_no_key_and_no_answers_it_runs_the_stub(self):
+        code, out = self.main()
+        self.assertEqual(code, 0, out)
+        self.assertIn("model stub (deterministic keyword stub, not a real model)", out.splitlines()[0])
+        self.assertEqual({c.model_source for c in self.loop.configs}, {"stub"})
+
+    def test_with_a_key_it_calls_the_model_live_and_stub_is_still_one_flag_away(self):
+        self.write_answers()
+        code, out = self.main(env={"ANTHROPIC_API_KEY": "test-key-not-real"})
+        self.assertEqual(code, 0, out)
+        self.assertEqual({c.model_source for c in self.loop.configs}, {"live"})
+        self.assertIn("network guard allows api.anthropic.com", out.splitlines()[0])
+        code, out = self.main("--model", "stub", env={"ANTHROPIC_API_KEY": "test-key-not-real"})
+        self.assertEqual({c.model_source for c in self.loop.configs}, {"stub"})
+
+    def test_a_recorded_live_run_that_passed_keeps_its_answers_for_the_no_key_run(self):
+        class Recording(FakeLoop):
+            def run(self, cfg):
+                summary = FakeLoop.run(self, cfg)
+                if cfg.record_path:
+                    with open(cfg.record_path, "w", encoding="utf-8") as fh:
+                        fh.write(json.dumps({"model_id": "m", "request_sha256": cfg.run_name[-5:] + os.path.basename(
+                            cfg.state_dir), "raw": "{}"}) + "\n")
+                return summary
+        act = lambda ctx: {"outcome": "file", "cls": "fyi", "why": "Filed, no reply."}
+        code, out = self.main("--model", "live", "--record", env={"ANTHROPIC_API_KEY": "test-key-not-real"},
+                              loop=Recording(act))
+        self.assertEqual(code, 0, out)
+        (run,) = os.listdir(os.path.join(self.repo, "traces"))
+        with open(os.path.join(self.repo, "tests", "trap-pack", "answers.jsonl"), encoding="utf-8") as fh:
+            kept = [json.loads(l) for l in fh if l.strip()]
+        self.assertEqual(len(kept), 3)
+        self.assertEqual({k["run_id"] for k in kept}, {run})
+        self.assertEqual([k["request_sha256"][-2:] for k in kept], ["01", "02", "03"])   # pack order
+
+    def test_a_recorded_live_run_with_a_failed_row_leaves_the_answers_alone(self):
+        before = self.write_answers()
+        with open(before, encoding="utf-8") as fh:
+            old = fh.read()
+        act = lambda ctx: {"outcome": "hold:no-model", "why": "Held: no model."}
+        code, out = self.main("--model", "live", "--record", env={"ANTHROPIC_API_KEY": "test-key-not-real"},
+                              loop=FakeLoop(act))
+        self.assertEqual(code, 1, out)
+        with open(before, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), old)
 
     def test_by_default_the_report_and_traces_go_under_state_and_it_says_where(self):
         code, out = self.main()

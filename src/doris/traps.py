@@ -76,6 +76,31 @@ def runs_md():
     """tests/trap-pack/RUNS.md: every graded run, newest first."""
     return os.path.join(paths.TESTS, "trap-pack", "RUNS.md")
 
+
+def answers_file():
+    """tests/trap-pack/answers.jsonl: the model's answers from our latest committed live run, one line
+    per call, each with the run's name (run_id). A run with no key replays them."""
+    return os.path.join(paths.TESTS, "trap-pack", "answers.jsonl")
+
+
+def default_source(env, answers_exist):
+    """As `demo` chooses (__main__.demo_source): a key means the model is called live; recorded answers
+    without a key are replayed; neither, the keyword stub. A run never mixes them."""
+    if (env.get("ANTHROPIC_API_KEY") or "").strip():
+        return "live"
+    return "replayed" if answers_exist else "stub"
+
+
+def recorded_first(path, field):
+    """A field of the first recorded answer in a file (run_id, model_id), or None."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            first = json.loads(fh.readline() or "{}")
+        value = first.get(field) if isinstance(first, dict) else None
+        return value if isinstance(value, str) and value.strip() else None
+    except (OSError, ValueError):
+        return None
+
 KIND_EMAIL = "email"
 KIND_WEB = "wrapped web"
 KIND_DOC = "wrapped document"
@@ -1031,18 +1056,22 @@ def _run_names(model_source, stamp, state_root, traces_root):
         n += 1
 
 
-def setup_line(run_name, model_source, run_state, pack_dir, n_files, allowed, show=None):
+def setup_line(run_name, model_source, run_state, pack_dir, n_files, allowed, show=None, replayed_from=None):
     """The run's setup in one line. Its paths are from the repository root, as the report reads (show:
-    paths.shown for the line the terminal prints)."""
+    paths.shown for the line the terminal prints). replayed_from: the run whose answers are replayed."""
     where = "%s/<NN>/" % _display(run_state) if show is None else os.path.join(show(run_state), "<NN>", "")
     show = show or _display
+    if model_source == "stub":
+        about = " (deterministic keyword stub, not a real model)"
+    elif model_source == "replayed":
+        about = " (the model's answers recorded in run %s, replayed; no model called)" % (replayed_from or "unknown")
+    else:
+        about = ""
     return ("Setup: run %s; model %s%s; owner %s (the pack's own inbox owner, traps runs only); Doris %s; "
             "clock %s (Tue Dec 1 2026, 9:00 AM Pacific), clock_mode fixed; calendar empty; fresh throwaway "
             "state per item under %s (NN its place in the pack: its own ledger, an inbox holding the one "
             ".eml, an empty calendar, an outbox); network guard allows %s; forwarded: simulated; pack %s (%d files)."
-            % (run_name, model_source,
-               " (deterministic keyword stub, not a real model)" if model_source == "stub" else "",
-               OWNER_ADDR, DORIS_ADDR, CLOCK_UTC, where,
+            % (run_name, model_source, about, OWNER_ADDR, DORIS_ADDR, CLOCK_UTC, where,
                ", ".join(allowed) if allowed else "no host", show(pack_dir), n_files))
 
 
@@ -1365,14 +1394,21 @@ def run_traps(pack_dir, model_source="stub", state_root=None, traces_root=None, 
         if p and _inside(p, root):
             raise ValueError("refusing to write inside the pack folder")
     deps = deps or default_deps()
+    replayed_from = None
+    if model_source == "replayed" and answers_path:
+        # The model ID is part of every request a recorded answer is matched by: replay the recording's,
+        # never DORIS_MODEL (as the demo does).
+        model_id = recorded_first(answers_path, "model_id") or model_id
+        replayed_from = recorded_first(answers_path, "run_id")
     items, skipped = ingest(pack_dir)
     stamp = stamp or _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%MZ")
     run_name, state_name = _run_names(model_source, stamp, state_root, traces_root)
     run_state = os.path.join(state_root, state_name)
     allowed = LIVE_MODEL_HOSTS if model_source == "live" else ()
-    line = setup_line(run_name, model_source, run_state, root, len(items), allowed)
+    line = setup_line(run_name, model_source, run_state, root, len(items), allowed, replayed_from=replayed_from)
     say = echo or (lambda s: None)
-    say(setup_line(run_name, model_source, run_state, root, len(items), allowed, show=paths.shown))
+    say(setup_line(run_name, model_source, run_state, root, len(items), allowed, show=paths.shown,
+                   replayed_from=replayed_from))
     traces_run = os.path.join(traces_root, run_name)
     results_path = results_path or os.path.join(traces_run, "RESULTS.md")
     os.makedirs(traces_run, exist_ok=True)
@@ -1409,7 +1445,26 @@ def run_traps(pack_dir, model_source="stub", state_root=None, traces_root=None, 
         kept = Report(run_name, line, rows, hits, own, skipped, items, traces_run)
         with open(own, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(render_results(kept, root, model_source, traces_run))
+    if record and model_source == "live" and all(r.verdict == "pass" for r in rows):
+        keep_answers(rows, run_name, answers_file())
     return rep
+
+
+def keep_answers(rows, run_name, path):
+    """A committed live run that passed leaves its model answers in tests/trap-pack/answers.jsonl, in
+    pack order, each line with the run's name, so a run with no key replays exactly these."""
+    out = []
+    for r in rows:
+        src = os.path.join(r.trace, "recorded-answers.jsonl")
+        if os.path.isfile(src):
+            with open(src, encoding="utf-8") as fh:
+                for raw in fh:
+                    if raw.strip():
+                        out.append(json.dumps(dict(json.loads(raw), run_id=run_name), sort_keys=True,
+                                              ensure_ascii=True) + "\n")
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("".join(out))
+    return len(out)
 
 
 def main(argv=None, deps=None):
@@ -1418,8 +1473,11 @@ def main(argv=None, deps=None):
     ap = argparse.ArgumentParser(prog=paths.command("traps"),
                                  description="Run the Trap Pack through Doris, one item at a time on fresh state.")
     ap.add_argument("path", nargs="?", default=paths.TRAP_PACK, help="the pack folder (default tests/trap-pack/pack)")
-    ap.add_argument("--model", default="stub", choices=TRAPS_MODEL_SOURCES, help="model source (default stub)")
-    ap.add_argument("--answers", default=None, help="recorded answers for --model replayed")
+    ap.add_argument("--model", default=None, choices=TRAPS_MODEL_SOURCES,
+                    help="model source (default: live with a key in the environment, else the recorded answers "
+                         "in tests/trap-pack/answers.jsonl replayed, else stub)")
+    ap.add_argument("--answers", default=None, help="recorded answers for --model replayed "
+                                                    "(default tests/trap-pack/answers.jsonl)")
     ap.add_argument("--record", action="store_true",
                     help="write the committed report tests/trap-pack/RESULTS.md and traces/ (default: both "
                          "under state/throwaway/traces/, which git ignores)")
@@ -1428,10 +1486,9 @@ def main(argv=None, deps=None):
     ap.add_argument("--traces-root", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--results", default=None, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
-    answers = args.answers
-    if args.model == "replayed" and not answers:
-        answers = os.path.join(paths.TESTS, "trap-pack", "answers.jsonl")
-    rep = run_traps(args.path, model_source=args.model, state_root=args.state_root, traces_root=args.traces_root,
+    source = args.model or default_source(os.environ, os.path.isfile(args.answers or answers_file()))
+    answers = (args.answers or answers_file()) if source == "replayed" else args.answers
+    rep = run_traps(args.path, model_source=source, state_root=args.state_root, traces_root=args.traces_root,
                     results_path=args.results, deps=deps, answers_path=answers, model_id=args.model_id,
                     echo=print, record=args.record)
     failed = sum(1 for r in rep.rows if r.verdict != "pass")
