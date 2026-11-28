@@ -325,6 +325,21 @@ class SpeedTest(unittest.TestCase):
                     for piece in pieces:
                         self.assertNotIn(piece, q, (code, at, q[-40:]))
 
+    def test_invisible_characters_and_white_space_at_the_end_are_no_cut(self):
+        # Second review of PR #4, round 2, L5: the cut was decided on the raw length, before the
+        # invisibles and the trailing white space went, so the last word was blanked for nothing.
+        self.assertEqual(holds.shown_subject("Lunch Tuesday?" + "​" * 5000), "Lunch Tuesday?")
+        self.assertEqual(holds.shown_subject("Lunch Tuesday?" + " " * 5000), "Lunch Tuesday?")
+        self.assertEqual(holds.sender_name("Ann Lee" + " " * 2000, "ann@x.example"), "Ann Lee")
+        self.assertEqual(holds.sender_name("Ann Lee" + "⁠" * 2000, "ann@x.example"), "Ann Lee")
+        self.assertEqual(holds.quote_of(make_msg(own_text="See you Tuesday." + "\n" * 9000)), "See you Tuesday.")
+        self.assertEqual(holds.quote_of(make_msg(own_text="See you Tuesday." + " ​\n" * 4000)),
+                         "See you Tuesday.")
+        # Anything a reader sees past the window is still a cut.
+        self.assertEqual(holds.shown_subject("Lunch Tuesday?" + "​" * 5000 + "x"), "Lunch [redacted]")
+        self.assertEqual(holds.quote_of(make_msg(own_text="See you Tuesday." + "\n" * 9000 + "Ann")),
+                         "See you [redacted]")
+
 
 class NoticeSlotsTest(unittest.TestCase):
     def setUp(self):

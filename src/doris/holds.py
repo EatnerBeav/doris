@@ -20,11 +20,14 @@ from . import caps, templates
 # Characters a reader never sees, removed before the 400 characters are counted (decision 61):
 # Unicode's default-ignorable code points (zero-width, direction and format characters, the soft
 # hyphen, fillers, variation selectors, tags), and every other format character (Cf) with them.
-_INVISIBLE = re.compile(
-    "[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e"
-    "\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3"
-    "\U0001d173-\U0001d17a\U000e0000-\U000e0fff]")
-_CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_INVISIBLES = ("\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e"
+               "\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3"
+               "\U0001d173-\U0001d17a\U000e0000-\U000e0fff")
+_CONTROLS = "\x00-\x08\x0b\x0c\x0e-\x1f\x7f"
+_INVISIBLE = re.compile("[" + _INVISIBLES + "]")
+_CONTROL = re.compile("[" + _CONTROLS + "]")
+# A character a reader would see: not white space, not invisible, not a control character.
+_SEEN = re.compile("[^\\s" + _INVISIBLES + _CONTROLS + "]")
 
 _SCHEME = re.compile(r"(?i)\b(https?|[a-z][a-z0-9+.\-]*)://")
 _IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
@@ -220,14 +223,16 @@ _GROUP_WORD = re.compile(_GROUP + r"(?::" + _GROUP + r")*$")
 def _window(text, n, one_line=False):
     """clean(text), folded to one line if asked, at most n characters of it (the raw text is read at
     most 4n far). A cut may split a code, so where the text is cut its last word, and every word a
-    code joins to it (one ending in a hyphen, a group of a grouped code), become one [redacted]."""
+    code joins to it (one ending in a hyphen, a group of a grouped code), become one [redacted].
+    Invisibles and white space at the end are no cut (second review of PR #4, round 2, L5): the text
+    is cut only where a reader would see more after it."""
     text = text or ""
-    cut = len(text) > 4 * n
+    cut = len(text) > 4 * n and _SEEN.search(text, 4 * n) is not None
     text = clean(text[:4 * n])
     if one_line:
         text = " ".join(text.split())
-    if not cut and len(text) <= n:
-        return text
+    if not cut and len(text.rstrip()) <= n:
+        return text if len(text) <= n else text.rstrip()
     head = text[:n]
     end, last = len(head), True
     while True:
