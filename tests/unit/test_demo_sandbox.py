@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from doris.adapters import sandbox as sandbox_adapter
 from tests.unit import demo_sandbox, test_fixtures
@@ -142,8 +143,9 @@ class ACopyOfASandboxWhoseFactsDoNotParse(unittest.TestCase):
 
 def git(*args):
     # No line-ending conversion (Git for Windows turns it on), as the repository's `* -text` has it.
+    # And never git's own GIT_DIR and the like from a hook: only the repository named with -C.
     return subprocess.run(["git", "-c", "core.autocrlf=false"] + list(args), stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, check=True)
+                          stderr=subprocess.PIPE, check=True, env=demo_sandbox.git_env())
 
 
 class GitTracksTheCommittedSandboxAndNothingElse(unittest.TestCase):
@@ -178,6 +180,32 @@ class GitTracksTheCommittedSandboxAndNothingElse(unittest.TestCase):
         # An archive copy unpacked inside some other checkout: git answers for that checkout, not this.
         copy = demo_sandbox.copy_committed(os.path.join(tmp, "unpacked", "sandbox"))
         self.assertIsNone(demo_sandbox.git_sandbox_files(os.path.dirname(copy)))
+
+    def test_gits_own_variables_never_point_the_check_at_another_repository(self):
+        # A pre-commit hook or a linked worktree runs the suite with GIT_DIR, GIT_INDEX_FILE and the
+        # like set for the repository being committed. The check and this test's own git calls must
+        # still answer for, and write only to, the repository they name.
+        if shutil.which("git") is None:
+            self.skipTest("no git")
+        tmp = tempfile.mkdtemp(prefix="doris-git-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        ours, other = os.path.join(tmp, "ours"), os.path.join(tmp, "other")
+        for repo in (ours, other):
+            git("init", "-q", repo)
+            demo_sandbox.copy_committed(os.path.join(repo, "sandbox"))
+        git("-C", other, "add", "sandbox")
+        before = read(os.path.join(other, ".git", "index"))
+        hostile = {"GIT_DIR": os.path.join(other, ".git"), "GIT_WORK_TREE": other,
+                   "GIT_INDEX_FILE": os.path.join(other, ".git", "index"), "GIT_PREFIX": "",
+                   "GIT_OBJECT_DIRECTORY": os.path.join(other, ".git", "objects"),
+                   "GIT_COMMON_DIR": os.path.join(other, ".git")}
+        with mock.patch.dict(os.environ, hostile):
+            write(os.path.join(ours, "sandbox", "inbox", JUDGE_NAME), JUDGE_EML)
+            git("-C", ours, "add", "sandbox")
+            listed = demo_sandbox.git_sandbox_files(ours)
+        self.assertEqual(read(os.path.join(other, ".git", "index")), before)
+        self.assertIn("inbox/" + JUDGE_NAME, listed)
+        self.assertIn("reads it: inbox/" + JUDGE_NAME, demo_sandbox.sandbox_drift(listed))
 
 
 if __name__ == "__main__":

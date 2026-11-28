@@ -94,13 +94,27 @@ def copy_committed(dest, source=SANDBOX):
     return dest
 
 
+# The variables that point git at a repository other than the one named (`git rev-parse
+# --local-env-vars`). A pre-commit hook or a linked worktree sets some of them for the repository
+# being committed, so every git call here runs without them and answers only for the folder it names.
+GIT_LOCAL_ENV = ("GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+                 "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE",
+                 "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
+                 "GIT_SHALLOW_FILE", "GIT_COMMON_DIR")
+
+
+def git_env():
+    """os.environ without GIT_LOCAL_ENV, for running git on a folder named with -C."""
+    return {k: v for k, v in os.environ.items() if k not in GIT_LOCAL_ENV}
+
+
 def git_sandbox_files(repo=REPO):
     """What git tracks under repo's sandbox/ (`git ls-files sandbox`), as sorted "/"-separated paths
     under sandbox/. None when git cannot say for repo: git is not installed, or repo is not the top
     of a git checkout (a `git archive` copy, even one unpacked inside some other checkout)."""
     def git(*args):
         return subprocess.run(["git", "-C", repo] + list(args), stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, timeout=60)
+                              stderr=subprocess.PIPE, timeout=60, env=git_env())
     try:
         prefix = git("rev-parse", "--show-prefix")       # "" at the top of a checkout
         if prefix.returncode != 0 or prefix.stdout.strip():
