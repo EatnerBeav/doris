@@ -421,6 +421,19 @@ class Panes(TempState):
         self.assertNotEqual(day["headline"], story.build(receipts.read_lines(resumed))["headline"])
         self.assertIn("Then resumed: this covers both runs.", st["halt"])
 
+    def test_an_earlier_run_that_does_not_verify_is_named_on_the_page(self):
+        stopped = write_run(self.state, "model-replayed-sandbox-20261128T010000Z",
+                            busy_day() + [("halted", halted_payload(18), "", why("halt.watch_button"))])
+        with open(stopped, "rb") as fh:
+            data = fh.read()
+        with open(stopped, "wb") as fh:
+            fh.write(data.replace(b"elena@harborline", b"elenA@harborline", 1))
+        os.utime(stopped, (time.time() - 60, time.time() - 60))
+        newer = "model-replayed-sandbox-20261128T020000Z"
+        write_run(self.state, newer, [start_line(newer), ("summary", {"handled": 0, "held": 0, "human_approvals": 0})],
+                  started=time.time() + 5)
+        self.assertIn("An earlier run of this day does not verify", self.look()["story"]["note"])
+
     def test_a_story_that_cannot_be_built_leaves_the_rest_of_the_page_standing(self):
         write_run(self.state, "model-replayed-sandbox-20261128T010000Z", busy_day())
         with mock.patch("doris.story.build", side_effect=ValueError("odd line")):

@@ -451,6 +451,15 @@ class AStopInTheDay(unittest.TestCase):
             printed = story.render(story.build(d.lines), width)
             self.assertTrue(any(cmd in line for line in printed), (width, printed))
 
+    def test_an_opt_out_on_another_thread_ends_their_open_offer(self):
+        d = Day()
+        d.mail("m1", "Bob Ng", "bob@ng.example")
+        d.send("m1", "T2", {"slots": ["a", "b", "c"]})
+        d.close("m1", "offer", "policy.offer_no_clear_time", template="T2", slots={"cond": "B7"})
+        d.mail("m2", "Bob Ng", "BOB@ng.example", thread="t2")
+        d.close("m2", "suppress", "screen.stop", thread="t2", slots={"n": 0})
+        self.assertEqual(story.build(d.lines)["waiting"], "")
+
     def test_a_pick_cut_off_by_a_stop_leaves_their_offer_open(self):
         d = Day()
         d.mail("m1", "Marcus Lee", "marcus@lee.example")
@@ -461,6 +470,60 @@ class AStopInTheDay(unittest.TestCase):
         d.add("called", {"call": "calendar_query", "target": "span"}, "m2")
         self.stopped(d)
         self.assertEqual(story.build(d.lines)["waiting"], "Waiting to pick one of her times: Marcus Lee.")
+
+    def runs(self, *days):
+        """Run folders under runs/, (name, Day, mtime) each; returns the last one's receipts path."""
+        tmp = tempfile.mkdtemp(prefix="doris-story-runs-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        for name, day, when in days:
+            os.makedirs(os.path.join(tmp, "runs", name))
+            path = os.path.join(tmp, "runs", name, "receipts.jsonl")
+            if day is None:
+                open(path, "wb").close()
+            else:
+                day.write(path)
+            os.utime(path, (when, when))
+        return path
+
+    def filed_day(self, mode="sandbox"):
+        d = Day(mode=mode)
+        d.mail("m3", "Ken Ito", "ken@ito.example")
+        d.close("m3", "file", "policy.file_fyi")
+        d.summary(handled=1, held=0, human_approvals=0)
+        return d
+
+    def test_a_run_that_halted_itself_then_wrote_its_summary_is_still_the_same_day(self):
+        first = booked_day()
+        first.add("halted", {"cause": "supervisor_gone", "in_flight": "none", "dropped": [], "summary": "follows"},
+                  "", why.why("halt.supervisor_gone"))
+        first.summary(handled=1, held=0, human_approvals=0)
+        text = "\n".join(story.lines(self.runs(("r1", first, 1000), ("r2", self.filed_day(), 2000)), width=1000))
+        self.assertIn("2 emails came in", text)
+        self.assertIn("in 2 runs", text)
+
+    def test_live_runs_are_never_joined_into_a_day(self):
+        first = Day(mode="live")
+        first.mail("m1", "Ann Bell", "ann@bell.example")
+        first.close("m1", "file", "policy.file_fyi")
+        self.stopped(first)
+        second = self.filed_day(mode="live")
+        text = "\n".join(story.lines(self.runs(("r1", first, 1000), ("r2", second, 2000)), width=1000))
+        self.assertIn("Receipts: %d lines, chain verified." % len(second.lines), text)
+
+    def test_runs_written_in_the_same_second_keep_their_order_by_name(self):
+        first = booked_day()
+        self.stopped(first)
+        path = self.runs(("model-stub-sandbox-20261128T010000Z", first, 5000),
+                         ("model-stub-sandbox-20261128T020000Z", self.filed_day(), 5000))
+        self.assertIn("in 2 runs", "\n".join(story.lines(path, width=1000)))
+
+    def test_an_empty_receipt_file_is_not_a_run(self):
+        first = booked_day()
+        self.stopped(first)
+        path = self.runs(("r0", None, 500), ("r1", first, 1000), ("r2", self.filed_day(), 2000))
+        text = "\n".join(story.lines(path, width=1000))
+        self.assertIn("in 2 runs", text)
+        self.assertIn("this covers both runs", text)
 
     def test_a_day_stopped_and_resumed_is_told_whole(self):
         tmp = tempfile.mkdtemp(prefix="doris-story-runs-")
@@ -502,6 +565,16 @@ class AStopInTheDay(unittest.TestCase):
 
 
 class ABookingFoundGone(unittest.TestCase):
+    def test_a_message_id_that_starts_with_booking_is_still_an_email(self):
+        d = Day()
+        d.mail("booking:x@evil.example", "Eve Mallory", "eve@evil.example")
+        d.close("booking:x@evil.example", "hold:money", "hold.money", held=True)
+        s = story.build(d.lines)
+        self.assertTrue(s["headline"].startswith("1 email came in: 0 handled by her"), s["headline"])
+        self.assertIn("1 held for Shane", s["headline"])
+        self.assertNotIn("booking", s["headline"])
+        self.assertEqual(s["needs"]["rows"][0][1], "Eve Mallory")
+
     """Ruling 17: a booking of hers found gone is held for Shane under subject booking:<id>; it is not an email."""
 
     def test_a_booking_he_removed_is_held_for_him_and_is_not_an_email(self):

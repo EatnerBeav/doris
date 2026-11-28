@@ -553,7 +553,7 @@ def snapshot(run):
                                            SMOKE_WORDS if run.smoke else "") if w),
             "status": status, "chain": chain, "chain_ok": chain_ok, "state": state, "panes": panes,
             "rows": rows, "after": max([r["seq"] for r in rows] or [0]), "more": more, "empty": "",
-            "story": story_view(story.with_earlier_runs(path, lines), before_break=not chain_ok) if lines
+            "story": story_view(*story.with_earlier_runs(path, lines), before_break=not chain_ok) if lines
             else _no_story()}
 
 
@@ -581,7 +581,7 @@ def _no_story(error=""):
             "foot": []}
 
 
-def story_view(lines, before_break=False):
+def story_view(lines, earlier="", before_break=False):
     """The story section for the page: story.build on the lines that verified, every string through _text
     (controls and direction characters blanked). A failure here costs this one section, never the page."""
     try:
@@ -600,7 +600,8 @@ def story_view(lines, before_break=False):
             sections.append({"title": t(sec["title"]), "rows": [[t(c) for c in r] for r in sec["rows"]],
                              "more": t(sec.get("more", ""))})
     foot = [t(x) for x in (s["waiting"], s["digest"], "%s %s" % (s["cost"], s["gate"])) if x.strip()]
-    note = "From the %s before the break only." % _s(len(lines), "line") if before_break and lines else ""
+    note = " ".join(x for x in (_text(earlier, STORY_CLIP), "From the %s before the break only." % _s(
+        len(lines), "line") if before_break and lines else "") if x)
     return {"title": t(s["title"]), "scope": t(s["scope"]), "headline": t(s["headline"]), "halt": t(s["halt"]),
             "note": note, "error": "", "sections": sections, "foot": foot}
 

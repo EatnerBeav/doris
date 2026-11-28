@@ -129,6 +129,7 @@ class _Message:
         self.notices = []
         self.failed = []         # error words of calendar calls that came back failed
         self.booking = False     # a check of one of her bookings (ruling 17), not an email
+        self.addr = ""           # the sender's address, lower case, to end their offers on an opt-out
 
 
 # --- the story --------------------------------------------------------------------------------------
@@ -175,12 +176,16 @@ def build(lines):
         if m is None:
             p = _payload(line) if line is not None else {}
             thread = p.get("thread") if isinstance(p.get("thread"), str) else subject
-            who, check = _who(p), subject.startswith(BOOKING) or p.get("step") == "booking_check"
+            # her own check line, never the subject alone: a subject is a sender's Message-ID
+            who, check = _who(p), p.get("step") == "booking_check"
             if check:                   # told on the thread of the email that made the booking, under its name
-                made = messages.get(bookings.get(subject[len(BOOKING):], {}).get("subject"))
+                bid = p.get("booking_id") if isinstance(p.get("booking_id"), str) else subject[len(BOOKING):]
+                made = messages.get(bookings.get(bid, {}).get("subject"))
                 thread, who = (made.thread, made.who) if made is not None else (subject, "(one of her bookings)")
             m = messages[subject] = _Message(subject, who, thread)
             m.booking = check
+            addr = p.get("from_addr")
+            m.addr = addr.strip().lower() if isinstance(addr, str) else ""
             if thread not in by_thread:
                 by_thread[thread] = []
                 threads.append(thread)
@@ -266,7 +271,8 @@ def build(lines):
     held_all = [m for m in messages.values() if m.close is not None and m.close.get("kind") == "held"]
     held = [m for m in held_all if not m.booking]
     closed = [m for m in emails if m.close is not None and m.close.get("kind") == "decided"]
-    gone = len(held_all) - len(held)
+    gone = sum(1 for m in held_all if m.booking and _code(m.close) == "hold.owner_removed")
+    checks_held = len(held_all) - len(held) - gone
     answered = noreply = unconfirmed = 0
     for m in closed:
         template = _payload(m.close).get("template")
@@ -289,8 +295,9 @@ def build(lines):
         headline = "%s came in: %s, %d held for %s%s. %s on his calendar.%s %s." % (
             _plural(len(emails), "email"), handled, len(held), OWNER,
             ", %d not finished" % unfinished if unfinished else "", _plural(len(standing), "meeting"),
-            " %s he removed by hand %s held for him." % (_plural(gone, "booking"), "is" if gone == 1 else "are")
-            if gone else "", approved)
+            (" %s he removed by hand %s held for him." % (_plural(gone, "booking"), "is" if gone == 1 else "are")
+             if gone else "") + (" %s of her bookings held for him." % _plural(checks_held, "check")
+                                 if checks_held else ""), approved)
     elif inbox:
         headline = "No new mail: the inbox held %s, none of them new to her. %s." % (_plural(inbox, "message"), approved)
     else:
@@ -425,6 +432,9 @@ def _offer_state(offers, m):
     if outcome in OPENS:
         offers.pop(m.thread, None)
         offers[m.thread] = m
+    elif code in digest.STOP_CODES and m.addr:          # an opt-out ends every offer to that sender
+        for thread in [t for t, o in offers.items() if o.addr == m.addr or t == m.thread]:
+            offers.pop(thread)
     elif outcome in SHUTS or outcome.startswith("hold:") or code in digest.CLOSE_CODES or code in digest.STOP_CODES:
         offers.pop(m.thread, None)
 
@@ -675,40 +685,77 @@ def _read(path):
     return good, torn, result
 
 
-def _earlier_runs(path):
-    """The day's runs before this one that never finished (stopped, then resumed), oldest first, walking
-    back from this run to the last one that finished with its summary: [(path, lines, torn)], and the path
-    of an earlier run that did not verify (the walk stops there), or None. Only inside a runs folder."""
+MAX_EARLIER_RUNS = 20                            # a sandbox day is a few runs; the walk never reads more
+_STAMP = re.compile(r"(\d{8}T\d{6}Z)(?:-(\d+))?$")  # a run folder's name ends with its UTC start (new_run_dir)
+_READS = {}                                     # (path, mtime, size) -> _read's answer: the watch page polls
+
+
+def _order(name, when):
+    m = _STAMP.search(name)
+    return (m.group(1), int(m.group(2) or 1), when, name) if m else ("", 0, when, name)
+
+
+def _read_once(path):
+    st = os.stat(path)
+    key = (os.path.abspath(path), st.st_mtime, st.st_size)
+    if key not in _READS:
+        if len(_READS) > 4 * MAX_EARLIER_RUNS:
+            _READS.clear()
+        _READS[key] = _read(path)
+    return _READS[key]
+
+
+def _finished(run_lines):
+    """The day ended with this run: its summary written and no halt before it (as the demo's own
+    last_day_finished decides whether the next demo starts the day fresh)."""
+    kinds = [l.get("kind") for l in run_lines]
+    return "summary" in kinds and "halted" not in kinds
+
+
+def _earlier_runs(path, run_lines=None):
+    """The sandbox day's runs before this one that never finished (stopped, then resumed), oldest first,
+    walking back from this run to the last one that finished: [(path, lines, torn)], and the path of an
+    earlier run that did not verify (the walk stops there), or None. Only for a sandbox run inside a runs
+    folder: a live run's history has no day to bound it."""
     folder = os.path.dirname(os.path.dirname(os.path.abspath(path)))
-    if os.path.basename(folder) != "runs":
+    mode = next((l.get("mode") for l in run_lines or () if isinstance(l, dict)), None)
+    if os.path.basename(folder) != "runs" or mode != "sandbox":
         return [], None
-    mine = os.path.getmtime(path)
+    me = os.path.abspath(path)
+    mine = _order(os.path.basename(os.path.dirname(me)), os.path.getmtime(path))
     others = []
     for name in os.listdir(folder):
         other = os.path.join(folder, name, "receipts.jsonl")
-        if os.path.abspath(other) != os.path.abspath(path) and os.path.isfile(other):
-            when = os.path.getmtime(other)
-            if when < mine:
-                others.append((when, name, other))
+        if os.path.abspath(other) != me and os.path.isfile(other):
+            key = _order(name, os.path.getmtime(other))
+            if key < mine:
+                others.append((key, other))
     found = []
-    for _when, _name, other in sorted(others, reverse=True):
-        good, torn, result = _read(other)
+    for _key, other in sorted(others, reverse=True)[:MAX_EARLIER_RUNS]:
+        good, torn, result = _read_once(other)
         if not result.ok:
             return found[::-1], other
-        if any(l.get("kind") == "summary" for l in good):
+        if not good:                             # an empty file is no run
+            continue
+        if _finished(good):
             break
         found.append((other, good, torn))
     return found[::-1], None
 
 
+UNVERIFIED = "An earlier run of this day does not verify (%s), so this story starts after it."
+
+
 def with_earlier_runs(receipts_path, run_lines):
-    """This run's verified lines after those of the day's earlier stopped runs, so the watch page tells the
-    same day as lines(). On any trouble reading the earlier runs, this run's lines alone."""
+    """(this run's verified lines after those of the day's earlier stopped runs, a note naming an earlier
+    run that did not verify or ""), so the watch page tells the same day as lines(). On any trouble
+    reading the earlier runs, this run's lines alone."""
     try:
-        earlier, _unverified = _earlier_runs(receipts_path)
+        earlier, unverified = _earlier_runs(receipts_path, run_lines)
     except Exception:                            # noqa: BLE001 - the page shows this run, as it did before
-        return list(run_lines)
-    return [l for _p, done, _t in earlier for l in done] + list(run_lines)
+        return list(run_lines), ""
+    return ([l for _p, done, _t in earlier for l in done] + list(run_lines),
+            UNVERIFIED % paths.shown(unverified) if unverified else "")
 
 
 def lines(receipts_path, width=None):
@@ -729,7 +776,7 @@ def lines(receipts_path, width=None):
             result.first_bad_seq, result.reason.split(": ", 1)[-1], paths.command("verify"),
             _shown(paths.shown(receipts_path))), width)
     try:
-        earlier, unverified = _earlier_runs(receipts_path)
+        earlier, unverified = _earlier_runs(receipts_path, good)
     except OSError:
         earlier, unverified = [], None
     day = [l for _p, run_lines, _t in earlier for l in run_lines] + good
@@ -740,8 +787,7 @@ def lines(receipts_path, width=None):
         return [""] + _wrap("No summary: it could not be built from these receipts (%s). Check them with %s and "
                             "%s." % (exc.__class__.__name__, paths.command("verify"), paths.command("replay")), width)
     if unverified:
-        out += _wrap("An earlier run of this day does not verify (%s), so this story starts after it."
-                     % _shown(paths.shown(unverified)), width)
+        out += _wrap(UNVERIFIED % _shown(paths.shown(unverified)), width)
     cut = torn or any(t for _p, _l, t in earlier)
     if not earlier:
         said = ("Receipts: %d lines verified; the line after them was cut short." % len(good) if cut
