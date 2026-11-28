@@ -1356,7 +1356,7 @@ def run_traps(pack_dir, model_source="stub", state_root=None, traces_root=None, 
 def main(argv=None, deps=None):
     # type: (Optional[List[str]], Any) -> int
     """`python -m doris traps [path] [--model stub|replayed|live] [--answers FILE] [--record]`."""
-    ap = argparse.ArgumentParser(prog="python -m doris traps",
+    ap = argparse.ArgumentParser(prog="python3 -m doris traps",
                                  description="Run the Trap Pack through Doris, one item at a time on fresh state.")
     ap.add_argument("path", nargs="?", default=paths.TRAP_PACK, help="the pack folder (default tests/trap-pack/pack)")
     ap.add_argument("--model", default="stub", choices=TRAPS_MODEL_SOURCES, help="model source (default stub)")

@@ -58,6 +58,7 @@ CALENDAR_FAULTS = frozenset({"timeout-once", "timeout-twice", "read-fails", "slo
                              "write-unknown-present", "write-unknown-absent", "lookup-fails",
                              "remove-fails-once", "remove-fails-always"})
 MAIL_FAULTS = frozenset({"sent-unconfirmed"})
+TIMEOUT_FAULTS = frozenset({"timeout-once", "timeout-twice"})   # the calendar does not answer: a wait
 NEW_OFFER_TEMPLATES = frozenset({"T2", "T3", "T4", "T13", "T18"})   # each one is an offer record
 REPLY_TEMPLATES = ("T1", "T2", "T3", "T4", "T10", "T12", "T13", "T18")   # her one reply to a message
 # Her own booking for a message that a kill or a stop left part way: picked up again, never made again.
@@ -1862,7 +1863,10 @@ class _Run:
             who = "(sensitive mail, unread)"
         else:
             who = holds._name_line(e.msg.from_name or "") or e.msg.from_addr
-        sent = " %s sent." % template if template != "-" else ""
+        sent = ""
+        if template != "-":
+            name = templates.plain_name(template)
+            sent = " %s sent%s." % (template, " (%s)" % name if name else "")
         cost = ""
         if e.cost is not None and self.cfg.model_source != "stub":
             cost = " Model cost $%.4f%s." % (e.cost, " (recorded)" if self.cfg.model_source == "replayed" else "")
@@ -1871,8 +1875,10 @@ class _Run:
         if fault:
             done = "retried once" if e.retried else "recovered" if e.recovered else "no effect"
             staged = " Staged fault %s: %s." % (fault, done)
-        return "%s  %s: %s.%s %s%s%s" % (templates.fmt_pacific(self.now()), who, outcome, sent, why_["text"], staged,
-                                         cost)
+        text = why_["text"]
+        if self.cfg.model_source == "stub":     # no model ran: the terminal says stand-in, as replay does
+            text = stand_in_words(text)         # (the receipt keeps the listed why, word for word)
+        return "%s  %s: %s.%s %s%s%s" % (templates.fmt_pacific(self.now()), who, outcome, sent, text, staged, cost)
 
     # --- the digest ----------------------------------------------------------------------------
     def end_of_run_digest(self):
@@ -1947,9 +1953,17 @@ class _Run:
         action = Action(kind="send_digest", message_key="", thread_key="", template="S2", slots=ds,
                         to=[self.cfg.owner_addr], recipient_source="owner", body_text=body)
         if self.check(None, action).passed:
+            before = self.ledger.send(mid)
+            # recorded by an earlier run and past pending: deliver sends nothing, it only finds her copy
+            earlier = before is not None and before["state"] != "pending"
             if self.deliver(None, mid, "send_digest", "S2", self.cfg.owner_addr, raw, body, [self.cfg.owner_addr],
                             ds):
-                self.say("%s  Digest sent to the owner: %s" % (templates.fmt_pacific(now), body.split("\n", 1)[0]))
+                if earlier:             # this date's digest went in an earlier run: no send is claimed
+                    self.say("%s  Digest already sent to the owner earlier today; not sent twice."
+                             % (templates.fmt_pacific(now),))
+                else:
+                    self.say("%s  Digest sent to the owner: %s"
+                             % (templates.fmt_pacific(now), body.split("\n", 1)[0]))
 
     # --- staged faults (sandbox only, labelled simulated on the observed line) ------------------
     def arm(self, e):
@@ -1962,11 +1976,28 @@ class _Run:
             self.error(e, "arm", ValueError("unknown fault %r" % (fault,)))
             return
         target.arm(fault, **params)
+        if fault in TIMEOUT_FAULTS:         # said before the wait starts, so the silence never reads as a hang
+            try:
+                waits = float(params.get("seconds", getattr(target, "timeout_s", 0.0)))
+            except (TypeError, ValueError):
+                return
+            self.say("%s  Staged fault %s (simulated): the calendar will not answer her next call for %g s. "
+                     "She waits, then retries once after %g s." % (templates.fmt_pacific(self.now()), fault, waits,
+                                                                   self.wait_s))
 
     def disarm(self):
         for adapter in (self.calendar, self.mail):
             if hasattr(adapter, "disarm"):
                 adapter.disarm()
+
+
+def stand_in_words(text):
+    """A why's text for the terminal of a run the built-in stand-in (stub) read: where the listed
+    text says the model read or agreed, it says the stand-in. Spend and cap wording is left as it is."""
+    for said, shown in (("parser and model agree", "parser and stand-in agree"), ("The model", "The stand-in"),
+                        ("the model", "the stand-in")):
+        text = text.replace(said, shown)
+    return text
 
 
 def run(cfg):

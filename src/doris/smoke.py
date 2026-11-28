@@ -655,9 +655,10 @@ def _end_to_end(e2e, mail, out, file_request=False):
 # The command
 # ------------------------------------------------------------------------------------------------
 def _parser():
-    ap = argparse.ArgumentParser(prog="python -m doris smoke",
+    ap = argparse.ArgumentParser(prog="python3 -m doris smoke",
                                  description="Every live adapter call once, against the real servers.")
-    ap.add_argument("--env", default=paths.LIVE_ENV, metavar="PATH", help="the env file (default %(default)s)")
+    ap.add_argument("--env", default=paths.LIVE_ENV, metavar="PATH",
+                    help="the env file (default %(default)s, on our server; never asked of a judge)")
     ap.add_argument("--send-to", metavar="ADDRESS",
                     help="also send one test message to %s" % " or ".join(SEND_TO_ALLOWED))
     return ap

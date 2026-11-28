@@ -323,6 +323,33 @@ class TheTerminalLines(unittest.TestCase):
         (sam,) = [l for l in self.said if "Sam Rivera" in l]
         self.assertIn("Staged fault lands-between: recovered.", sam)
 
+    def test_a_staged_calendar_timeout_is_announced_before_the_wait_starts(self):
+        # the demo's wait is 10 s (caps) plus the retry wait: a line before it, so it never reads as a hang
+        at = next(i for i, l in enumerate(self.said) if "Marcus Lee: book" in l)
+        self.assertEqual(self.said[at - 1],
+                         "Tue Dec 1, 9:40 AM Pacific  Staged fault timeout-once (simulated): the calendar will not "
+                         "answer her next call for 1.5 s. She waits, then retries once after 2 s.")
+        self.assertEqual(len([l for l in self.said if "(simulated): the calendar will not answer" in l]), 1)
+
+    def test_a_sent_template_is_named_in_plain_words_after_its_code(self):
+        (priya,) = [l for l in self.said if "Priya Raman: book" in l]
+        self.assertIn("Priya Raman: book. T1 sent (booking confirmation). ", priya)
+        (move,) = [l for l in self.said if "Priya Raman: move" in l]
+        self.assertIn(" T18 sent (%s). " % templates.PLAIN_NAMES["T18"], move)
+
+    def test_under_the_stub_no_line_says_a_model_read_or_agreed(self):
+        (priya,) = [l for l in self.said if "Priya Raman: book" in l]
+        self.assertTrue(priya.endswith("One clear time, parser and stand-in agree, and it is available: book."), priya)
+        self.assertEqual([l for l in self.said if "model" in l.lower()], [])
+
+    def test_the_receipts_keep_the_why_as_listed(self):
+        tmp = tempfile.mkdtemp(prefix="doris-loop-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        book = [l for l in sandbox_run(tmp) if (l.get("why") or {}).get("code") == "policy.book_clear_time"]
+        self.assertTrue(book)
+        self.assertEqual({l["why"]["text"] for l in book},
+                         {"One clear time, parser and model agree, and it is available: book."})
+
     def test_the_stub_shows_no_model_cost(self):
         self.assertFalse([l for l in self.said if "Model cost" in l])
 

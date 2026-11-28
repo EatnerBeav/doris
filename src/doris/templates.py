@@ -46,6 +46,27 @@ APPROVED = frozenset({"T1", "T2", "T3", "T4", "T9", "T10", "T12", "T13", "T18", 
 PROSPECT_TEMPLATES = frozenset(t for t in APPROVED if t.startswith("T"))
 ICS_METHOD = {"T1": "PUBLISH", "T10": "CANCEL", "T18": "CANCEL"}   # templates that carry an .ics
 
+# What each template says, in a few plain words, for a terminal line beside its code ("T1 sent
+# (booking confirmation)"). Taken from the approved text below; never sent, never in a receipt.
+PLAIN_NAMES = {
+    "T1": "booking confirmation",                        # "You're booked with Shane Bornstein for ..."
+    "T2": "times offered",                               # "Shane is available at any of these ..."
+    "T3": "three more times offered",                    # "Here are three more times Shane is available ..."
+    "T4": "that time is not available, others offered",  # "Shane isn't available at ..., but is available at ..."
+    "T9": "one more try",                                # "One more try: Shane is still available at ..."
+    "T10": "cancellation confirmed",                     # "Done. Your call with Shane on ... is cancelled ..."
+    "T12": "offered times listed again",                 # "I couldn't match that ..., so here they are again"
+    "T13": "one time offered",                           # "Shane is available at ... Reply "yes" ..."
+    "T18": "cancellation confirmed, new times offered",  # T10's first line, then "If you'd like another time ..."
+    "S1": "hold notice to the owner",
+    "S2": "digest to the owner",
+}
+
+
+def plain_name(template):
+    """The template's plain name, or "" for a code that is not an approved template."""
+    return PLAIN_NAMES.get(template, "")
+
 # --- S1 hold reasons ------------------------------------------------------------------------
 # The twenty-one approved phrases (templates.md "S1 hold reasons": fifteen Nov 25-26, six more
 # Nov 27, decision 68), plus hold.unknown_result on the approved calendar phrase (decision 61) and
