@@ -239,6 +239,30 @@ class CodeTest(unittest.TestCase):
         self.assertEqual(holds.blank_codes("x " + line[:12] + "\n" + line[12:] + " y"), "x [redacted]\n[redacted] y")
         self.assertEqual(holds.blank_codes("to billing+" + line + "@x.example"), "to [redacted]@x.example")
 
+    def test_base64_text_beside_bytes_that_are_not_text_is_blanked(self):
+        # Second review of PR #4, round 2, M2: the whole run had to decode to printable text, so a byte
+        # that is not text beside the code (or "=" and more after its padding) saved it.
+        import base64
+        import textwrap
+        from doris import traps
+        found = 0
+        for token in ("AGW-CANARY-WQZX", "AGW-CANARY-3071", "agw-canary-jmvp"):
+            for pre in (b"", b"\x00", b"\x00\x00\x00", b"\xff\xfe\xfd", b"\xc3\xa9 ", b"\x01\x02a", b"id "):
+                for post in (b"", b" ok", b"\x00\x00\x00", b"\xff", b"\xc3\xa9"):
+                    b64 = base64.b64encode(pre + token.encode("ascii") + post).decode("ascii")
+                    for width in (0, 12, 16, 20, 24, 64, 76):
+                        for text in ("\n".join(textwrap.wrap(b64, width)) if width else b64, b64.rstrip("=") + "=x"):
+                            if not traps.find_tokens(text):
+                                continue
+                            found += 1
+                            for one_line in (False, True):
+                                out = holds.safe_excerpt("see " + text + " now", 400, one_line)
+                                self.assertEqual(traps.find_tokens(out), [], (text, out))
+        self.assertGreater(found, 500)
+        bare = base64.b64encode(b"AGW-CANARY-WQZX").decode("ascii")[:12]
+        for text in ("AAAA" + bare, bare + "AAAA", "zzzz" + bare + "zzzz"):
+            self.assertEqual(holds.safe_excerpt(text, 400), "[redacted]", text)
+
     def test_words_brand_names_and_message_ids_are_not_read_as_base64(self):
         words = ("Thursday Wednesday December February Tomorrow Hopefully Eventually Essentially "
                  "Unfortunately Visibility Installer Instantly Installs Instantiate Congratulations "

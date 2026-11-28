@@ -155,18 +155,23 @@ def _groups(m):
     return REDACTED if all(_mixed(g) for g in re.split(r"[ :]", m.group(0))) else m.group(0)
 
 
-# Base64 text (second Fable review of PR #4, M2): a run of 8 or more base64 characters, capitals and
-# small letters both, that decodes to printable text at some alignment (0 to 3 leading characters
-# dropped): 6 bytes or more, all printable. Each line is judged alone, so a line wrap doesn't save
-# the first line. A run of letters only must give 9 bytes (12 characters), or ordinary words would
-# go (Eventually, Installs and Visibility each decode to 6 printable bytes); a run joined by "+" or
-# "/" is also read piece by piece (billing+ and a base64 code).
-_B64 = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{8,}=*(?![A-Za-z0-9+/=])")
+# Base64 text (second Fable review of PR #4, M2, and its second round): a run of 8 or more base64
+# characters, capitals and small letters both, that decodes to printable text at some alignment (0 to
+# 3 leading characters dropped): the whole of it, if that is 6 bytes or more, or any 9 bytes in a row
+# of it, so bytes that are not text beside a code don't save it. Each line is judged alone, so a line
+# wrap doesn't save the first line. A run of letters only must give 9 bytes (12 characters), or
+# ordinary words would go (Eventually, Installs and Visibility each decode to 6 printable bytes). A
+# run is read with any "=" in it or after it and blanked whole, so padding and what follows it
+# (aGVsbG8...==1, aGVsbG8...=x) don't save it either. It is also read piece by piece, split at "=",
+# "+" and "/" (key=..., billing+ and a base64 code).
+_B64 = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/=]{8,}(?![A-Za-z0-9+/=])")
 _TEXT_BYTES = bytes(range(32, 127)) + b"\t\n\r"
+_TEXT_RUN = re.compile(rb"[\x20-\x7e\t\n\r]{9}")
 
 
 def _base64_text(run):
-    pieces = [run] + (re.split(r"[+/]", run) if "+" in run or "/" in run else [])
+    pieces = [p for p in re.split(r"=+", run) if p]
+    pieces += [p for piece in pieces if "+" in piece or "/" in piece for p in re.split(r"[+/]", piece)]
     for piece in pieces:
         if len(piece) < 8 or not any(c.isupper() for c in piece) or not any(c.islower() for c in piece):
             continue
@@ -180,13 +185,13 @@ def _base64_text(run):
                 data = base64.b64decode(chunk)
             except (binascii.Error, ValueError):
                 continue
-            if not data.translate(None, _TEXT_BYTES):
+            if not data.translate(None, _TEXT_BYTES) or _TEXT_RUN.search(data):
                 return True
     return False
 
 
 def _b64(m):
-    return REDACTED if _base64_text(m.group(0).rstrip("=")) else m.group(0)
+    return REDACTED if _base64_text(m.group(0)) else m.group(0)
 
 
 def _secret(m):
