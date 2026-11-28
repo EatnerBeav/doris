@@ -1,7 +1,10 @@
 """templates.py: the only sentences Doris can send, filled by code from typed slots."""
 import json
 import os
+import random
+import unicodedata
 import unittest
+import urllib.parse
 from unittest import mock
 
 from doris import templates, why
@@ -124,6 +127,61 @@ class RedactLinkTest(Base):
             with self.subTest(text=text):
                 self.assertTrue(templates.has_link(text))
         self.assertFalse(templates.has_link("https://meet.example/other-room and [meeting link]"))
+
+    def test_the_link_a_reader_sees_through_invisibles_wide_letters_or_an_empty_tag_is_found(self):
+        """Review of 7e1a9fa, item 3: a kept copy kept the link written with a zero-width space, a soft
+        hyphen, fullwidth letters or split by an empty HTML tag. has_link reads text as a reader sees
+        it too (NFKC-folded, invisible and format characters dropped, tags taken out), so such a copy
+        is withheld; redact_link replaces the link in the text as a reader sees it, or blanks the whole
+        text where only an unescaped or untagged form shows it."""
+        def wide(text):
+            return "".join(chr(ord(c) + 0xFEE0) if "!" <= c <= "~" else c for c in text)
+        shown = templates.LINK_SHOWN
+        cases = [
+            ("Join https://meet.example/redact-\u200broom now", "Join [meeting link] now"),
+            ("https://meet.example/redact-ro\u00adom", shown), ("https://meet.example/redact-\u2060ro\ufeffom", shown),
+            ("HTTPS://MEET.EXAMPLE/REDACT-\u200cROOM", shown), (wide(self.ROOM), shown),
+            ("Room: meet.example/" + wide("redact") + "-room", "Room: [meeting link]"),
+            (wide("Join %s now" % self.ROOM), "Join [meeting link] now"),
+            ("https://meet.example/redact-ro&shy;om", shown), ("https://meet.example/redact-ro%C2%ADom", shown),
+            ("https://meet.example/redact-&#8203;room", shown), ("https://meet.example/redact-%E2%80%8Broom", shown),
+            ("https://meet.example/redact-<b></b>room", shown), ("<p>https://meet.example/redact-<!-- x -->room</p>", shown),
+            ("Join https://meet.example/red<span\nclass=x>act-room</span> now", shown),
+            ("https://meet.example/redact-\u200b<i></i>room", shown),
+        ]
+        for text, want in cases:
+            with self.subTest(text=text):
+                self.assertTrue(templates.has_link(text))
+                self.assertEqual(templates.redact_link(text), want)
+        for text in ("https://meet.example/other-\u200broom", wide("https://meet.example/other-room"),
+                     "redact-<b></b>room, with no host", "<b>meet.example</b> and redact-room", "a\u200bb\u00adc",
+                     wide("https") + " alone"):
+            with self.subTest(text=text):
+                self.assertFalse(templates.has_link(text))
+                self.assertEqual(templates.redact_link(text), text)
+
+    def test_the_views_drop_every_format_character_and_undo_escapes_as_urllib_does(self):
+        """has_link's reader's view drops every format character (Cf) this Python's Unicode has, and its
+        one-pass %-unescape reads as urllib.parse.unquote does (which takes seconds on a binary part)."""
+        hidden = [chr(c) for c in range(0x110000) if unicodedata.category(chr(c)) == "Cf"]
+        self.assertGreater(len(hidden), 150)
+        self.assertEqual([c for c in hidden if templates._as_seen("a" + c + "b") != "ab"], [])
+        rnd = random.Random(7)
+        parts = ("%", "%%", "%4", "%41", "%C3", "%A9", "%E2%80%8B", "%ZZ", "%c2%ad", "%F0%9F", "%98%80", "%ff", "a",
+                 "\u00e9", "\u200b", "\u4e2d", "/", "%2F", " ")
+        for _ in range(20000):
+            text = "".join(rnd.choice(parts) for _ in range(rnd.randint(0, 10)))
+            self.assertEqual(templates._unquote(text), urllib.parse.unquote(text), text)
+
+    def test_a_json_answer_keeps_its_shape_when_the_link_is_cut_as_a_reader_sees_it(self):
+        """Folding the whole text would turn a fullwidth quote mark into JSON's own: each string is
+        redacted on its own instead, so a replay reads the same answer."""
+        quote = "".join(chr(ord(c) + 0xFEE0) for c in "https://meet.example/redact-room") + " \uff02hi\uff02"
+        raw = json.dumps({"cls": "meeting_request", "side_question_quote": quote, "pick": None}, ensure_ascii=False)
+        out = templates.redact_json_text(raw)
+        self.assertEqual(json.loads(out), {"cls": "meeting_request", "side_question_quote": '[meeting link] "hi"',
+                                           "pick": None})
+        self.assertFalse(templates.has_link(out))
 
 
 class FormatTest(Base):

@@ -18,11 +18,8 @@ import unicodedata
 from . import caps, templates
 
 # Characters a reader never sees, removed before the 400 characters are counted (decision 61):
-# Unicode's default-ignorable code points (zero-width, direction and format characters, the soft
-# hyphen, fillers, variation selectors, tags), and every other format character (Cf) with them.
-_INVISIBLES = ("\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e"
-               "\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3"
-               "\U0001d173-\U0001d17a\U000e0000-\U000e0fff")
+# templates.INVISIBLES, the set has_link drops too, and every other format character (Cf) with them.
+_INVISIBLES = templates.INVISIBLES
 _CONTROLS = "\x00-\x08\x0b\x0c\x0e-\x1f\x7f"
 _INVISIBLE = re.compile("[" + _INVISIBLES + "]")
 _CONTROL = re.compile("[" + _CONTROLS + "]")

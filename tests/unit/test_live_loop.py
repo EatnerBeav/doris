@@ -546,6 +546,40 @@ class MeetingLinkTest(LiveFixture):
                                                             + ".eml" for n in (1, 2)))
         self.assertEqual([name for name, data in self.files() if room_in(data)], [])
 
+    def test_a_copy_that_shows_the_link_only_as_a_reader_sees_it_is_not_kept(self):
+        """Review of 7e1a9fa, item 3: the link written with a zero-width space, a soft hyphen or
+        fullwidth letters, or split by an empty HTML tag, was kept in her copy byte for byte."""
+        self.answer("fyi")
+        self.go(fresh=True, model_source="live")
+        wide = "".join(chr(ord(c) + 0xFEE0) if c.isalnum() else c for c in "live-loop-room")
+        html_part = b"Content-Type: text/plain"
+        mails = {
+            5: priya_mail(5, ("Notes. Join: https://meet.example/live-​loop-room\r\n").encode("utf-8"), cte="8bit"),
+            6: priya_mail(6, b"Notes. Join: https://meet.example/live-lo=C2=ADop-room\r\n", cte="quoted-printable"),
+            7: priya_mail(7, base64.b64encode(("Notes. Join: meet.example/%s\r\n" % wide).encode("utf-8")) + b"\r\n",
+                          cte="base64"),
+            8: priya_mail(8, b"<p>Notes. Join: https://meet.example/live-<b></b>loop-room</p>\r\n").replace(
+                html_part, b"Content-Type: text/html"),
+            9: priya_mail(9, ("Notes. Another room: https://meet.example/other-​room\r\n").encode("utf-8"),
+                          cte="8bit"),
+        }
+        for raw in mails.values():
+            self.inbox.add(raw, u(2026, 12, 1, 16, 2))
+        self.clock = u(2026, 12, 1, 16, 10)
+        s = self.go(model_source="live")
+        self.assertTrue(s.verify_ok)
+        seen = self.observed(s)
+        for n in (5, 6, 7, 8):
+            with self.subTest(mail=n):
+                withheld = seen["live-link-%d@northwind.example" % n]
+                self.assertNotIn("message_copy", withheld)
+                self.assertEqual(withheld["copy_withheld"], "meeting_link")
+        other = seen["live-link-9@northwind.example"]
+        with open(os.path.join(s.run_dir, other["message_copy"]), "rb") as fh:
+            self.assertEqual(fh.read(), mails[9])                            # another room: kept byte for byte
+        copies = os.path.join(s.run_dir, "messages")
+        self.assertEqual(os.listdir(copies), [hashlib.sha256(mails[9]).hexdigest()[:loop.COPY_NAME_HEX] + ".eml"])
+
 
 def sent_lookups(summary):
     """(the wait before it, found) for each look in Sent, in order."""
