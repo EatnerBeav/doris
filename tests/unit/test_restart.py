@@ -17,9 +17,10 @@ from unittest import mock
 
 from doris import compose
 from doris import ledger as ledger_mod
-from doris import loop, paths, receipts, supervisor
+from doris import loop, receipts, supervisor
 from doris.adapters import sandbox as sandbox_mod
 from doris.shapes import MailError
+from tests.unit import demo_sandbox
 
 OWNER = "whizz@fastmail.com"
 DORIS = "doris.htm@fastmail.com"
@@ -31,9 +32,8 @@ class Crash(BaseException):
 
 def mini_sandbox(tmp, names):
     """A copy of the demo sandbox holding only these inbox files (and their facts)."""
-    root = os.path.join(tmp, "sandbox")
-    shutil.copytree(paths.SANDBOX, root, ignore=shutil.ignore_patterns("doris-*.ics", "staged-*.ics", "*.eml.sent"))
-    inbox, outbox = os.path.join(root, "inbox"), os.path.join(root, "outbox")
+    root = demo_sandbox.copy_committed(os.path.join(tmp, "sandbox"))
+    inbox = os.path.join(root, "inbox")
     for name in os.listdir(inbox):
         if name.endswith(".eml") and name not in names:
             os.remove(os.path.join(inbox, name))
@@ -41,9 +41,6 @@ def mini_sandbox(tmp, names):
         facts = json.load(fh)
     with open(os.path.join(inbox, "facts.json"), "w", encoding="utf-8") as fh:
         json.dump({k: v for k, v in facts.items() if k in names}, fh)
-    for name in os.listdir(outbox):
-        if name != ".gitkeep":
-            os.remove(os.path.join(outbox, name))
     return root
 
 

@@ -6,8 +6,9 @@ on the wrong email, a busy block in the wrong place, an address that is not the 
 fixtures drifting from tests/tools/build_demo_fixtures.py.
 
 Every expected value below is copied from demo-day.md by hand, not computed by the generator.
-The tests tolerate what a demo run adds (her doris-*.ics bookings, her sends in outbox/) and a judge's own
-.eml dropped in after the demo's fifteen.
+The tests tolerate what a demo run adds (her doris-*.ics bookings, the staged-*.ics event a staged fault
+puts on the calendar, her sends in outbox/; see demo_sandbox.py) and a judge's own .eml dropped in after the
+demo's fifteen, with its line in facts.json, as sandbox/README.md says.
 """
 
 import datetime as dt
@@ -19,8 +20,11 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import tempfile
 import unittest
+
+from tests.unit import demo_sandbox
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -178,8 +182,28 @@ def read_ics(path):
 
 
 def owner_ics_files():
-    """The owner's events: every .ics but her own bookings (doris-*), which a demo run adds."""
-    return sorted(f for f in os.listdir(CALENDAR) if f.endswith(".ics") and not f.startswith("doris-"))
+    """The owner's events: every .ics but what a demo run adds (her doris-* bookings, staged-* events)."""
+    return demo_sandbox.owner_ics_files(CALENDAR)
+
+
+def read_facts(inbox=INBOX):
+    """inbox/facts.json read as the sandbox adapter reads it (UTF-8 JSON), or an AssertionError that
+    says what is wrong with the file. Only the checks of the committed file read it: every test's
+    sandbox copy takes facts.json from the generator (demo_sandbox.copy_committed)."""
+    raw = read_bytes(os.path.join(inbox, "facts.json"))
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except ValueError as exc:            # a JSONDecodeError or a UnicodeDecodeError
+        bom = (" It starts with a UTF-8 byte order mark, as Notepad's \"UTF-8 with BOM\" saves it: save "
+               "it as UTF-8 without one." if raw.startswith(b"\xef\xbb\xbf") else "")
+        raise AssertionError("inbox/facts.json does not parse (%s), so `python -m doris demo` cannot read "
+                             "the inbox either.%s" % (exc, bom))
+
+
+def judges_emails(inbox=INBOX):
+    """A judge's own .eml files in inbox/ (sandbox/README.md): every one but the demo's fifteen, named
+    in any case, as the sandbox adapter reads mail (demo_sandbox.mail_names)."""
+    return [f for f in demo_sandbox.mail_names(inbox) if f not in NAMES]
 
 
 def pacific_utc(hhmm):
@@ -191,7 +215,7 @@ def pacific_utc(hhmm):
 class InboxTest(unittest.TestCase):
 
     def test_the_fifteen_demo_emails_come_first_in_arrival_order(self):
-        names = sorted(f for f in os.listdir(INBOX) if f.endswith(".eml"))
+        names = demo_sandbox.mail_names(INBOX)
         self.assertEqual(names[:15], NAMES)
         # A judge's own email may follow, but must not sort in among the demo's.
         for extra in names[15:]:
@@ -367,11 +391,10 @@ class ThreadingTest(unittest.TestCase):
 class FactsTest(unittest.TestCase):
 
     def setUp(self):
-        with open(os.path.join(INBOX, "facts.json"), "rb") as fh:
-            self.facts = json.loads(fh.read().decode("utf-8"))
+        self.facts = read_facts()
 
     def test_every_key_names_a_real_file_and_every_demo_email_has_facts(self):
-        on_disk = set(f for f in os.listdir(INBOX) if f.endswith(".eml"))
+        on_disk = set(demo_sandbox.mail_names(INBOX))
         self.assertLessEqual(set(self.facts), on_disk)
         self.assertLessEqual(set(NAMES), set(self.facts))
 
@@ -455,21 +478,121 @@ class ClockAndOutboxTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(SANDBOX, "README.md")))
 
 
-class GeneratorTest(unittest.TestCase):
+class RebuildCheck:
+    """The generator's build against the fixtures in a sandbox folder, file for file."""
 
-    def test_generator_rebuilds_the_committed_fixtures_byte_for_byte(self):
+    def assert_the_generator_rebuilds(self, sandbox):
         spec = importlib.util.spec_from_file_location("build_demo_fixtures", GENERATOR)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        inbox = os.path.join(sandbox, "inbox")
         with tempfile.TemporaryDirectory() as tmp:
             written = module.build(tmp)
             self.assertTrue(written)
             for rel in written:
                 parts = rel.split("/")
-                self.assertEqual(read_bytes(os.path.join(tmp, *parts)),
-                                 read_bytes(os.path.join(SANDBOX, *parts)), rel)
+                built, on_disk = read_bytes(os.path.join(tmp, *parts)), read_bytes(os.path.join(sandbox, *parts))
+                if rel == "inbox/facts.json":
+                    self.assert_the_demos_facts_are_the_generators(built, on_disk, inbox)
+                else:
+                    self.assertEqual(built, on_disk, rel)
             built_ics = sorted(os.listdir(os.path.join(tmp, "calendar")))
-            self.assertEqual(built_ics, owner_ics_files())
+            self.assertEqual(built_ics, demo_sandbox.owner_ics_files(os.path.join(sandbox, "calendar")))
+
+    def assert_the_demos_facts_are_the_generators(self, built, on_disk, inbox):
+        facts = read_facts(inbox)            # one that does not parse fails here, and says why
+        if not judges_emails(inbox):
+            self.assertEqual(built, on_disk, "inbox/facts.json")
+            return
+        # A judge who follows sandbox/README.md has added a line for each email of theirs, so the file
+        # is no longer the committed bytes: every other line must still be exactly the generator's.
+        theirs = set(facts) - set(NAMES)
+        self.assertLessEqual(theirs, set(judges_emails(inbox)), "facts.json lines for no judge's .eml")
+        self.assertEqual({name: value for name, value in facts.items() if name not in theirs},
+                         json.loads(built.decode("ascii")), "inbox/facts.json")
+
+
+class GeneratorTest(RebuildCheck, unittest.TestCase):
+
+    def test_generator_rebuilds_the_committed_fixtures_byte_for_byte(self):
+        self.assert_the_generator_rebuilds(SANDBOX)
+
+
+class GeneratorTestWithAJudgesMail(RebuildCheck, unittest.TestCase):
+    """GeneratorTest's check on a temporary copy of the committed sandbox, never the repository's own:
+    a judge's own .eml and its line in facts.json pass; a changed demo fact, a line for a file that is
+    not there, the demo's facts laid out another way with no judge's mail present, or a facts.json that
+    does not parse (a byte order mark, a trailing comma) do not, and the last says why."""
+
+    JUDGE = "14-robin.eml"
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp(prefix="doris-fixtures-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.sandbox = demo_sandbox.copy_committed(os.path.join(tmp, "sandbox"))
+        self.inbox = os.path.join(self.sandbox, "inbox")
+        with open(os.path.join(self.inbox, "facts.json"), encoding="utf-8") as fh:
+            self.facts = json.load(fh)
+
+    def judge_adds_their_email(self, name=JUDGE):
+        with open(os.path.join(self.inbox, name), "wb") as fh:
+            fh.write(b"From: Robin Vale <robin@judges-own.example>\r\nTo: whizz@fastmail.com\r\n"
+                     b"Subject: A walk-through\r\n\r\nCould Shane show our team how this works?\r\n")
+        self.facts[name] = {"forwarded": "yes"}
+
+    def write_facts(self, **layout):
+        with open(os.path.join(self.inbox, "facts.json"), "w", encoding="utf-8") as fh:
+            json.dump(self.facts, fh, **layout)
+
+    def test_the_copy_passes_as_it_is(self):
+        self.assert_the_generator_rebuilds(self.sandbox)
+
+    def test_a_line_for_a_judges_own_email_passes(self):
+        self.judge_adds_their_email()
+        self.write_facts(indent=2)
+        self.assert_the_generator_rebuilds(self.sandbox)
+
+    def test_a_judges_email_named_in_capitals_passes(self):
+        # Windows and some mail apps save "14-Robin.EML"; the sandbox adapter reads it as mail.
+        self.judge_adds_their_email("14-Robin.EML")
+        self.write_facts(indent=2)
+        self.assertEqual(judges_emails(self.inbox), ["14-Robin.EML"])
+        self.assert_the_generator_rebuilds(self.sandbox)
+
+    def test_a_changed_demo_fact_fails_with_a_judges_email_there(self):
+        self.judge_adds_their_email()
+        self.facts["07-marcus-pick.eml"]["fault"] = "timeout-twice"
+        self.write_facts(indent=2)
+        with self.assertRaisesRegex(AssertionError, "inbox/facts.json"):
+            self.assert_the_generator_rebuilds(self.sandbox)
+
+    def test_a_line_for_a_file_that_is_not_there_fails(self):
+        self.judge_adds_their_email()
+        self.facts["15-nobody.eml"] = {"forwarded": "yes"}
+        self.write_facts(indent=2)
+        with self.assertRaisesRegex(AssertionError, "lines for no judge's .eml"):
+            self.assert_the_generator_rebuilds(self.sandbox)
+
+    def test_the_demos_facts_laid_out_another_way_fail_with_no_judges_email(self):
+        self.write_facts(indent=1, sort_keys=True)
+        with self.assertRaisesRegex(AssertionError, "inbox/facts.json"):
+            self.assert_the_generator_rebuilds(self.sandbox)
+
+    def test_facts_saved_with_a_byte_order_mark_fail_and_say_so(self):
+        path = os.path.join(self.inbox, "facts.json")
+        raw = read_bytes(path)
+        with open(path, "wb") as fh:
+            fh.write(b"\xef\xbb\xbf" + raw)      # what Notepad's "UTF-8 with BOM" puts in front
+        with self.assertRaisesRegex(AssertionError, r"inbox/facts\.json does not parse(.|\n)*byte order mark"):
+            self.assert_the_generator_rebuilds(self.sandbox)
+
+    def test_facts_with_a_trailing_comma_fail_and_say_so_with_a_judges_email_there(self):
+        self.judge_adds_their_email()
+        text = json.dumps(self.facts, indent=2)
+        with open(os.path.join(self.inbox, "facts.json"), "w", encoding="utf-8") as fh:
+            fh.write(text[:-1].rstrip() + ",\n}\n")
+        with self.assertRaisesRegex(AssertionError, r"inbox/facts\.json does not parse"):
+            self.assert_the_generator_rebuilds(self.sandbox)
 
 
 class ContractCrossCheckTest(unittest.TestCase):
