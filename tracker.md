@@ -25,5 +25,9 @@ Status words: **done** = in the code on main and tested; **built** = in the code
 | 17 | Live booking | Autonomy, Usefulness | blocked on item 1 | Kickoff (Wolf) | Sat 2:00 PM |
 | 18 | Overnight run | Autonomy, Reliability, never cut | blocked on item 17 | Kickoff (Wolf) | Sat 8:00 PM start |
 | 19 | Feature freeze and the video | Demo, Kill switch +1 | not started | Kickoff (Wolf) with Shane | Sun evening |
+| 20 | Recorded answers from a real keyed demo run, so `demo` replays a real model (today it falls back to the keyword stub) | Autonomy, honesty | not started: a keyed demo run on the server after PR #2 merges, its answers and live trace committed from there; recorded again at the freeze, since answers replay only on the code they ran on | Kickoff (Wolf) | Sat 12:00 PM, again Sun at freeze |
+| 21 | Follow-up nudge on an unanswered offer (T9) | Usefulness | not started: marked pending in AGENT.md | New thread after PR #2 merges | Sat 2:00 PM |
+| 22 | Ruling 17's once-a-cycle check for a booking gone from the calendar | Reliability | not started: today it runs only on a resumed booking; marked pending in AGENT.md | New thread after PR #2 merges | Sat 2:00 PM |
+| 23 | Only the supervisor starts a process (a source-tree test for SAFETY's deploy row) | Guardrails +1 | in progress | Draft SAFETY.md and AGENT.md | Sat 10:00 AM |
 
-Open pull requests: #2 `live` (live adapters, live loop, digest, kill-switch hardening; JMAP sending lands here), #5 `demo-then-tests` (tests pass after a judge's demo). Trap Pack run 2 sits on branch `trap-pack-run-2`, unchanged, as it ran.
+Open pull requests: #2 `live` (live adapters, live loop, digest, kill-switch hardening; JMAP sending lands here), #5 `demo-then-tests` (tests pass after a judge's demo), #6 this tracker, #7 SAFETY.md and AGENT.md (base `live`). Trap Pack run 2 sits on branch `trap-pack-run-2`, unchanged, as it ran.
