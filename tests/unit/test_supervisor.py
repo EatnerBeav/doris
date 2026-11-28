@@ -43,6 +43,27 @@ class StateDirTest(unittest.TestCase):
         return path
 
 
+class RefusedReads:
+    """The supervisor's open() with the first `times` reads of a HALT that is there refused
+    (PermissionError), as Windows refuses them while another process replaces the file (review of
+    7e1a9fa, item 12); the waits between its tries are kept, not slept."""
+
+    def __init__(self, test, times):
+        self.left, self.refused, self.waits = times, 0, []
+        real = open
+
+        def windows_open(path, *args, **kw):
+            if os.path.basename(str(path)) == supervisor.HALT_NAME and os.path.exists(path) and self.left > 0:
+                self.left -= 1
+                self.refused += 1
+                raise PermissionError(13, "Access is denied", str(path))
+            return real(path, *args, **kw)
+        for patch in (mock.patch.object(supervisor, "open", windows_open, create=True),
+                      mock.patch.object(supervisor, "_pause", self.waits.append)):
+            patch.start()
+            test.addCleanup(patch.stop)
+
+
 # ------------------------------------------------------------------------------------------
 # Halt files: HALT (ours, written atomically) and STOP (the user's, only ever read)
 # ------------------------------------------------------------------------------------------
@@ -70,6 +91,32 @@ class HaltCauseTest(StateDirTest):
         supervisor.request_stop(self.mode, "budget_cap")
         supervisor.request_stop(self.mode, "cli")
         self.assertEqual(supervisor.halt_cause(self.mode), "budget_cap")
+
+    def test_a_halt_file_caught_mid_replace_is_read_again_a_few_short_tries(self):
+        """Review of 7e1a9fa, item 12: Windows refuses to open HALT while another process replaces it.
+        Every reader but the supervisor's poll reads again, HALT_READ_TRIES in all, HALT_READ_WAIT_S
+        apart, before it calls the file unreadable: the worker's halt checks (G1), request_stop (so
+        the first cause stays), the start's refusal and resume."""
+        supervisor.request_stop(self.mode, "budget_cap")
+        reads = RefusedReads(self, supervisor.HALT_READ_TRIES - 1)
+        self.assertEqual(supervisor.halt_cause(self.mode), "budget_cap")
+        self.assertEqual((reads.refused, reads.waits), (supervisor.HALT_READ_TRIES - 1,
+                                                        [supervisor.HALT_READ_WAIT_S] * (supervisor.HALT_READ_TRIES - 1)))
+        reads.left = 1
+        self.assertEqual(supervisor.request_stop(self.mode, "cli"), "budget_cap")   # the first cause stays
+        self.assertEqual(supervisor.read_halt(self.mode)["cause"], "budget_cap")
+        reads.left = 1
+        self.assertIn("halted (model spend reached the cap of the run)", supervisor._halt_refusal(self.mode))
+        reads.left = supervisor.HALT_READ_TRIES                        # refused every time: unreadable, fail closed
+        with self.assertRaises(supervisor.HaltFileError):
+            supervisor.halt_cause(self.mode)
+        self.assertLessEqual(supervisor.HALT_READ_TRIES * supervisor.HALT_READ_WAIT_S, 0.5)
+
+    def test_the_supervisors_poll_reads_once_and_fails_closed_at_once(self):
+        supervisor.request_stop(self.mode, "budget_cap")
+        reads = RefusedReads(self, 1)
+        self.assertEqual(supervisor._poll_halt(self.mode), ("stop_file", True))   # the kill comes first
+        self.assertEqual((reads.refused, reads.waits), (1, []))
 
     def test_a_stop_signal_and_a_supervisor_gone_are_causes_that_survive_like_the_rest(self):
         for cause in ("signal", "supervisor_gone"):
@@ -736,6 +783,36 @@ class WatchTest(StateDirTest):
         self.assertEqual(stopped.cause, "stop_file")
         self.assertTrue(stopped.unreadable)
         self.assertGreaterEqual(child.kills, 1)
+
+    def test_a_halt_file_caught_mid_replace_is_read_again_once_the_worker_is_dead(self):
+        """Review of 7e1a9fa, item 12 (Windows: 'stop_file' != 'budget_cap'): the poll that met HALT
+        mid-replace kills the worker at once, as an unreadable halt file; once the worker is dead,
+        HALT is read again and its real cause recorded."""
+        for ends_alone in (False, True):
+            with self.subTest(ends_alone=ends_alone):
+                if os.path.exists(self.halt):
+                    os.remove(self.halt)
+                reads = RefusedReads(self, 2)
+
+                def cap(c, ends_alone=ends_alone):
+                    supervisor.request_stop(self.mode, "budget_cap")
+                    if ends_alone:
+                        c.returncode = supervisor.WORKER_EXIT_HALTED
+                child = FakeChild(on_wait_number(2, cap))
+                stopped = self.watch(child)
+                self.assertEqual((stopped.cause, stopped.unreadable), ("budget_cap", False))
+                self.assertEqual(reads.refused, 2)
+                self.assertEqual(reads.waits, [supervisor.HALT_READ_WAIT_S])   # the poll's one read, then a settle try
+                self.assertIsNotNone(child.returncode)                          # read again only once it is dead
+                self.assertEqual(child.kills >= 1, not ends_alone)
+
+    def test_an_unreadable_halt_is_still_unreadable_once_the_worker_is_dead(self):
+        child = FakeChild(on_wait_number(2, lambda c: self.touch(self.halt, b"\x00")))
+        waits = []
+        with mock.patch.object(supervisor, "_pause", waits.append):
+            stopped = self.watch(child)
+        self.assertEqual((stopped.cause, stopped.unreadable), ("stop_file", True))     # fail closed, as before
+        self.assertEqual(len(waits), supervisor.HALT_READ_TRIES - 1)
 
     def test_ctrl_c_is_a_stop_on_the_command_line_that_survives_a_restart(self):
         def interrupt(c):

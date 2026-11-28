@@ -373,6 +373,29 @@ class BudgetCapTest(Base):
         self.assertIsNone(halted["payload"]["in_flight"])
         self.assertEqual(self.run_now("quick")[0], supervisor.EXIT_REFUSED_HALT)
 
+    def test_a_halt_file_caught_mid_replace_is_read_again_once_the_worker_is_dead(self):
+        """Review of 7e1a9fa, item 12, the Windows flake ('stop_file' != 'budget_cap'): Windows
+        refuses to open a file while another process replaces it, so the supervisor's look at HALT
+        just as the worker wrote it read as an unreadable halt file, and the halted line said
+        stop_file. Here the supervisor's first two reads of HALT are refused that way."""
+        real_open, refused = open, []
+
+        def windows_open(path, *args, **kw):
+            if os.path.basename(str(path)) == supervisor.HALT_NAME and os.path.exists(path) and len(refused) < 2:
+                refused.append(path)
+                raise PermissionError(13, "Access is denied", str(path))
+            return real_open(path, *args, **kw)
+        with mock.patch.object(supervisor, "open", windows_open, create=True):
+            code, said = self.run_now("budget")
+        self.assertEqual(code, supervisor.EXIT_HALTED)
+        halted = self.lines()[-1]
+        self.assertEqual(halted["payload"]["cause"], "budget_cap")
+        self.assertNotIn("halt_file", halted["payload"])
+        self.assertEqual(len(refused), 2)               # the poll's read, then one try once the worker was dead
+        self.assertEqual(halted["why"]["code"], "halt.budget_cap")
+        self.assertEqual(supervisor.halt_cause(self.mode), "budget_cap")
+        self.assertEqual(self.run_now("quick")[0], supervisor.EXIT_REFUSED_HALT)
+
 
 # A wrapper that starts what follows the way nohup does: SIGHUP ignored, then exec.
 NOHUP = "import os, signal, sys; signal.signal(signal.SIGHUP, signal.SIG_IGN); os.execv(sys.argv[1], sys.argv[1:])"

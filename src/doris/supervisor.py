@@ -23,6 +23,12 @@ How a stop works:
 - A halt survives a restart: `run_supervised` refuses to start while one is in force, and only
   `resume` (the CLI) clears HALT. A halt from a STOP file is written to HALT too, so it stays
   in force after the file is gone. A STOP file is never deleted by code; the user deletes it.
+- A HALT that cannot be read counts as a halt in force (fail closed). Windows refuses to open a
+  file while another process replaces it, as request_stop does, so every reader but the
+  supervisor's poll reads HALT again, HALT_READ_TRIES times in all, HALT_READ_WAIT_S apart,
+  before it calls it unreadable. The poll reads once and kills the worker at once; once the worker
+  is dead it reads HALT again those few times, and records the cause it finds (the budget cap the
+  worker wrote, say), or the unreadable halt file when it still cannot read it.
 
 One Doris per ledger (ruling 8): the worker takes `state/<mode>/ledger.lock` with acquire_lock()
 when it starts and holds it for its life (G2 asks the worker). run_supervised only checks that
@@ -63,6 +69,11 @@ LOCK_REFUSAL = "another Doris is already running on this ledger"
 
 class HaltFileError(RuntimeError):
     """A halt file exists but cannot be read. Callers treat it as a halt in force (fail closed)."""
+
+
+HALT_READ_TRIES = 5          # reads of a HALT that cannot be read before it counts as unreadable
+HALT_READ_WAIT_S = 0.05      # the wait between them: Windows refuses a file another process replaces
+_pause = time.sleep          # that wait (a test keeps it instead)
 
 
 # ------------------------------------------------------------------------------------------
@@ -110,10 +121,7 @@ def _present_or_unknown(path):
         return True
 
 
-def read_halt(mode, state_dir=None):
-    """The HALT file's record ({"cause", "requested_utc"}), or None when there is no HALT.
-    Raises HaltFileError when a HALT is there but cannot be read or is not one of ours."""
-    path = halt_file(mode, state_dir)
+def _read_halt_once(path):
     try:
         with open(path, "rb") as fh:
             data = fh.read()
@@ -130,10 +138,28 @@ def read_halt(mode, state_dir=None):
     return record
 
 
-def halt_cause(mode, state_dir=None) -> Optional[str]:
+def read_halt(mode, state_dir=None, settle=True):
+    """The HALT file's record ({"cause", "requested_utc"}), or None when there is no HALT.
+    Raises HaltFileError when a HALT is there but cannot be read or is not one of ours. With
+    settle (the default) it reads again first, HALT_READ_TRIES times in all, HALT_READ_WAIT_S
+    apart: Windows refuses to open a file while another process replaces it (os.replace, as
+    request_stop writes it). settle=False reads once: the supervisor's poll, which kills first."""
+    path = halt_file(mode, state_dir)
+    tries = HALT_READ_TRIES if settle else 1
+    for n in range(tries):
+        try:
+            return _read_halt_once(path)
+        except HaltFileError:
+            if n + 1 >= tries:
+                raise
+            _pause(HALT_READ_WAIT_S)
+
+
+def halt_cause(mode, state_dir=None, settle=True) -> Optional[str]:
     """The halt in force for this mode, read from disk now: HALT's cause, else "stop_file"
-    when a STOP file is there, else None. Raises HaltFileError on a halt file it cannot read."""
-    record = read_halt(mode, state_dir)
+    when a STOP file is there, else None. Raises HaltFileError on a halt file it cannot read
+    (with settle, after read_halt's few short tries)."""
+    record = read_halt(mode, state_dir, settle)
     if record is not None:
         return record["cause"]
     for path in stop_files(mode, state_dir):
@@ -569,10 +595,24 @@ class StopSignals:
 
 
 def _poll_halt(mode, state_dir=None):
+    """One look, no second read: an unreadable halt file kills the worker at once (fail closed)."""
     try:
-        return halt_cause(mode, state_dir), False
+        return halt_cause(mode, state_dir, settle=False), False
     except HaltFileError:
         return "stop_file", True    # fail closed: a halt file is there, so she stops
+
+
+def _settled(mode, state_dir, cause, unreadable):
+    """Once the worker is dead: a halt file the poll could not read is read again, read_halt's few
+    short tries, so a HALT caught mid-replace is recorded with its own cause. Still unreadable (or
+    gone): as the poll saw it, fail closed."""
+    if not unreadable:
+        return cause, unreadable
+    try:
+        again = halt_cause(mode, state_dir)
+    except HaltFileError:
+        return cause, unreadable
+    return (again, False) if again else (cause, unreadable)
 
 
 def _kill(child):
@@ -609,7 +649,7 @@ def watch(child, mode, poll_s=POLL_S, state_dir=None, signals=None) -> Stopped:
                 continue
             # The worker ended by itself. At the budget cap it writes HALT before it exits; a closed
             # terminal's SIGHUP reaches the worker too, and may end it before this process looks.
-            cause, unreadable = _poll_halt(mode, state_dir)
+            cause, unreadable = _settled(mode, state_dir, *_poll_halt(mode, state_dir))
             if not cause and heard():
                 break
             now = time.time()
@@ -623,6 +663,7 @@ def watch(child, mode, poll_s=POLL_S, state_dir=None, signals=None) -> Stopped:
     seen = time.time()
     _kill(child)
     if cause:
+        cause, unreadable = _settled(mode, state_dir, cause, unreadable)    # the worker is dead now
         return Stopped(cause, seen, time.time(), unreadable)
     request_stop(mode, "signal", state_dir)            # as Ctrl+C: the kill first, then HALT
     return Stopped("signal", seen, time.time(), False, signal=heard())
