@@ -148,7 +148,7 @@ class TempState(unittest.TestCase):
 
     def look_at(self, name, mode="live"):
         folder = os.path.join(self.state, mode, "runs", name)
-        return watch.snapshot(watch.Run(name, folder, mode, 0, True, False))
+        return watch.snapshot(watch.Run(name, folder, mode, 0, True, False, True))
 
 
 def serve(test, say=None):
@@ -426,8 +426,9 @@ class Panes(TempState):
         now = time.time()
         older = "model-live-live-20261128T050000Z"
         write_run(self.state, older, [start_line(older, "live", "live")], mode="live", started=now - 60)
-        name = "model-live-live-smoke-20261128T060000Z"
-        folder = os.path.join(self.state, "live", "smoke", "20261128T060000Z", "runs", name)
+        stamp = _dt.datetime.fromtimestamp(now, _dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        name = "model-live-live-smoke-" + stamp
+        folder = os.path.join(self.state, "live", "smoke", stamp, "runs", name)
         os.makedirs(folder)                 # where smoke.py runs her loop: no config.json, its own ledger
         writer = receipts.ReceiptWriter(os.path.join(folder, "receipts.jsonl"), name, "live", clock=lambda: T0)
         writer.write(*start_line(name, "live", "live"))
@@ -437,8 +438,24 @@ class Panes(TempState):
         self.assertEqual(snap["run"], name)
         # her loop under the smoke has no supervisor to kill it mid-call: the page must not imply one
         self.assertIn("The smoke's own run of her loop", snap["source"])
-        self.assertIn("halts it at her next check, after any call in flight returns, not mid-call", snap["source"])
+        self.assertIn("a Stop halts such a run at her next check, after any call in flight returns, not mid-call",
+                      snap["source"])
+        page = watch.render_page(snap, token="t", nonce="n", pressed=watch.pressed_words(
+            [("sandbox", "watch_button"), ("live", "watch_button")], [], _dt.datetime(2026, 11, 28, tzinfo=_dt.timezone.utc)))
+        self.assertNotRegex(page.replace("not mid-call", ""), r"(?<!kill switch is killed )mid-call")
         self.assertNotIn("smoke", self.look_at(older)["source"])
+
+    def test_a_smoke_run_started_when_its_stamp_says_not_when_its_last_line_landed(self):
+        now = time.time()
+        stamp = _dt.datetime.fromtimestamp(now - 100, _dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        smoke = "model-live-live-smoke-" + stamp
+        going = "model-stub-sandbox-20261128T060000Z"
+        write_run(self.state, going, [start_line(going, "stub")], started=now - 50)
+        folder = os.path.join(self.state, "live", "smoke", stamp, "runs", smoke)
+        os.makedirs(folder)
+        writer = receipts.ReceiptWriter(os.path.join(folder, "receipts.jsonl"), smoke, "live", clock=lambda: T0)
+        writer.write(*start_line(smoke, "live", "live"))     # its closing line lands now, after the sandbox run began
+        self.assertEqual(watch.newest_run().name, going)
 
     def test_a_yes_man_run_is_named_for_what_answers(self):
         folder = os.path.join(self.state, "sandbox", "runs", "model-yes-man-sandbox-20261128T030000Z")
@@ -712,6 +729,18 @@ class Server(TempState):
         newer = "model-stub-live-20261128T020000Z"
         write_run(self.state, newer, [start_line(newer, "stub", "live")], mode="live", started=time.time() + 5)
         self.assertIn("NOT halted: live (OSError)", state_json(self.server)["pressed"])
+
+    def test_a_press_is_dropped_once_a_newer_smoke_run_has_started(self):
+        self.assertEqual(press(self.server)[0], 303)
+        for mode in cli.STOP_MODES:
+            self.assertTrue(supervisor.resume(mode).ok)
+        stamp = _dt.datetime.fromtimestamp(time.time() + 5, _dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        smoke = "model-live-live-smoke-" + stamp
+        folder = os.path.join(self.state, "live", "smoke", stamp, "runs", smoke)
+        os.makedirs(folder)
+        writer = receipts.ReceiptWriter(os.path.join(folder, "receipts.jsonl"), smoke, "live", clock=lambda: T0)
+        writer.write(*start_line(smoke, "live", "live"))
+        self.assertEqual(state_json(self.server)["pressed"], "")
 
     def test_a_press_is_not_dropped_for_a_run_with_no_config(self):
         self.assertEqual(press(self.server)[0], 303)
