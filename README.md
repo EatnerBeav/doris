@@ -46,7 +46,7 @@ Two failures are staged on purpose, and the output labels them:
 
 At 5 PM she sends the owner the digest. The run ends with **What Doris did for Shane**: the owner's day told from her receipts (what needs the owner and why, the meetings on the calendar, each thread in plain words, the digest, the cost), then the receipt chain verified.
 
-The banner on the first line says what read the mail. With no key, a built-in keyword stand-in reads the mail, and every receipt says `stub`. If `sandbox/answers.jsonl` (recorded answers from a real model run) is present, they are replayed instead and the banner says so; that file is not in the repo yet. With `ANTHROPIC_API_KEY` set, the model is called live (see [With a key](#with-a-key)).
+The banner on the first line says what read the mail. With no key, she reads the mail with the model's own answers, replayed from a real keyed run of this same day: `sandbox/answers.jsonl` holds them, the banner names the run, and every receipt says `replayed`. That run's trace, with its measured cost, is [`traces/model-live-sandbox-20261128T123315Z/`](traces/model-live-sandbox-20261128T123315Z/). An email with no recorded answer (one you add yourself) is held, never guessed. Without that file, a built-in keyword stand-in reads the mail and every receipt says `stub`. With `ANTHROPIC_API_KEY` set, the model is called live (see [With a key](#with-a-key)).
 
 **The codes.** Every sentence she sends is a fixed, approved template filled in by code; the model never writes a word that goes out.
 
@@ -93,7 +93,7 @@ None of the above needs a key. To have the model read the mail, set an Anthropic
 Then run `python3 -m doris demo`. The banner says the model is called live, and each line shows the cost of its call.
 
 - **Model:** `claude-sonnet-5-5`, one model, called with `urllib` (no SDK).
-- **Cost, measured so far:** $0.004 for one email (live smoke run 3, [`traces/live-smoke-20261128T055002Z/`](traces/live-smoke-20261128T055002Z/)) and $0.06 for the 20 Trap Pack files (run 1, [`tests/trap-pack/RUNS.md`](tests/trap-pack/RUNS.md)).
+- **Cost, measured so far:** $0.004 for one email (live smoke run 3, [`traces/live-smoke-20261128T055002Z/`](traces/live-smoke-20261128T055002Z/)), $0.034 for the demo day's 9 calls ([`traces/model-live-sandbox-20261128T123315Z/`](traces/model-live-sandbox-20261128T123315Z/)) and $0.065 for the 20 Trap Pack files (run 3, [`tests/trap-pack/RUNS.md`](tests/trap-pack/RUNS.md)).
 - **Limit:** a run stops itself at $5.00 of model spend (gate check G3).
 
 The demo's 15 emails make 9 classification calls (the model's with a key, the stand-in's without); screens in code settle the other six before anything reads them.

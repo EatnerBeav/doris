@@ -19,9 +19,11 @@ Status words: **done** (on main, tested) · **in review** (built, in a pull requ
   - Its trace (traces/live-run-<stamp>/, marked live with date, commit and measured cost) is written when it stops and committed from our server, pass or fail. Steps in HANDOFF.md.
 - **not started** · Overnight run, under 60 emails (never cut; a sandbox run is the fallback) · Wolf · Sat 8:00 PM start
   - Unblocked: the live booking passed tonight. Stays the main overnight run.
-- **not started** · Recorded answers from a real keyed demo run, so `demo` replays a real model · Wolf · Sat 12:00 PM, again at the freeze
+- **in review** · Recorded answers from a real keyed demo run, so `demo` replays a real model · Wolf · Sat 12:00 PM, again at the freeze
+  - Sat 4:33 AM on our server, main 18d160a: 13 handled, 2 held, 9 calls, $0.0337 ([traces/model-live-sandbox-20261128T123315Z/](traces/model-live-sandbox-20261128T123315Z/)). A zero-key demo replays it to the same day.
   - Unblocked. Today the demo falls back to the keyword stand-in and says so.
-- **not started** · Fresh live-model Trap Pack run on merged main, RESULTS.md and RUNS.md to match · Wolf · Sat 12:00 PM
+- **in review** · Fresh live-model Trap Pack run on merged main, RESULTS.md and RUNS.md to match · Wolf · Sat 12:00 PM
+  - Run 3, Sat 4:33 AM, main 18d160a, $0.0649: pass 20 on invariants; against the key met 14, safe and silent 6, missed 0, bug 0.
   - Unblocked. The committed report is run 1's; run 2 (20/20) is on its own branch.
 - **not started** · Feature freeze and the video: the full unattended run, then a fresh run and the Stop landing mid-call; unlisted YouTube checked in a signed-out window, link in the README · Wolf with Shane · Sun evening
 - **not started** · The submission form (team, T1, repo, video link) · Shane · Sun night
@@ -43,7 +45,7 @@ No new features; the law and the scope stand. Bar: first place, and would Steve 
 ## From the brief check (brief-compliance.md, PR #21: 75 rows, 50 met, 14 partly, 9 missing, 2 wrong)
 
 - **not started** · `demo`, `traps` and the sandbox `run` read the model key from a `.env` at the repo root as well as the environment; the README gives the step (row 1.2, wrong today) · Wolf · Sat 12:00 PM
-- **not started** · tests/trap-pack/RESULTS.md carries the grade against the key beside each generated verdict and links RUNS.md; run 2's trace lands on main beside run 1's (rows 9.3 wrong, 9.4, 9.5) · Wolf · Sat 12:00 PM
+- **in review** · tests/trap-pack/RESULTS.md carries the grade against the key beside each generated verdict and links RUNS.md; run 2's trace lands on main beside run 1's (rows 9.3 wrong, 9.4, 9.5) · Wolf · Sat 12:00 PM
 - **not started** · The follow-up named in the receipt and the digest when an offer is filed (row 6.2; with the nudge) · nudge thread · Sat 2:00 PM
 - **not started** · A loop test pinning the calendar failing twice into a clean hold (behaviour right, no test) · Wolf · Sat 2:00 PM
 - **done** · The form's team field: the one registered person in the field, "Wolf (Claude), his CTO" in the free-text fields (row 10.2; Shane's call, decision 103) · Steve submits · Sun night
