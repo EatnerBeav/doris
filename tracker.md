@@ -1,19 +1,20 @@
 # Tracker
 
 Every item the judges score, one line each: **status** · item · owner · due (Pacific).
-Updated Fri Nov 27, 9:35 PM. Kept current on main as items move.
+Updated Fri Nov 27, 9:55 PM. Kept current on main as items move.
 
 Status words: **done** (on main, tested) · **in review** (built, in a pull request) · **building** · **blocked** (says on what) · **not started**.
 
 ## Tonight and the live runs
 
 - **building** · PR #2 merged to main: live mail and calendar, the live loop, the digest, kill-switch hardening, JMAP sending · Wolf · Fri 11:30 PM
-  - On `live`: JMAP sending, the regional-host fix, the Windows CI fixes. Left: the secret-scan and smoke fixes below, a last review, CI, merge.
-- **building** · Tonight's end-to-end live smoke: a test mail to the owner, the forward to Doris, her reply over JMAP, the read-back · Wolf · Fri 11:00 PM
+  - Everything is on `live` and the live smoke passed on it. Left: a last review of tonight's fixes, CI, merge.
+- **done** · Tonight's end-to-end live smoke: a test mail to the owner, the forward to Doris, her reply over JMAP, the read-back · Wolf · Fri 9:50 PM
   - Run 1 (8:29 PM) failed at the first JMAP call, nothing sent: our host check refused Fastmail's regional API host. Fixed. [Run 1 trace](https://github.com/EatnerBeav/doris/tree/traces/live-smoke-20261128T042934Z/traces/live-smoke-20261128T042934Z).
-  - Run 2 (9:15 PM): the whole mail path passed live (forward to Doris in 31 s, her reply over JMAP for $0.004, read back in Sent and in wolf's inbox). Failed on the CalDAV test event (a reused test ID) and the secret scan wrongly blocked its trace on an address. Both being fixed, then run 3; run 2's trace is committed unchanged once the scan fix lands.
+  - Run 2 (9:15 PM): the whole mail path passed live (forward to Doris in 31 s, her reply over JMAP for $0.004, read back in Sent and in wolf's inbox). Failed on the CalDAV test event (a reused test ID) and the secret scan wrongly blocked its trace on an address. Both fixed. [Run 2 trace](https://github.com/EatnerBeav/doris/tree/traces/live-smoke-20261128T051500Z/traces/live-smoke-20261128T051500Z).
+  - Run 3 (9:50 PM) passed, every step: calendar write and read-back, the forward in 31 s, her reply over JMAP with the live model for $0.004, read back in her Sent and in wolf's inbox. 0 human approvals. [Run 3 trace](https://github.com/EatnerBeav/doris/tree/traces/live-smoke-20261128T055002Z/traces/live-smoke-20261128T055002Z).
 - **blocked** · Live booking · Wolf · Sat 2:00 PM
-  - On PR #2 and the smoke.
+  - On PR #2's merge; the smoke passed.
 - **blocked** · Overnight run · Wolf · Sat 8:00 PM start
   - On the live booking.
 - **blocked** · Recorded answers from a real keyed demo run, so `demo` replays a real model · Wolf · Sat 12:00 PM, again at the freeze
