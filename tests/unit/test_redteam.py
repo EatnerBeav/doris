@@ -142,6 +142,96 @@ class _Tmp(unittest.TestCase):
                                        "--results", os.path.join(root, "tests", "redteam", "RESULTS.md")]}
 
 
+class ManifestTest(_Tmp):
+    """What the trace's manifest says about the code it ran on."""
+
+    def test_the_commit_is_read_through_a_worktrees_git_file(self):
+        t = self.tmp()
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        common = os.path.join(t["root"], "main", ".git")
+        os.makedirs(os.path.join(common, "worktrees", "wt"))
+        os.makedirs(os.path.join(common, "refs", "heads"))
+        for path, text in (("refs/heads/redteam", sha), ("worktrees/wt/HEAD", "ref: refs/heads/redteam"),
+                           ("worktrees/wt/commondir", "../..")):
+            with open(os.path.join(common, *path.split("/")), "w", encoding="utf-8") as fh:
+                fh.write(text + "\n")
+        wt = os.path.join(t["root"], "wt")
+        os.makedirs(wt)
+        with open(os.path.join(wt, ".git"), "w", encoding="utf-8") as fh:
+            fh.write("gitdir: %s\n" % os.path.join(common, "worktrees", "wt"))
+        with mock.patch.object(paths, "REPO", wt):
+            code, out = run_main(t["argv"] + ["--case", "cap-writes-run"])
+        self.assertEqual(code, 0, out)
+        (run,) = os.listdir(os.path.join(t["root"], "traces"))
+        with open(os.path.join(t["root"], "traces", run, "manifest.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["commit"], sha)
+
+
+class RecordTest(_Tmp):
+    """Only --record writes where results are committed (tests/redteam/RESULTS.md, traces/); a plain run
+    keeps its report and trace with its own throwaway state, and says where."""
+
+    def defaults(self):
+        t = self.tmp()
+        for name in ("STATE", "TRACES", "TESTS"):
+            patcher = mock.patch.object(paths, name, os.path.join(t["root"], name.lower()))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return t["root"]
+
+    def test_a_plain_run_keeps_its_report_and_trace_under_state(self):
+        root = self.defaults()
+        code, out = run_main(["--case", "cap-writes-run"])
+        self.assertEqual(code, 0, out)
+        self.assertFalse(os.path.exists(os.path.join(root, "traces")))
+        self.assertFalse(os.path.exists(os.path.join(root, "tests")))
+        (here,) = os.listdir(os.path.join(root, "state", "throwaway"))
+        self.assertTrue(re.match(r"^rt-\d{8}T\d{4}Z$", here), here)
+        here = os.path.join(root, "state", "throwaway", here)
+        for name in ("RESULTS.md", "trace/manifest.json", "trace/terminal.log", "trace/cap-writes-run/obey"):
+            self.assertTrue(os.path.exists(os.path.join(here, *name.split("/"))), name)
+        with open(os.path.join(here, "trace", "manifest.json"), encoding="utf-8") as fh:
+            manifest = json.load(fh)
+        self.assertIs(manifest["recorded"], False)
+        self.assertTrue(manifest["run"].startswith(redteam.RUN_PREFIX))
+        lines = out.strip().splitlines()
+        self.assertIn("Report: %s" % os.path.join(here, "RESULTS.md").replace(os.sep, "/"), lines)
+        self.assertIn("Not recorded", out)
+        self.assertIn("--record", out)
+        self.assertTrue(lines[-1].startswith("Redteam: 0 bad actions"), lines[-1])
+
+    def test_record_writes_the_report_and_the_trace_where_they_are_committed(self):
+        root = self.defaults()
+        code, out = run_main(["--record", "--case", "cap-writes-run"])
+        self.assertEqual(code, 0, out)
+        self.assertTrue(os.path.isfile(os.path.join(root, "tests", "redteam", "RESULTS.md")))
+        (run,) = os.listdir(os.path.join(root, "traces"))
+        self.assertTrue(run.startswith(redteam.RUN_PREFIX), run)
+        with open(os.path.join(root, "traces", run, "manifest.json"), encoding="utf-8") as fh:
+            self.assertIs(json.load(fh)["recorded"], True)
+        (here,) = os.listdir(os.path.join(root, "state", "throwaway"))
+        left = os.listdir(os.path.join(root, "state", "throwaway", here))
+        self.assertIn("runs.txt", left)
+        self.assertNotIn("trace", left)
+        self.assertNotIn("RESULTS.md", left)
+        self.assertNotIn("Not recorded", out)
+
+    def test_no_not_recorded_line_when_the_paths_send_the_report_elsewhere(self):
+        t = self.tmp()
+        code, out = run_main(t["argv"] + ["--case", "cap-writes-run"])     # --results and --traces-root, no --record
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("Not recorded", out)
+        self.assertIn("Report: %s" % os.path.join(t["root"], "tests", "redteam", "RESULTS.md").replace(os.sep, "/"),
+                      out.splitlines())
+
+    def test_a_second_plain_run_in_the_same_minute_gets_its_own_folder(self):
+        root = self.defaults()
+        for _ in range(2):
+            code, out = run_main(["--case", "cap-writes-run"])
+            self.assertEqual(code, 0, out)
+        self.assertEqual(len(os.listdir(os.path.join(root, "state", "throwaway"))), 2)
+
+
 class FullRunTest(_Tmp):
     """The whole proof once, as a judge runs it (in temp folders)."""
 

@@ -25,6 +25,8 @@ from tests import left_behind
 from tests.unit.test_restart import DORIS, OWNER, add, mini_sandbox
 
 RUN1 = "model-live-throwaway-traps-20261127T2207Z"      # Trap Pack run 1, model called live, committed
+REDTEAM = "model-yes-man-throwaway-redteam-20261128T0306Z"   # the redteam proof, committed
+SMOKE = "live-smoke-20261128T055002Z"                        # a live smoke, committed with its manifest
 PRIYA_KEY = "20261201.0802.priya.quick-call@northwind.example"
 MARCUS_PICK_KEY = "20261201.0940.marcus.pick@brightlane.example"
 DEMO_NAMES = tuple(sorted(n for n in os.listdir(os.path.join(paths.SANDBOX, "inbox")) if n.endswith(".eml")))
@@ -352,6 +354,87 @@ class TrapPackRun1(unittest.TestCase):
         self.assertEqual(len(out.strip().splitlines()), 1, out)
         self.assertIn("13-supplier-listing", out)
         self.assertIn("broken at seq 6", out)
+
+
+class RedteamTrace(unittest.TestCase):
+    """The committed redteam trace: one folder per case, one receipt file per yes-man answer inside it
+    (<case>/<answer>/receipts.jsonl), each stepped through as item case/answer."""
+
+    def setUp(self):
+        patch = mock.patch.object(paths, "TRACES", os.path.join(paths.REPO, "traces"))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_every_answer_of_every_case_steps_through(self):
+        code, out = replay_cli([REDTEAM])
+        self.assertEqual(code, 0, out[-2000:])
+        first = out.splitlines()[0]
+        self.assertIn("206 receipt files", first)
+        self.assertNotIn("NOT replayed", first)
+        in_order(self, out, ["Item 01-meeting-request/cancel: run ", "Item 12-seminar-recording/obey: run ",
+                             "Item halt/obey: run "])
+        self.assertEqual(out.count("\nItem "), 206)
+        self.assertNotIn("shown as recorded", out)
+
+    def tree(self, *files):
+        tmp = tempfile.mkdtemp(prefix="doris-replay-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = os.path.join(tmp, "T")
+        for rel in files:
+            os.makedirs(os.path.join(root, os.path.dirname(rel)), exist_ok=True)
+            if rel.endswith("receipts.jsonl"):
+                forge(os.path.join(root, rel), [START, END])
+        return root
+
+    def test_a_folder_that_cannot_be_read_is_never_called_empty(self):
+        root = self.tree("ok/ans/receipts.jsonl", "locked/ans/receipts.jsonl", "c2/locked/receipts.jsonl",
+                         "c2/fine/receipts.jsonl")
+        real, real_isfile = os.listdir, os.path.isfile
+
+        def listdir(path):
+            if os.path.basename(path) == "locked":
+                raise PermissionError(13, "Permission denied")
+            return real(path)
+        with mock.patch("os.listdir", listdir), mock.patch("os.path.isfile",
+                                                           lambda p: "locked" not in p and real_isfile(p)):
+            code, out = replay_cli([root])
+        self.assertEqual(code, 0, out)
+        first = out.splitlines()[0]
+        self.assertIn("2 receipt files", first)
+        self.assertIn("NOT replayed, could not be read: c2/locked, locked.", first)
+        self.assertNotIn("no receipts.jsonl in", first)
+
+    def test_receipts_inside_an_item_with_its_own_are_named(self):
+        root = self.tree("case/receipts.jsonl", "case/ans/receipts.jsonl", "case/empty/x")
+        code, out = replay_cli([root])
+        self.assertEqual(code, 0, out)
+        first = out.splitlines()[0]
+        self.assertIn(": 1 receipt file, ", first)
+        self.assertIn("NOT replayed, inside an item with its own receipts: case/ans.", first)
+        self.assertNotIn("empty", out)
+
+    def test_a_linked_folder_is_never_replayed_twice(self):
+        root = self.tree("a/receipts.jsonl")
+        try:
+            os.symlink(root, os.path.join(root, "loop"), target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("no symlinks here")
+        code, out = replay_cli([root])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("Item a: run "), 1, out)
+        self.assertNotIn("loop", out)
+
+    def test_an_answer_folder_with_no_receipts_is_named_first(self):
+        tmp = tempfile.mkdtemp(prefix="doris-replay-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        folder = os.path.join(tmp, REDTEAM)
+        shutil.copytree(os.path.join(paths.TRACES, REDTEAM), folder)
+        os.remove(os.path.join(folder, "02-urgent-from-the-ceo", "obey", "receipts.jsonl"))
+        code, out = replay_cli([folder])
+        self.assertEqual(code, 0, out[-2000:])
+        first = out.splitlines()[0]
+        self.assertIn("205 receipt files", first)
+        self.assertIn("NOT replayed, no receipts.jsonl in: 02-urgent-from-the-ceo/obey.", first)
 
 
 class SensitiveMail(unittest.TestCase):
@@ -762,6 +845,107 @@ class ReReview(unittest.TestCase):
         for wrong in (" none", "failed", "BLOCKED at", "no instruction seen", "nothing opened", "-> not found",
                       "unconfirmed"):
             self.assertNotIn(wrong, out)
+
+
+class AfterPR11Review(unittest.TestCase):
+    """The review of PR #11: hashed ledger keys, the live start fields, and the manifest beside a run."""
+    replay_rows = SaysOnlyWhatTheLinesHold.replay_rows
+
+    def test_a_hashed_key_is_never_called_a_message_id(self):
+        hashed, raw = "key-sha256:" + "ab" * 32, "sha256:" + "cd" * 32
+        dropped = [{"kind": "send_reply", "template": "T4", "message": hashed, "thread": "t1", "booking_id": None},
+                   {"kind": "send_reply", "template": "T1", "message": raw, "thread": "t2", "booking_id": None},
+                   {"kind": "message", "message": hashed, "thread": "t1", "template": None, "booking_id": None},
+                   {"kind": "message", "message": raw, "thread": "t2", "template": None, "booking_id": None}]
+        code, out = self.replay_rows([START, ("halted", "", {"cause": "cli", "in_flight": None, "dropped": dropped,
+                                                             "ledger": "ok"}, HALT)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("Dropped: 2 queued action(s): send_reply T4 for key (hashed) %s; send_reply T1 for key sha256:%s; "
+                      "2 message(s) not yet finished, left unprocessed in the ledger: key (hashed) %s, key sha256:%s."
+                      % ("ab" * 32, "cd" * 32, "ab" * 32, "cd" * 32), out)
+        self.assertNotIn("Message-ID key-sha256", out)
+        self.assertNotIn("Message-ID sha256", out)
+        self.assertNotIn("no Message-ID", out)               # a sender can write a Message-ID that looks like one
+
+    def test_only_the_supervisor_line_shows_a_key_by_its_hash(self):
+        # the loop's own halted line writes each key as it is, so a key-sha256: there is what the sender wrote
+        hashed = "key-sha256:" + "ab" * 32
+        dropped = [{"kind": "send_reply", "template": "T4", "message": hashed, "thread": "t1", "booking_id": None}]
+        code, out = self.replay_rows([START, ("halted", "", {"cause": "cli", "in_flight": "none", "dropped": dropped,
+                                                             "summary": "follows"}, HALT), END])
+        self.assertEqual(code, 0, out)
+        self.assertIn("Dropped: 1 queued action(s): send_reply T4 for Message-ID %s." % (hashed,), out)
+        self.assertNotIn("(hashed)", out)
+
+    def test_the_started_row_shows_the_live_start(self):
+        live = dict(START[2], mode="live", model_source="live", model="claude-x", simulated=False, fresh_start=True,
+                    mail_since="2026-12-01T15:00:00Z")
+        code, out = self.replay_rows([("observed", "", live, None), END])
+        self.assertEqual(code, 0, out)
+        self.assertIn("  Started   Tue Dec 1, 8:00 AM Pacific. This run started a new live ledger (--fresh). Mail "
+                      "received before Tue Dec 1, 7:00 AM Pacific is never read (the ledger's fresh start). [seq 1]", out)
+        code, out = self.replay_rows([("observed", "", dict(live, fresh_start=False, mail_since=None), None), END])
+        self.assertIn("  Started   Tue Dec 1, 8:00 AM Pacific. It went on from the live ledger already there. Mail "
+                      "read from: not recorded. [seq 1]", out)
+
+    def smoke_copy(self, manifest=None):
+        tmp = tempfile.mkdtemp(prefix="doris-replay-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        folder = os.path.join(tmp, SMOKE)
+        shutil.copytree(os.path.join(paths.REPO, "traces", SMOKE), folder)
+        if manifest is not None:
+            with open(os.path.join(folder, "manifest.json"), "rb") as fh:
+                data = manifest(json.loads(fh.read().decode("utf-8")))
+            with open(os.path.join(folder, "manifest.json"), "wb") as fh:
+                fh.write(data)
+        return folder
+
+    def test_a_manifest_that_agrees_says_so(self):
+        code, out = replay_cli([os.path.join(paths.REPO, "traces", SMOKE)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("\nManifest: agrees with the receipts (its receipt chain: 21 lines, ok; its counts, recounted "
+                      "from the lines: errors 0, handled 1, held 0, human_approvals 0, messages 1, model_calls 1, "
+                      "sends 1).\n", out)
+
+    def test_a_manifest_that_disagrees_is_named_and_the_receipts_are_replayed(self):
+        def wrong(m):
+            m["receipt_chain"]["lines"], m["counts"]["handled"], m["counts"]["extra"] = 20, 2, 5
+            return json.dumps(m).encode("utf-8")
+        code, out = replay_cli([self.smoke_copy(wrong)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("\nManifest DISAGREES with the receipts: its receipt chain says 20 lines, the file holds 21; it "
+                      "counts handled 2, the lines hold 1 (not checked: extra). Only the receipts are replayed.\n", out)
+        self.assertIn("  Closed    offer, T2 sent.", out)
+
+    def test_a_manifest_that_compares_nothing_never_agrees(self):
+        code, out = replay_cli([self.smoke_copy(lambda m: b'{"counts": {}, "outcome": "pass"}')])
+        self.assertEqual(code, 0, out)
+        self.assertIn("\nManifest: holds no receipt chain or counts to check.\n", out)
+        code, out = replay_cli([self.smoke_copy(lambda m: b'{"counts": {"sent": 99}, "receipt_chain": null}')])
+        self.assertIn("\nManifest: holds no receipt chain or counts to check (not checked: sent).\n", out)
+        self.assertNotIn("agrees", out)
+
+    def test_a_manifest_describes_receipts_jsonl_only(self):
+        folder = self.smoke_copy()
+        other = os.path.join(folder, "other.jsonl")
+        shutil.copyfile(os.path.join(folder, "receipts.jsonl"), other)
+        code, out = replay_cli([other])
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("Manifest", out)
+
+    def test_a_manifest_that_cannot_be_read_or_holds_nothing_to_check(self):
+        code, out = replay_cli([self.smoke_copy(lambda m: b"{not json")])
+        self.assertEqual(code, 0, out)
+        self.assertIn("\nManifest: the manifest.json beside it could not be read (JSONDecodeError); nothing in it "
+                      "was checked.\n", out)
+        code, out = replay_cli([self.smoke_copy(lambda m: b"{}")])
+        self.assertIn("\nManifest: holds no receipt chain or counts to check.\n", out)
+
+    def test_the_committed_live_smoke_shows_its_start(self):
+        code, out = replay_cli([os.path.join(paths.REPO, "traces", SMOKE)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("  Started   Fri Nov 27, 9:50 PM Pacific. It went on from the live ledger already there. Mail "
+                      "received before Fri Nov 27, 8:50 PM Pacific is never read (the ledger's fresh start). [seq 1]", out)
 
 
 class FindingTheRun(unittest.TestCase):

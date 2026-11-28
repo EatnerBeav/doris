@@ -1,0 +1,16 @@
+Tue Dec 1, 8:10 AM Pacific  Priya Raman: book. T1 sent. One clear time, parser and model agree, and it is available: book. Model cost $0.0000.
+Tue Dec 1, 8:10 AM Pacific  Marcus Lee: hold:not_in_ledger. Held: a cancel or move for a booking she does not have. Model cost $0.0000.
+Tue Dec 1, 8:30 AM Pacific  Dana Okafor: hold:not_in_ledger. Held: a cancel or move for a booking she does not have. Model cost $0.0000.
+Tue Dec 1, 8:30 AM Pacific  Dana Okafor: file. No reply to this kind of mail (auto): filed.
+Tue Dec 1, 8:30 AM Pacific  Ops Weekly: file. No reply to this kind of mail (list): filed.
+Tue Dec 1, 8:50 AM Pacific  Jordan Pike: suppress. Opt-out matched in the sender's own text: sender silenced, 0 queued item(s) dropped, no reply.
+Tue Dec 1, 9:40 AM Pacific  Marcus Lee: file. Not addressed to the owner alone or to her on her own thread (forged_thread): filed, no reply. Staged fault timeout-once: no effect.
+Tue Dec 1, 10:10 AM Pacific  Priya Raman: cancel. T10 sent. Cancel of her own booking on this thread: remove it, confirm, reply. Model cost $0.0000.
+Tue Dec 1, 10:30 AM Pacific  Sam Rivera: offer. T4 sent. Another event landed during the booking: her event removed, offer fresh times. Staged fault lands-between: recovered. Model cost $0.0000.
+Tue Dec 1, 11:20 AM Pacific  Ken Ito: offer. T2 sent. No single clear time (condition B2 not met): offer times. Model cost $0.0000.
+Tue Dec 1, 12:30 PM Pacific  (unreadable message): quarantine. Quarantined: the message could not be decoded. The run goes on.
+Tue Dec 1, 1:10 PM Pacific  Elena Voss: offer. T2 sent. No single clear time (condition B2 not met): offer times. Model cost $0.0000.
+Tue Dec 1, 2:20 PM Pacific  Marcus Lee: file. Not addressed to the owner alone or to her on her own thread (forged_thread): filed, no reply.
+Tue Dec 1, 3:10 PM Pacific  Dana Okafor: dropped. Filed: this sender opted out earlier. No reply.
+Tue Dec 1, 3:10 PM Pacific  Dana Okafor: suppress. Opt-out matched in the sender's own text: sender silenced, 1 queued item(s) dropped, no reply.
+Tue Dec 1, 5:00 PM Pacific  Digest sent to the owner: Handled 13, held 2, human approvals 0. Tue Dec 1
