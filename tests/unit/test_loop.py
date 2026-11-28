@@ -8,6 +8,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -178,6 +179,7 @@ class ALongSandboxRun(unittest.TestCase):
     STEP = 0.0                          # how far her wall clock moves at each reading (see the subclass)
 
     def test_a_later_pass_steps_her_clock_one_cycle_and_reads_the_new_mail(self):
+        from doris.adapters import sandbox
         from tests.unit.test_restart import DORIS, OWNER, mini_sandbox
         tmp = tempfile.mkdtemp(prefix="doris-loop-")
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -201,7 +203,11 @@ class ALongSandboxRun(unittest.TestCase):
         cfg = loop.RunConfig(mode="throwaway", run_name="model-stub-sandbox-test", state_dir=os.path.join(tmp, "state"),
                              sandbox_root=root, owner_addr=OWNER, doris_addr=DORIS, clock_mode="advance",
                              cycles=2, cycle_s=600.0)
-        with mock.patch.object(loop, "_time", now), mock.patch.object(loop, "_sleep", drop_in):
+        def wall():                     # the files' clock: her waits pass on it as they would for real
+            return time.time() + (clock[0] - 1000.0)
+
+        with mock.patch.object(loop, "_time", now), mock.patch.object(loop, "_sleep", drop_in), \
+                mock.patch.object(sandbox, "_wall", wall):
             s = loop.run(cfg)
         self.assertEqual(len(dropped), 1)
         self.assertEqual(s.handled, 2)
@@ -215,6 +221,60 @@ class ALongSandboxRunOnASlowMachine(ALongSandboxRun):
     landed, and 1 was handled, not 2. Here each reading of her clock takes 1/64 s; the old test,
     its clock stepping so, failed every time."""
     STEP = 1 / 64
+
+
+class AJudgesMailHalfWritten(unittest.TestCase):
+    """A sandbox mail is known by its file name, so a pass that read a judge's .eml while it was
+    half written quarantined it, and the finished file was never read. Now a file whose size or
+    modified time changed in the last two seconds waits for a later pass."""
+
+    def test_a_half_file_at_one_pass_then_the_whole_file_ends_handled(self):
+        from doris.adapters import sandbox
+        from tests.unit.test_restart import DORIS, OWNER, mini_sandbox
+        tmp = tempfile.mkdtemp(prefix="doris-loop-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = mini_sandbox(tmp, ("01-priya-request.eml",))
+        with open(os.path.join(paths.SANDBOX, "inbox", "02-marcus-request.eml"), "rb") as fh:
+            marcus = fh.read()
+        marcus = b"".join(l for l in marcus.splitlines(True) if not l.lower().startswith(b"date:"))
+        path = os.path.join(root, "inbox", "14-judge.eml")
+        clock, passes = [1000.0], []
+
+        def now():                      # her clock, moved on by her waits only
+            return clock[0]
+
+        def wait(seconds):
+            clock[0] += seconds
+
+        def wall():                     # the files' clock: her waits pass on it as they would for real
+            return time.time() + (clock[0] - 1000.0)
+
+        def one_pass(run, first=False):
+            passes.append(first)
+            if len(passes) == 2:        # the judge's copy has begun as her second pass reads the inbox
+                with open(path, "wb") as fh:
+                    fh.write(marcus[:len(marcus) // 2])
+                os.utime(path, (wall(), wall()))
+            elif len(passes) == 3:      # and was done mid-way through the wait before her third
+                with open(path, "wb") as fh:
+                    fh.write(marcus)
+                os.utime(path, (wall() - 300, wall() - 300))
+            return real_pass(run, first=first)
+
+        real_pass = loop._Run.one_pass
+        cfg = loop.RunConfig(mode="throwaway", run_name="model-stub-sandbox-test", state_dir=os.path.join(tmp, "state"),
+                             sandbox_root=root, owner_addr=OWNER, doris_addr=DORIS, clock_mode="advance",
+                             cycles=3, cycle_s=600.0)
+        with mock.patch.object(loop, "_time", now), mock.patch.object(loop, "_sleep", wait), \
+                mock.patch.object(loop._Run, "one_pass", one_pass), \
+                mock.patch.object(sandbox, "_wall", wall):
+            s = loop.run(cfg)
+        self.assertEqual(passes, [True, False, False])
+        self.assertEqual((s.handled, s.quarantined), (2, 0))
+        observed = [l for l in receipts.read_lines(s.receipts_path) if l["kind"] == "observed" and "from_addr" in l["payload"]]
+        self.assertEqual([l["payload"]["clock"] for l in observed], ["2026-12-01T16:10:00Z", "2026-12-01T16:30:00Z"])
+        with open(os.path.join(os.path.dirname(s.receipts_path), observed[1]["payload"]["message_copy"]), "rb") as fh:
+            self.assertEqual(fh.read(), marcus)
 
 
 class HerCopies(unittest.TestCase):
