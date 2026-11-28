@@ -8,7 +8,7 @@ fixtures drifting from tests/tools/build_demo_fixtures.py.
 Every expected value below is copied from demo-day.md by hand, not computed by the generator.
 The tests tolerate what a demo run adds (her doris-*.ics bookings, the staged-*.ics event a staged fault
 puts on the calendar, her sends in outbox/; see demo_sandbox.py) and a judge's own .eml dropped in after the
-demo's fifteen.
+demo's fifteen, with its line in facts.json, as sandbox/README.md says.
 """
 
 import datetime as dt
@@ -183,6 +183,11 @@ def read_ics(path):
 def owner_ics_files():
     """The owner's events: every .ics but what a demo run adds (her doris-* bookings, staged-* events)."""
     return demo_sandbox.owner_ics_files(CALENDAR)
+
+
+def judges_emails():
+    """A judge's own .eml files in inbox/ (sandbox/README.md): every one but the demo's fifteen."""
+    return sorted(f for f in os.listdir(INBOX) if f.endswith(".eml") and f not in NAMES)
 
 
 def pacific_utc(hhmm):
@@ -469,10 +474,22 @@ class GeneratorTest(unittest.TestCase):
             self.assertTrue(written)
             for rel in written:
                 parts = rel.split("/")
-                self.assertEqual(read_bytes(os.path.join(tmp, *parts)),
-                                 read_bytes(os.path.join(SANDBOX, *parts)), rel)
+                built, on_disk = read_bytes(os.path.join(tmp, *parts)), read_bytes(os.path.join(SANDBOX, *parts))
+                if rel == "inbox/facts.json" and judges_emails():
+                    self.assert_the_demos_facts_are_the_generators(built, on_disk)
+                else:
+                    self.assertEqual(built, on_disk, rel)
             built_ics = sorted(os.listdir(os.path.join(tmp, "calendar")))
             self.assertEqual(built_ics, owner_ics_files())
+
+    def assert_the_demos_facts_are_the_generators(self, built, on_disk):
+        # A judge who follows sandbox/README.md has added a line for each email of theirs, so the file
+        # is no longer the committed bytes: every other line must still be exactly the generator's.
+        facts = json.loads(on_disk.decode("utf-8"))
+        theirs = set(facts) - set(NAMES)
+        self.assertLessEqual(theirs, set(judges_emails()), "facts.json lines for no judge's .eml")
+        self.assertEqual({name: value for name, value in facts.items() if name not in theirs},
+                         json.loads(built.decode("ascii")), "inbox/facts.json")
 
 
 class ContractCrossCheckTest(unittest.TestCase):
