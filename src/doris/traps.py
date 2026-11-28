@@ -17,7 +17,10 @@ What it does (tests-and-judge-hours.md A.6 as amended by decisions 57 to 67; tra
 4. Judge. The outcome comes from the closing line only, through one fixed table; the verdict is
    pass or failed: failed when an invariant (I1 to I9) breaks, when there is no closing line,
    when the run crashed, or when a traps run makes a no-model hold.
-5. Scan for canaries (MAPPING.md section 4) and write tests/trap-pack/RESULTS.md plus traces/.
+5. Scan for canaries (MAPPING.md section 4) and write RESULTS.md and the traces: by default both
+   under state/throwaway/traces/<run name>/ (gitignored), so a judge's run leaves the committed
+   ones alone and the tree clean; with --record (our committed runs) tests/trap-pack/RESULTS.md
+   and traces/<run name>/.
 
 Other builders' modules (loop, receipts, ics, templates, compose, sensitive) are imported inside
 `default_deps()` only, so a half-written module fails the invariant that needs it (fail closed)
@@ -984,6 +987,7 @@ class Report:
     results_path: str
     skipped: List[str]
     items: List[Item]
+    traces_run: str = ""
 
 
 def _display(path):
@@ -1292,16 +1296,20 @@ def render_results(rep, pack_dir, model_source, traces_run):
 
 
 def run_traps(pack_dir, model_source="stub", state_root=None, traces_root=None, results_path=None, deps=None,
-              answers_path=None, model_id=None, stamp=None, echo=None):
+              answers_path=None, model_id=None, stamp=None, echo=None, record=False):
     # type: (...) -> Report
+    """One run of the pack. By default its traces and its report (RESULTS.md beside them) go under
+    state/throwaway/traces/<run name>/ (gitignored), so a judge's run leaves the committed report and
+    traces alone; record=True (our committed runs) writes traces/<run name>/ and tests/trap-pack/RESULTS.md."""
     if model_source not in TRAPS_MODEL_SOURCES:
         raise ValueError("model source must be one of %s" % ", ".join(TRAPS_MODEL_SOURCES))
     state_root = state_root or paths.state_dir("throwaway")
-    traces_root = traces_root or paths.TRACES
-    results_path = results_path or os.path.join(paths.TESTS, "trap-pack", "RESULTS.md")
+    traces_root = traces_root or (paths.TRACES if record else os.path.join(paths.state_dir("throwaway"), "traces"))
+    if record and not results_path:
+        results_path = os.path.join(paths.TESTS, "trap-pack", "RESULTS.md")
     root = pack_root(pack_dir)
     for p in (state_root, traces_root, results_path):
-        if _inside(p, root):
+        if p and _inside(p, root):
             raise ValueError("refusing to write inside the pack folder")
     deps = deps or default_deps()
     items, skipped = ingest(pack_dir)
@@ -1313,6 +1321,7 @@ def run_traps(pack_dir, model_source="stub", state_root=None, traces_root=None, 
     say = echo or (lambda s: None)
     say(line)
     traces_run = os.path.join(traces_root, run_name)
+    results_path = results_path or os.path.join(traces_run, "RESULTS.md")
     os.makedirs(traces_run, exist_ok=True)
     os.makedirs(run_state, exist_ok=True)
     manifest = {"pack": _display(root), "credit": CREDIT, "skipped": skipped,
@@ -1329,7 +1338,7 @@ def run_traps(pack_dir, model_source="stub", state_root=None, traces_root=None, 
             fail_sent_canaries([row], found)
             hits += found
         say("%s: %s (%s)" % (it.name, row.outcome, row.verdict))
-    rep = Report(run_name, line, rows, hits, results_path, skipped, items)
+    rep = Report(run_name, line, rows, hits, results_path, skipped, items, traces_run)
     os.makedirs(os.path.dirname(os.path.abspath(results_path)), exist_ok=True)
     text = render_results(rep, root, model_source, traces_run)
     with open(results_path, "w", encoding="utf-8", newline="\n") as fh:
@@ -1339,12 +1348,15 @@ def run_traps(pack_dir, model_source="stub", state_root=None, traces_root=None, 
 
 def main(argv=None, deps=None):
     # type: (Optional[List[str]], Any) -> int
-    """`python -m doris traps [path] [--model stub|replayed|live] [--answers FILE] [--model-id ID]`."""
+    """`python -m doris traps [path] [--model stub|replayed|live] [--answers FILE] [--record]`."""
     ap = argparse.ArgumentParser(prog="python -m doris traps",
                                  description="Run the Trap Pack through Doris, one item at a time on fresh state.")
     ap.add_argument("path", nargs="?", default=paths.TRAP_PACK, help="the pack folder (default tests/trap-pack/pack)")
     ap.add_argument("--model", default="stub", choices=TRAPS_MODEL_SOURCES, help="model source (default stub)")
     ap.add_argument("--answers", default=None, help="recorded answers for --model replayed")
+    ap.add_argument("--record", action="store_true",
+                    help="write the committed report tests/trap-pack/RESULTS.md and traces/ (default: both "
+                         "under state/throwaway/traces/, which git ignores)")
     ap.add_argument("--model-id", default=os.environ.get("DORIS_MODEL", ""), help=argparse.SUPPRESS)
     ap.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--traces-root", default=None, help=argparse.SUPPRESS)
@@ -1355,8 +1367,8 @@ def main(argv=None, deps=None):
         answers = os.path.join(paths.TESTS, "trap-pack", "answers.jsonl")
     rep = run_traps(args.path, model_source=args.model, state_root=args.state_root, traces_root=args.traces_root,
                     results_path=args.results, deps=deps, answers_path=answers, model_id=args.model_id,
-                    echo=print)
+                    echo=print, record=args.record)
     failed = sum(1 for r in rep.rows if r.verdict != "pass")
-    print("%d files: pass %d, failed %d. Report: %s" % (len(rep.rows), len(rep.rows) - failed, failed,
-                                                        _display(rep.results_path)))
+    print("%d files: pass %d, failed %d. Report: %s; traces: %s/" % (
+        len(rep.rows), len(rep.rows) - failed, failed, _display(rep.results_path), _display(rep.traces_run)))
     return 1 if failed else 0

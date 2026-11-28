@@ -16,6 +16,7 @@ import sqlite3
 import tempfile
 import types
 import unittest
+import unittest.mock
 from email import policy as email_policy
 
 from doris import netguard, traps
@@ -788,6 +789,53 @@ class RunnerTest(unittest.TestCase):
                                "--results", self.results],
                               deps=fake_deps(FakeLoop(lambda ctx: {"outcome": "hold:no-model"})))
         self.assertEqual(code, 1)
+
+
+class WhereItWrites(unittest.TestCase):
+    """A judge's `python -m doris traps` leaves the committed report and traces alone and the tree
+    clean: its report and traces go under state/ (gitignored), and it says where. Only --record (our
+    committed runs) writes tests/trap-pack/RESULTS.md and traces/."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = os.path.join(self.tmp.name, "repo")
+        self.pack = small_pack(os.path.join(self.tmp.name, "pack"))
+        for name, value in (("REPO", self.repo), ("STATE", os.path.join(self.repo, "state")),
+                            ("TRACES", os.path.join(self.repo, "traces")), ("TESTS", os.path.join(self.repo, "tests"))):
+            patcher = unittest.mock.patch.object(traps.paths, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def main(self, *args):
+        out = io.StringIO()
+        act = lambda ctx: {"outcome": "quarantine", "screen": 1, "why": "Quarantined."}
+        with contextlib.redirect_stdout(out):
+            code = traps.main([self.pack] + list(args), deps=fake_deps(FakeLoop(act)))
+        return code, out.getvalue()
+
+    def test_by_default_the_report_and_traces_go_under_state_and_it_says_where(self):
+        code, out = self.main()
+        self.assertEqual(code, 0, out)
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "tests")))
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "traces")))
+        (run,) = os.listdir(os.path.join(self.repo, "state", "throwaway", "traces"))
+        self.assertTrue(run.startswith("model-stub-throwaway-traps-"), run)
+        folder = "state/throwaway/traces/%s/" % run
+        self.assertTrue(os.path.isfile(os.path.join(self.repo, *(folder + "RESULTS.md").split("/"))))
+        self.assertTrue(os.path.isfile(os.path.join(self.repo, *(folder + "pack-manifest.json").split("/"))))
+        self.assertIn("Report: %sRESULTS.md" % folder, out.splitlines()[-1])
+        self.assertIn("traces: %s" % folder, out.splitlines()[-1])
+
+    def test_record_writes_the_committed_report_and_traces(self):
+        code, out = self.main("--record")
+        self.assertEqual(code, 0, out)
+        self.assertTrue(os.path.isfile(os.path.join(self.repo, "tests", "trap-pack", "RESULTS.md")))
+        (run,) = os.listdir(os.path.join(self.repo, "traces"))
+        self.assertTrue(os.path.isfile(os.path.join(self.repo, "traces", run, "pack-manifest.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "state", "throwaway", "traces")))
+        self.assertIn("Report: tests/trap-pack/RESULTS.md", out.splitlines()[-1])
+        self.assertIn("traces: traces/%s/" % run, out.splitlines()[-1])
 
 
 if __name__ == "__main__":

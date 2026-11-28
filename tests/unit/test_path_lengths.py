@@ -53,7 +53,13 @@ class RunPathsTest(unittest.TestCase):
                             state_root=os.path.join(self.root, "state", "throwaway"),
                             traces_root=os.path.join(self.root, "traces"),
                             results_path=os.path.join(self.root, "tests", "trap-pack", "RESULTS.md"), stamp=STAMP)
+        # and a judge's run, its report and traces under state/throwaway/traces/ (the default)
+        with mock.patch.object(paths, "STATE", os.path.join(self.root, "state")), \
+                mock.patch.object(paths, "TRACES", os.path.join(self.root, "traces")), \
+                mock.patch.object(paths, "TESTS", os.path.join(self.root, "tests")):
+            traps.run_traps(paths.TRAP_PACK, model_source="stub", stamp=STAMP)
         found = written(self.root)
+        self.assertTrue([p for p in found if p.startswith("state/throwaway/traces/") and p.endswith("/RESULTS.md")])
         self.assertGreater(len([p for p in found if "/messages/" in p]), 30)    # her copies are among them
         self.assert_within_budget(found)
         # the same runs under the longest model source name a traps run takes (replayed, four more letters)
