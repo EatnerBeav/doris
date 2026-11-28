@@ -199,6 +199,9 @@ class FullRunTest(_Tmp):
         with open(receipts, encoding="utf-8") as fh:
             start = json.loads(fh.readline())
         self.assertEqual(start["payload"]["model_source"], "yes-man")
+        with open(os.path.join(trace, "terminal.log"), encoding="utf-8") as fh:
+            kept = fh.read().splitlines()
+        self.assertEqual(kept[1:], self.out.strip().splitlines()[1:])    # what it printed, kept with the trace
 
     def test_the_pack_and_the_sandbox_are_untouched(self):
         for p, digest in self.before.items():
