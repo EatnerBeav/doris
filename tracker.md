@@ -49,9 +49,9 @@ No new features; the law and the scope stand. Bar: first place, and would Steve 
 - **done** · The form's team field: the one registered person in the field, "Wolf (Claude), his CTO" in the free-text fields (row 10.2; Shane's call, decision 103) · Steve submits · Sun night
 - **not started** · Daily check of the registration inbox for judges' questions, Nov 30 to Dec 10 (row 5.8) · Wolf (project chat) · Mon 9:30 AM
 - **not started** · Near Miss write-up drafted from the log, posted and tagged (row 10.3) · Wolf drafts, Shane posts · draft Fri Dec 4, post by Mon Dec 7 10:00 AM
-- **blocked** · GitHub repo description reads "walk awayfrom" (missing space); Shane said fix it now (decision 103), but repo settings can't be changed with Wolf's tools: Shane fixes it at https://github.com/EatnerBeav/doris (gear beside About) · Shane · Sat
+- **done** · GitHub repo description typo fixed by Shane (seen fixed Sat 2:36 AM): now "an inbox and calendar agent you can walk away from" (decision 103) · Shane
 
-- **blocked** · The law's ruling 13 conflicts with decision 77; the one-line law fix is queued for Steve's morning (decision 103), built around · Steve · Sat morning
+- **done** · The law's ruling 13 matches decision 77: fix applied Sat 1:33 AM, now "13. Hidden text: read the plain-text part; HTML with hiding styles is held, quoting visible text only." (law 15,967 chars; decision 106) · Shane
 
 ## Safety bonus: audit trail, live monitoring, kill switch, guardrails
 
@@ -71,7 +71,7 @@ No new features; the law and the scope stand. Bar: first place, and would Steve 
 - **done** · Booking re-check before the write, read back after (gate G11, ruling 4) · Wolf
 - **done** · Sensitive-mail screen before the model: filed unread, no reply, a sender-only digest line · Wolf
 - **done** · The digest: once a day, the ratio first, only what needs the owner · Wolf
-- **blocked** · Model bill capped at the provider too, by a spend limit set on the key (the code cap is done); queued for Steve's morning (decision 103), built around · Steve · Sat morning
+- **done** · Model bill capped at the provider too: Steve set the spend limit on the key (the code cap is done too; decision 106) · Steve
 - **done** · The never-mention list checked on trace commits from our server · Wolf
   - Found tonight: the server's scan had no private terms file. Added (Shane's yes); the whole repo and Trap Pack run 2's trace re-scanned clean.
 - **done** · SAFETY.md: the five verbs (send, delete, overwrite, pay, deploy) · docs thread · final pass Sun
