@@ -175,26 +175,33 @@ class ResumeResult:
 def resume(mode, state_dir=None) -> ResumeResult:
     """CLI only. Clears HALT; never deletes a STOP file (it tells the user to). Refuses while a
     Doris holds this mode's ledger lock, so a stop on its way cannot be cancelled by a resume.
+    A resume that fails changes nothing: while a STOP file is there (or can't be checked) HALT
+    stays as it is, so deleting the STOP file alone never lets her run; a resume after it does.
     The next run reconciles before it reads new mail (ruling 8)."""
     held = acquire_lock(lock_file(mode, state_dir))
     if held is None:
         return ResumeResult(False, None, [], "Not resumed: a Doris is still running on this ledger; "
                                               "resume once it has stopped.")
     try:
+        stops = [p for p in stop_files(mode, state_dir) if _present_or_unknown(p)]
         try:
             record = read_halt(mode, state_dir)
-            cleared = record["cause"] if record else None
+            cause = record["cause"] if record else None
         except HaltFileError:
-            cleared = "unreadable"
-        if cleared is not None:
+            cause = "unreadable"
+        cleared = None
+        if cause is not None and not stops:
             os.remove(halt_file(mode, state_dir))
-        stops = [p for p in stop_files(mode, state_dir) if _present_or_unknown(p)]
+            cleared = cause
     finally:
         held.release()
     if stops:
-        lead = "The halt is cleared, but" if cleared else "No halt to clear, but"
-        return ResumeResult(False, cleared, stops, "%s a STOP file is still in force: %s. Delete it yourself "
-                                                    "to let her run." % (lead, ", ".join(stops)))
+        if cause is None:
+            return ResumeResult(False, None, stops, "Not resumed: a STOP file is in force: %s. Delete it yourself "
+                                                    "to let her run." % (", ".join(stops),))
+        return ResumeResult(False, None, stops, "Not resumed: a STOP file is still in force: %s, so the halt (%s) "
+                                                "stays. Delete the file yourself, then run `%s` again."
+                            % (", ".join(stops), CAUSE_WORDS.get(cause, cause), _resume_command()))
     if cleared is None:
         return ResumeResult(True, None, [], "Nothing to resume: no halt is in force.")
     return ResumeResult(True, cleared, [], "Resumed: the halt (%s) is cleared. The next run reconciles "

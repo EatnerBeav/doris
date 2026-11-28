@@ -309,6 +309,8 @@ class StopFileTest(Base):
         self.assertTrue(os.path.exists(stop), "code never deletes a user's STOP file")
         self.assertEqual(self.run_now("quick")[0], supervisor.EXIT_REFUSED_HALT)
         os.remove(stop)                                  # the user deletes it
+        self.assertEqual(self.run_now("quick")[0], supervisor.EXIT_REFUSED_HALT)   # the failed resume changed nothing
+        self.assertTrue(supervisor.resume(self.mode).ok)
         self.assertEqual(self.run_now("quick")[0], 0)
 
 

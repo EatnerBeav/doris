@@ -206,11 +206,36 @@ class ResumeTest(StateDirTest):
         res = supervisor.resume(self.mode)
         self.assertFalse(res.ok)
         self.assertTrue(os.path.exists(stop))
-        self.assertFalse(os.path.exists(self.halt))
+        self.assertTrue(os.path.exists(self.halt))          # a failed resume clears nothing
         self.assertEqual(res.stop_files, [stop])
         self.assertIn(stop, res.message)
         self.assertIn("delete", res.message.lower())
         self.assertEqual(supervisor.halt_cause(self.mode), "stop_file")
+
+    def test_a_failed_resume_changes_nothing_so_deleting_the_stop_file_alone_never_starts_her(self):
+        stop = self.touch(os.path.join(self.sdir, "STOP"))
+        supervisor.request_stop(self.mode, "cli")
+        with open(self.halt, "rb") as fh:
+            before = fh.read()
+        res = supervisor.resume(self.mode)
+        self.assertEqual((res.ok, res.cleared, res.stop_files), (False, None, [stop]))
+        self.assertTrue(res.message.startswith("Not resumed: "), res.message)
+        self.assertIn("resume", res.message.replace("Not resumed", ""))   # says to resume again after
+        with open(self.halt, "rb") as fh:
+            self.assertEqual(fh.read(), before)               # HALT untouched, its first cause kept
+        os.remove(stop)                                       # the user deletes the STOP file
+        self.assertEqual(supervisor.halt_cause(self.mode), "cli")
+        self.assertIn("halted (stop on the command line)", supervisor._halt_refusal(self.mode))
+        res = supervisor.resume(self.mode)                    # only now does a resume clear it
+        self.assertEqual((res.ok, res.cleared), (True, "cli"))
+        self.assertIsNone(supervisor.halt_cause(self.mode))
+
+    def test_a_stop_file_with_no_halt_is_named_and_nothing_is_written(self):
+        stop = self.touch(os.path.join(self.repo, "STOP"))
+        res = supervisor.resume(self.mode)
+        self.assertEqual((res.ok, res.cleared, res.stop_files), (False, None, [stop]))
+        self.assertFalse(os.path.exists(self.halt))
+        self.assertIn(stop, res.message)
 
     def test_resume_with_nothing_to_clear(self):
         res = supervisor.resume(self.mode)
