@@ -45,8 +45,7 @@ import xml.etree.ElementTree as ET
 import xml.parsers.expat
 
 from .. import caps, ics, slots
-from ..shapes import (AlreadyExists, CalendarError, CalendarTimeout, Event, InboundItem, MailError, NotHers,
-                      SendUnknown)
+from ..shapes import AlreadyExists, CalendarError, CalendarTimeout, Event, InboundItem, MailError, NotHers
 from . import jmap
 from .base import CalendarAdapter, MailAdapter
 

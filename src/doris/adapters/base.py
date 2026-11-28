@@ -1,4 +1,9 @@
-"""The adapter interface. Sandbox and live implement exactly this, so one code path serves both.
+"""The adapter interface. Sandbox and live both implement it, so one code path serves both.
+
+Beyond it the loop uses three things only one side has: next_arrival() on the sandbox mail,
+called only on the demo's advancing clock, which only the sandbox runs; arm() and disarm() on
+the sandbox adapters (staged faults), used only where the adapter has them; and smoke_left_out
+on the live mail (the smoke check's own requests a fetch left out), read as 0 where it is absent.
 
 Rules every implementation keeps:
 - A failure raises (MailError, CalendarError, CalendarTimeout, SendUnknown). It never returns
@@ -15,8 +20,6 @@ from ..shapes import Event, InboundItem
 
 
 class MailAdapter:
-    host_kind = "mail"
-
     def fetch_new(self) -> List[InboundItem]:
         """Every message not yet fetched, oldest first. Raises MailError on any failure."""
         raise NotImplementedError
@@ -37,8 +40,6 @@ class MailAdapter:
 
 
 class CalendarAdapter:
-    host_kind = "calendar"
-
     def query(self, start_utc, end_utc) -> List[Event]:
         """Every event overlapping [start, end), repeats expanded. Raises CalendarError/CalendarTimeout."""
         raise NotImplementedError

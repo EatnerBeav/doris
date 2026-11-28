@@ -168,8 +168,7 @@ _APOSTROPHES = "'\u2019\u2018\u02bc`\u00b4\u2032"
 
 
 def _norm(text: str) -> str:
-    t = unicodedata.normalize("NFKC", text or "")
-    t = "".join(ch for ch in t if unicodedata.category(ch) != "Cf").lower()
+    t = mail.fold_for_match(text).lower()
     for a in _APOSTROPHES:
         t = t.replace(a, "")
     t = re.sub(r"[^\w\s]|_", " ", t)
