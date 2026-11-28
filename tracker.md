@@ -1,6 +1,6 @@
 # Tracker: every scored item
 
-Updated Fri Nov 27, 6:10 PM Pacific. One line per item the judges score, from the project law (Never cut, commands, Dates) and the Nov 26 brief check. Times are Pacific.
+Updated Fri Nov 27, 6:20 PM Pacific. One line per item the judges score, from the project law (Never cut, commands, Dates) and the Nov 26 brief check. Times are Pacific.
 
 Status words: **done** = in the code on main and tested; **built** = in the code, the proof still to show; **in progress**; **not started**; **blocked** (says on what).
 
@@ -15,7 +15,7 @@ Status words: **done** = in the code on main and tested; **built** = in the code
 | 7 | `stop` / `resume` | Kill switch +1 | done on main; PR #2 adds SIGTERM/SIGHUP, the lifeline and the `sending` state | Kickoff (Wolf) | PR #2 merge, Fri night |
 | 8 | Booking re-check: right before the write, read back after | Reliability, never cut | done: gate G11 plus the re-read after the write (ruling 4) | Kickoff (Wolf) | done |
 | 9 | Signature check | Guardrails, never cut | done: gate G8 compares the signature byte for byte | Kickoff (Wolf) | done |
-| 10 | Fresh-clone run of the one command on three systems | Engineering | in progress: CI to run `demo` and `traps` from a fresh checkout on Linux, macOS and Windows (PR #5); hand runs on Shane's Windows PC and on our Linux server | Kickoff (Wolf) | Fri night |
+| 10 | Fresh-clone run of the one command on three systems | Engineering | in progress. Hand runs from a fresh clone of main, Fri 6:05 PM: Linux server, `demo` 14.1 s and `traps` 20/20; Shane's Windows 11 PC, `demo` 13.6 s, but `traps` 1/20: its run paths pass Windows' 260-character limit (fix and a path-budget test on PR #2). CI to run `demo` and `traps` on all six legs (PR #5). macOS from CI only | Kickoff (Wolf) | Sat 10:00 AM |
 | 11 | No-key line | Engineering, honesty | built: the demo's first line says the answers are replayed and no key was found. Wording of what a key costs to check | Kickoff (Wolf) | Sun 12:00 PM |
 | 12 | Live or replayed mark on every trace | Audit trail, honesty | in progress: receipts carry their mode; live runs get a manifest (live, date, commit, measured cost) with tonight's smoke; demo and Trap Pack traces next | Kickoff (Wolf) | Sat 12:00 PM |
 | 13 | Keys, tiers and cost table | Engineering | not started: cost is measured in tonight's smoke and Saturday's runs | README pass (Sunday) | Sun 6:00 PM |
