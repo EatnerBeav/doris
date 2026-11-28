@@ -1,4 +1,4 @@
-"""Receipts: one hash-chained JSONL line for every step (owner: state).
+"""Receipts: one hash-chained JSONL line for every step.
 
 Each line is canonical JSON bytes plus b"\\n", appended in binary mode, flushed and fsynced
 before write() returns, so the file is byte-identical on Linux, macOS and Windows.

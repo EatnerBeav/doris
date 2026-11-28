@@ -217,7 +217,7 @@ def _within_until(occ, until):
     return occ <= until
 
 
-def _expand(v, span_start, span_end):
+def _expand(v, span_end):
     """Occurrence starts of a DAILY or WEEKLY rule, in the event's own kind, from DTSTART
     up to the end of the span. Raises _CannotExpand for anything else."""
     freq, interval, count, until, byday, wkst = _parse_rrule(v.rrule)
@@ -415,7 +415,7 @@ class SandboxCalendar(_Faults, CalendarAdapter):
             return [ev] if _touches(ev, start, end) else []
         length = v.end - v.start
         try:
-            starts = list(_expand(v, start, end))
+            starts = list(_expand(v, end))
         except _CannotExpand:
             return whole
         # Occurrences that end well before the span need no closer look (two days covers any zone).

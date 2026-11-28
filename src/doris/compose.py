@@ -20,8 +20,7 @@ import re
 from . import holds, templates
 from .shapes import UTC
 
-# Locked call 10 in the law. templates.md shows the same two lines without the period after
-# "Machines"; the law wins (named in the voice builder's report for Shane to confirm).
+# The signature, word for word as the law sets it (locked call 10).
 SIGNATURE = ("Doris, AI assistant to Shane Bornstein, Hire the Machines.\n"
              "I'm an AI, not a person. Reply \"stop\" to opt out.")
 _SIG_TAIL = "\n\n" + SIGNATURE

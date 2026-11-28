@@ -5,8 +5,9 @@ Zone ids: "Pacific", "Mountain", "Central", "Eastern", "UTC", fixed offsets "UTC
 
 US daylight time is coded directly: from the second Sunday of March at 2:00 AM local to the
 first Sunday of November at 2:00 AM local. UK summer time: from the last Sunday of March to
-the last Sunday of October, at 01:00 UTC both ways. The gap and repeat hours are not handled
-(B10 is cut): a local time inside them takes the offset in effect just before the change.
+the last Sunday of October, at 01:00 UTC both ways. A local time inside the skipped or the
+repeated hour takes the offset in effect just before the change. That never reaches a booking:
+every change falls on a Sunday, outside her Mon to Fri 9 to 5 Pacific slots.
 
 Everything here is pure: no wall clock, no environment.
 """
