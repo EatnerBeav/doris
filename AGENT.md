@@ -35,7 +35,7 @@ record    one hash-chained receipt line for every step
 | Step | Where | What it does | What it never does |
 |---|---|---|---|
 | read | `adapters/*.fetch_new`, `mail.parse_eml`, `screens.run_batch`, `screens.run_message` | Reads new mail by server ID (live: IMAP UID with UIDVALIDITY), never the seen flag. Decodes strictly in each part's declared charset. Runs the screens before the model: decode (quarantine on failure), seen or her own, the stop scan over the whole batch, sensitive mail, owner mail, no-reply kinds, addressing (ruling 18), oversize, hidden text, then counts links and attachments. | Opens a link, attachment, image, invite or attached email. A broken email never stops the run: it is quarantined with a receipt. |
-| classify | `model.Model.classify`, `model.build_request`, `model.parse_answer` | Sends the sender's own text, the subject and the sent date as labelled data. Takes back one JSON object: a class from `shapes.CLASSES`; the date, 24-hour time, zone and length the sender wrote; a pick number; and two flags (an instruction aimed at an AI, a side question). Anything off the schema becomes `unsure`. | Writes a reply, picks a tool or takes an action. No answer at all (model down after one retry, no key) is a hold, never a guess. |
+| classify | `model.Model.classify`, `model.build_request`, `model.parse_answer` | Sends the subject, the sender's own text, any text below their closing, and the sent date as labelled data. Takes back one JSON object: a class from `shapes.CLASSES`; the date, 24-hour time, zone and length the sender wrote; a pick number; and two flags (an instruction aimed at an AI, a side question). Anything off the schema becomes `unsure`. | Writes a reply, picks a tool or takes an action. No answer at all (model down after one retry, no key) is a hold, never a guess. |
 | decide | `policy.decide` | One pure function: a held thread first, then holds that code finds on its own (money words or a currency amount, a Reply-To unlike From), then the model's class, one row at a time. The parser (`parser.py`) must agree with the model before anything is booked directly. | Lets the model choose the action. Code can force a hold, never a send. |
 | check | `gate.check` | Runs all 17 checks on every action, in order, and records pass, fail, n/a or error for each. Passes only if every check that applies passed. | Skips a check, or treats an error or a missing input as a pass. |
 | act | `adapters/sandbox.py`, `adapters/live.py`, `compose.py`, `templates.render`, `ics.build_event` | Sends an approved template with the locked signature, writes her event create-only, deletes her own event by booking ID, files mail with a keyword. Reads every write back: the event is fetched after it is written, and her sent copy is looked for in Sent. | Sends model-written prose, deletes or moves mail, edits an event in place, or retries a write whose result it doesn't know. |
@@ -43,7 +43,7 @@ record    one hash-chained receipt line for every step
 
 ### Her tools
 
-Every effect she can have is one of five fixed action kinds (`shapes.ACTION_KINDS`), and every one passes the gate:
+Every send and every calendar write is one of five fixed action kinds (`shapes.ACTION_KINDS`), and every one passes the gate. Filing (a keyword on her own copy of a message) is the one write outside the gate.
 
 | Action | What it is | Who it can reach |
 |---|---|---|
@@ -53,7 +53,7 @@ Every effect she can have is one of five fixed action kinds (`shapes.ACTION_KIND
 | `calendar_create` | Her event, create-only, under her own booking ID | The owner's calendar. No organizer, no attendees, so the calendar server mails nobody |
 | `calendar_delete` | Removes her own event by booking ID | The owner's calendar, her own `doris-` events only |
 
-Her reads are listed in `receipts.CALLS`: fetch mail, look in Sent, file a message (a keyword on her own copy), query the calendar, read one event back, and the model call. There is no tool for the web, a shell, a payment, deleting or moving mail, editing an event, or writing to anyone an email names.
+Her other calls are listed in `receipts.CALLS`: fetch mail, look in Sent, query the calendar, read one event back, the model call, and filing a message. There is no tool for the web, a shell, a payment, deleting or moving mail, editing an event, or writing to anyone an email names.
 
 ### The modules
 
@@ -86,14 +86,14 @@ From `src/`, with Python 3.9 or newer (`py` in place of `python3` on Windows). N
 
 | Command | What it shows | Status |
 |---|---|---|
-| `python3 -m doris demo` | The sandbox day under the kill switch: 15 emails, ending `13 handled, 2 held, 0 human approvals`, then the chain verified | Built. With no key it replays recorded model answers if `sandbox/answers.jsonl` is present, else a keyword stand-in (stub) reads the mail, and the first line and every receipt say which. Recorded answers: **pending** |
-| `python3 -m doris traps` | The organizers' Trap Pack, one file at a time on fresh throwaway state; writes `tests/trap-pack/RESULTS.md` and a trace per item | Built |
+| `python3 -m doris demo` | The sandbox day under the kill switch: 15 emails, ending `13 handled, 2 held, 0 human approvals`, then the chain verified. Run it on a fresh clone: she never reads the same email twice, so a second `demo` in the same folder handles 0 | Built. With no key it replays recorded model answers if `sandbox/answers.jsonl` is present, else a keyword stand-in (stub) reads the mail, and the first line and every receipt say which. Recorded answers: **pending** |
+| `python3 -m doris traps` | The organizers' Trap Pack, one file at a time on fresh throwaway state; writes `tests/trap-pack/RESULTS.md` and a trace per item | Built. With no key it runs the keyword stub, not Claude, and rewrites the committed `RESULTS.md` (run 1's report stays in git and in `traces/`). It runs outside the supervisor: `stop` does not reach it, a `STOP` file in the repo root halts it at its next step |
 | `python3 -m doris verify [receipts.jsonl]` | Recomputes a run's hash chain; names the first line that was changed, cut, moved or added | Built |
 | `python3 -m doris stop` | Halts her now, in the sandbox and live; a run in progress is killed mid-call | Built |
 | `python3 -m doris resume` | Clears a halt. Only the command line can | Built |
 | `python3 -m doris run` | The long run: a pass every ten minutes until stopped, and the day's digest from 5:00 PM Pacific. Sandbox by default | Built |
 | `python3 -m doris run --live` | The same against her own mailbox and the owner's shared calendar. Refuses to start without a smoke from the last 24 hours that found its sent copy | Built; its first live run is **pending** |
-| `python3 -m doris smoke` | Every live adapter call once against the real servers | Built |
+| `python3 -m doris smoke` | Every live adapter call once against the real servers | Built; no live smoke result is committed yet: **pending** |
 | `python3 -m doris redteam` | The hostile yes-man stand-in model under the same gate: zero bad actions | **Pending**: prints "not built yet" today. The stand-in itself exists (`model._yes_man_answer`) |
 | `python3 -m doris replay <run>` | Steps through a finished run in plain words: saw, decided and why, called, got back, verified | **Pending**: prints "not built yet" today |
 | `python3 -m doris watch` | A live page of every step, its why and the cost so far, with one Stop button | **Pending**: prints "not built yet" today |
@@ -110,7 +110,7 @@ From `src/`, with Python 3.9 or newer (`py` in place of `python3` on Windows). N
 
 Judges need no credential at all: every command above except `run --live` and `smoke` runs on the sandbox with no network. We never ask anyone for their credentials.
 
-Live, Doris uses Fastmail test accounts we control: `whizz@fastmail.com` (the owner and his calendar), `doris.htm@fastmail.com` (her own mailbox) and `wolf.whizz@fastmail.com` (our test sender). Every secret lives in one file on our server, `/root/doris-secrets/.env`, never in the repo; `.env.example` lists the names with no values. The secret scan (`src/secret_scan.py`, run by the commit hook and by CI on every push) blocks known key shapes, and on any machine that holds that file, every value in it.
+Live, Doris uses Fastmail test accounts we control: `whizz@fastmail.com` (the owner and his calendar), `doris.htm@fastmail.com` (her own mailbox) and `wolf.whizz@fastmail.com` (our test sender). Every secret lives in one file on our server, `/root/doris-secrets/.env`, never in the repo; `.env.example` lists the names with no values (the two JMAP token names join it with the JMAP sender: **pending**). The secret scan (`src/secret_scan.py`, run by the commit hook and by CI on every push) blocks known key shapes, and on any machine that holds that file, every value in it.
 
 | Credential | What it is and its scope | Used by | What it cannot do |
 |---|---|---|---|
@@ -124,11 +124,11 @@ Settings that are not secrets: `DORIS_OWNER_ADDRESS` (where hold notices, the di
 
 **What she can see.** Mail reaches her by a forwarding rule on the owner's account that skips her own address and sensitive mail (banks, payments, security codes, password resets, payroll, tax, medical). She sees every message that rule passes, which is all mail to the owner except the skips, from the moment it was switched on. The rule lives in the owner's Fastmail account, not in this repo, and its first end-to-end check is the live smoke: **pending**. Anything sensitive that slips through is filed unread by screen 5 before the model, and only the sender, a hash and the check name are kept.
 
-**Where she can connect.** For the life of a run, `netguard.install` checks every outbound connection against a list: live, her IMAP, SMTP and CalDAV hosts (`live.hosts`), plus `api.anthropic.com` when the model is live; sandbox and traps with a replayed or stub model, no host at all. A name that is not on the list is never even looked up.
+**Where she can connect.** For the life of a run, `netguard.install` checks every outbound connection against a list: live, her IMAP, SMTP and CalDAV hosts (`live.hosts`), plus `api.anthropic.com` and the HTTPS proxy's host, if one is set, when the model is live; sandbox and traps with a replayed or stub model, no host at all. A name that is not on the list is never even looked up.
 
 ## Limits we state
 
-- Google and Microsoft calendars need an OAuth adapter we did not build. She speaks IMAP, SMTP or JMAP, and CalDAV.
+- Google and Microsoft calendars need an OAuth adapter we did not build. She speaks IMAP, SMTP and CalDAV; JMAP sending is **pending**.
 - The overnight run stays under 60 emails.
 - Not built yet: the one nudge on an unanswered offer (T9), and the once-a-cycle check that her future bookings are still on the calendar (ruling 17; today it runs only when a booking is resumed after a restart).
 - The Trap Pack's known limits, and what each run got wrong, are in `tests/trap-pack/RUNS.md`.
