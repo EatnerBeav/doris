@@ -84,12 +84,117 @@ def demo(argv):
     if refusal:
         print(refusal)
         return supervisor.EXIT_REFUSED_HALT
+    try:
+        kept = fresh_day()
+    except NotMoved as refused:
+        print(refused)
+        return 1
     source, model_id = sandbox_source()
     state = paths.state_dir("sandbox")
     name, run_dir = new_run_dir(state, run_name(source, "sandbox"))
     _say(first_line(source, model_id))
+    if kept:
+        _say("A fresh sandbox day: the last demo's state and her sends and bookings are kept in %s."
+             % (_display(kept) + "/",))
     return supervise("sandbox", state, name, run_dir,
                      sandbox_config(name, state, run_dir, source, model_id, digest=True))
+
+
+# --- a fresh day for each demo -------------------------------------------------------------------
+RUN_CALENDAR = ("doris-", "staged-")     # what a run writes into sandbox/calendar/: her bookings, staged events
+
+
+class NotMoved(Exception):
+    """The last demo day could not be moved aside: the demo is not started, and the message says
+    where everything is."""
+
+
+def _move(src, dst):
+    os.rename(src, dst)     # one folder or file, never copied: Windows refuses one held open, and says so
+
+
+def last_day_finished():
+    """True when the latest sandbox run wrote its closing summary line and no halted line: the day
+    is done. Anything else (no run yet; a halt, whose dropped mail the next run reads again with
+    nothing sent twice; a crash; a run still going; a file that cannot be read) is not."""
+    path = latest_receipts("sandbox")
+    if path is None:
+        return False
+    try:
+        lines = receipts.read_lines(path)
+    except Exception:
+        return False
+    return bool(lines) and lines[-1].get("kind") == "summary" and not any(l.get("kind") == "halted" for l in lines)
+
+
+def her_outputs():
+    """[(file, folder name under the kept day)] for what a run wrote into the sandbox: her sends
+    (outbox/, but .gitkeep) and her bookings and staged events (calendar/doris-*.ics, staged-*.ics)."""
+    found = []
+    for folder, mine in (("outbox", lambda n: n != ".gitkeep"),
+                         ("calendar", lambda n: n.startswith(RUN_CALENDAR) and n.endswith(".ics"))):
+        where = os.path.join(paths.SANDBOX, folder)
+        for name in sorted(os.listdir(where)) if os.path.isdir(where) else ():
+            if mine(name) and os.path.isfile(os.path.join(where, name)):
+                found.append((os.path.join(where, name), folder))
+    return found
+
+
+def fresh_day():
+    """Before a demo: when the last sandbox day finished, move it aside, never delete it, into
+    state/old/sandbox-<UTC stamp>/ (the whole state/sandbox folder as one rename, then her sends in
+    outbox/ and her bookings in calendar/ inside it), so this demo is the same day again. Returns
+    that folder, or None when nothing was moved (see last_day_finished). A move that fails puts back
+    what had moved and raises NotMoved; whatever cannot be put back is named, with where it is."""
+    if not last_day_finished():
+        return None
+    state, old = paths.state_dir("sandbox"), os.path.join(paths.STATE, "old")
+    base = "sandbox-" + _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    kept = os.path.join(old, base)
+    for n in range(2, 100):
+        if not os.path.lexists(kept):
+            break
+        kept = os.path.join(old, "%s-%d" % (base, n))
+    moved = []                              # (from, to), in the order they moved
+    try:
+        os.makedirs(old, exist_ok=True)
+        src = state
+        _move(state, kept)
+        moved.append((state, kept))
+        for src, folder in her_outputs():
+            os.makedirs(os.path.join(kept, folder), exist_ok=True)
+            dst = os.path.join(kept, folder, os.path.basename(src))
+            _move(src, dst)
+            moved.append((src, dst))
+    except OSError as exc:
+        stuck = _put_back(moved, kept)
+        said = ("Not started: the last demo day could not be moved aside. %s refused to move (%s: %s); "
+                "close whatever holds it open and run the demo again."
+                % (_display(src), type(exc).__name__, exc.strerror or exc))
+        if stuck:
+            said += ("\nThese had already moved and could not be put back; nothing is lost, move them back by "
+                     "hand:\n" + "\n".join("  %s is now at %s" % (_display(a), _display(b)) for a, b in stuck))
+        else:
+            said += " Nothing was moved: her state, sends and bookings are where they were."
+        raise NotMoved(said) from exc
+    return kept
+
+
+def _put_back(moved, kept):
+    """Undo fresh_day's moves, last first. Returns the (from, to) pairs that could not be put back."""
+    stuck = []
+    for src, dst in reversed(moved):
+        try:
+            if dst == kept:                 # the state folder: without the folders made inside it
+                if stuck:                   # a send or booking is still in there: it stays where that is said
+                    raise OSError("her sends or bookings are still inside it")
+                for folder in ("outbox", "calendar"):
+                    if os.path.isdir(os.path.join(kept, folder)) and not os.listdir(os.path.join(kept, folder)):
+                        os.rmdir(os.path.join(kept, folder))
+            _move(dst, src)
+        except OSError:
+            stuck.append((src, dst))
+    return list(reversed(stuck))
 
 
 def run_cmd(argv):

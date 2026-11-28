@@ -104,14 +104,125 @@ class Demo(Isolated):
             config = json.load(fh)
         self.assertEqual((config["model_source"], config["calendar_timeout_s"]), ("stub", 0.3))
 
-    def test_a_second_demo_runs_only_new_mail_and_sends_nothing_twice(self):
-        run_cli(["demo"])
-        sent = sorted(os.listdir(os.path.join(self.sandbox, "outbox")))
+    def old_days(self):
+        old = os.path.join(self.state, "old")
+        return [os.path.join(old, n) for n in sorted(os.listdir(old))] if os.path.isdir(old) else []
+
+    def her_outputs(self):
+        """What a run wrote into the sandbox: her sends, and her bookings and staged events."""
+        return (sorted(n for n in os.listdir(os.path.join(self.sandbox, "outbox")) if n != ".gitkeep"),
+                sorted(n for n in os.listdir(os.path.join(self.sandbox, "calendar")) if demo_sandbox.is_run_event(n)))
+
+    def test_a_second_demo_is_a_fresh_day_and_the_last_one_is_kept_in_state_old(self):
+        code, first_out = run_cli(["demo"])
+        self.assertEqual(code, 0, first_out)
+        self.assertNotIn("A fresh sandbox day", first_out)
+        (first_run,) = self.runs()
+        sent, booked = self.her_outputs()
+        self.assertTrue(sent and booked)
         code, out = run_cli(["demo"])
         self.assertEqual(code, 0, out)
-        s = summary_of(os.path.join(self.runs()[-1], "receipts.jsonl"))
-        self.assertEqual((s["handled"], s["held"], s["sends"]), (0, 0, 0))
-        self.assertEqual(sorted(os.listdir(os.path.join(self.sandbox, "outbox"))), sent)
+        (run,) = self.runs()                             # the new day's state holds only its own run
+        s = summary_of(os.path.join(run, "receipts.jsonl"))
+        self.assertEqual((s["handled"], s["held"], s["human_approvals"], s["bookings"]), (13, 2, 0, 2))
+        self.assertEqual(self.her_outputs(), (sent, booked))      # the same day's sends and bookings, once
+        (old,) = self.old_days()
+        self.assertTrue(os.path.basename(old).startswith("sandbox-"), old)
+        self.assertTrue(os.path.isfile(os.path.join(old, "ledger.sqlite")))
+        kept = os.path.join(old, "runs", os.path.basename(first_run), "receipts.jsonl")
+        self.assertTrue(receipts.verify(kept, finished=True).ok)
+        self.assertEqual(sorted(os.listdir(os.path.join(old, "outbox"))), sent)
+        self.assertEqual(sorted(os.listdir(os.path.join(old, "calendar"))), booked)
+        self.assertTrue(os.path.isfile(os.path.join(self.sandbox, "outbox", ".gitkeep")))
+        self.assertIn("A fresh sandbox day: the last demo's state and her sends and bookings are kept in ", out)
+        self.assertIn(os.path.basename(old), out)
+
+    def test_after_a_halted_run_the_demo_moves_nothing_and_reads_the_dropped_mail_again(self):
+        def stop_after_the_first_message():
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                runs = os.path.join(self.state, "sandbox", "runs")
+                names = sorted(os.listdir(runs)) if os.path.isdir(runs) else []
+                if names and closed(whole_lines(os.path.join(runs, names[-1], "receipts.jsonl"))):
+                    break
+                time.sleep(0.02)
+            supervisor.request_stop("sandbox", "cli")
+
+        stopper = threading.Thread(target=stop_after_the_first_message)
+        stopper.start()
+        code, out = run_cli(["demo"])
+        stopper.join()
+        self.assertEqual(code, supervisor.EXIT_HALTED, out)
+        (halted_run,) = self.runs()
+        self.assertEqual(run_cli(["resume"])[0], 0)
+        code, out = run_cli(["demo"])
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("A fresh sandbox day", out)
+        self.assertEqual(self.old_days(), [])
+        self.assertEqual(self.runs()[0], halted_run)
+        self.assertEqual(len(self.runs()), 2)
+        sent, _ = self.her_outputs()
+        self.assertEqual(len([n for n in sent if n.endswith("-S2.eml")]), 1, sent)
+
+    def test_a_day_that_closed_after_a_halted_line_or_never_closed_is_not_finished(self):
+        def last_run(*kinds):
+            run = os.path.join(self.state, "sandbox", "runs", "run-%d" % len(kinds))
+            os.makedirs(run)
+            with open(os.path.join(run, "receipts.jsonl"), "w", encoding="utf-8") as fh:
+                fh.write("".join(json.dumps({"kind": k, "payload": {}}) + "\n" for k in kinds))
+
+        self.assertFalse(cli.last_day_finished())                 # no run yet
+        last_run("run_start", "summary")
+        self.assertTrue(cli.last_day_finished())
+        last_run("run_start", "halted", "summary")                # her supervisor gone: she closed it herself
+        self.assertFalse(cli.last_day_finished())
+        last_run("run_start", "fetched", "decided", "called")     # a crash, or a run still going
+        self.assertFalse(cli.last_day_finished())
+
+    def test_a_move_that_fails_refuses_the_demo_and_loses_nothing(self):
+        run_cli(["demo"])
+        (first_run,) = self.runs()
+        before = self.her_outputs()
+        real = cli._move
+
+        def refuses_one_send(src, dst):
+            if os.path.dirname(src) == os.path.join(self.sandbox, "outbox") and src.endswith("-S2.eml"):
+                raise PermissionError(13, "The process cannot access the file", src)
+            real(src, dst)
+
+        with mock.patch.object(cli, "_move", refuses_one_send):
+            code, out = run_cli(["demo"])
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("Not started", out)
+        self.assertIn("-S2.eml", out)
+        self.assertIn("PermissionError", out)
+        self.assertEqual(self.runs(), [first_run])                # no new run, and the last one is where it was
+        self.assertTrue(os.path.isfile(os.path.join(self.state, "sandbox", "ledger.sqlite")))
+        self.assertEqual(self.her_outputs(), before)
+        self.assertEqual(self.old_days(), [])
+        self.assertFalse({"outbox", "calendar"} & set(os.listdir(os.path.join(self.state, "sandbox"))))
+
+    def test_a_move_that_cannot_be_undone_says_what_moved_where(self):
+        run_cli(["demo"])
+        real, calls = cli._move, []
+
+        def refuses_from_the_third(src, dst):
+            calls.append(src)
+            if len(calls) >= 3:
+                raise PermissionError(13, "The process cannot access the file", src)
+            real(src, dst)
+
+        with mock.patch.object(cli, "_move", refuses_from_the_third):
+            code, out = run_cli(["demo"])
+        self.assertNotEqual(code, 0, out)
+        (old,) = self.old_days()
+        self.assertIn("could not be put back", out)
+        self.assertIn(os.path.basename(old), out)
+        self.assertTrue(os.path.isfile(os.path.join(old, "ledger.sqlite")))    # moved, kept, and said so
+        self.assertEqual(os.listdir(os.path.join(old, "outbox")), [os.path.basename(calls[1])])
+        self.assertIn("%s is now at " % cli._display(calls[1]), out)
+        self.assertIn("%s is now at " % cli._display(os.path.join(self.state, "sandbox")), out)
+        self.assertFalse(os.path.exists(os.path.join(self.state, "sandbox")))
 
     def test_a_halt_in_force_refuses_the_demo(self):
         supervisor.request_stop("sandbox", "cli")
