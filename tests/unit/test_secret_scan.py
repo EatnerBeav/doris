@@ -73,6 +73,18 @@ class SecretScanTest(unittest.TestCase):
         self.assertEqual((code, values), (0, []), out)
         self.assertIn("clean (0 .env value(s)", out)
 
+    def test_an_address_shaped_value_under_a_key_that_names_a_secret_still_blocks(self):
+        """L2: the plain-address exemption let IMAP_PASSWORD=<an address-shaped value> through. It
+        holds only when the key names no secret (PASS, TOKEN, SECRET, KEY, in any case)."""
+        shaped = FAKE_PASSWORD + "@mailhost.example"
+        for key in ("IMAP_" + "PASSWORD", "WOLF_JMAP_" + "TOKEN", "app_" + "secret", "Api_" + "Key", "IMAP_PASS"):
+            with self.subTest(key=key):
+                code, out, values = self.scan_files("%s=%s\n" % (key, shaped), [("trace.txt", "login " + shaped + "\n")])
+                self.assertEqual(values, [shaped])
+                self.assertEqual(code, 1, out)
+                self.assertIn(" env_value", out)
+                self.assertNotIn(shaped, out)
+
     def test_a_value_that_is_not_a_plain_address_still_blocks_under_any_name(self):
         url = "imaps://kestrel:" + FAKE_PASSWORD + "@imap.mailhost.example"
         env = "OWNER_CALENDAR=%s\nSTRAY_KEY=%s\nDORIS_IMAP_URL=%s\nNOTE=%s@mailhost.example\n" % (
