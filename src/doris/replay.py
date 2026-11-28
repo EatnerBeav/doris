@@ -85,10 +85,13 @@ def replay(run, message=None):
         checked = [(label, path, _checked_lines(label, path)) for label, path in files]   # every chain first
         parts = []
         if len(files) > 1 or skipped:
-            head = ("Replay of trace %s: %d receipt files, one per item, each chain verified before any is "
-                    "stepped through." % (shown(_display(shown_as)), len(files)))
-            if skipped:
-                head += " NOT replayed, no receipts.jsonl in: %s." % (", ".join(shown(s) for s in skipped),)
+            head = ("Replay of trace %s: %d receipt file%s, one per item, each chain verified before any is "
+                    "stepped through." % (shown(_display(shown_as)), len(files), "" if len(files) == 1 else "s"))
+            for why, words in (("none", "no receipts.jsonl in"), ("unreadable", "could not be read"),
+                               ("nested", "inside an item with its own receipts")):
+                names = [shown(n) for n, w in skipped if w == why]
+                if names:
+                    head += " NOT replayed, %s: %s." % (words, ", ".join(names))
             parts.append(head)
         found = False
         for label, path, lines in checked:
@@ -192,38 +195,66 @@ def find(run):
 def in_folder(folder):
     """A run folder (its receipts.jsonl), or a trace folder of item folders, each holding its own
     receipts.jsonl (a Trap Pack trace) or one folder per answer that does (a redteam trace, items
-    labelled case/answer). A folder that holds none is named, never passed over in silence."""
+    labelled case/answer). Returns (items, folder, skipped): skipped names each folder passed over and
+    why ("none": no receipts in it; "unreadable": it could not be read; "nested": receipts inside an
+    item that has its own), so none is passed over in silence. A folder reached twice through a link
+    is replayed once."""
     own = os.path.join(folder, "receipts.jsonl")
     if os.path.isfile(own):
         return [(None, own)], own, []
-    items, skipped = [], []
+    items, skipped, seen = [], [], {os.path.realpath(folder)}
     for name in _folders(folder):
-        path = os.path.join(folder, name, "receipts.jsonl")
-        if os.path.isfile(path):
-            items.append((name, path))
+        sub = os.path.join(folder, name)
+        if not _first_visit(sub, seen):
             continue
-        inner = _folders(os.path.join(folder, name), quiet=True)
-        answers = [(a, os.path.join(folder, name, a, "receipts.jsonl")) for a in inner]
-        answers = [(a, p) for a, p in answers if os.path.isfile(p)]
-        if not answers:
-            skipped.append(name)
+        if os.path.isfile(os.path.join(sub, "receipts.jsonl")):
+            items.append((name, os.path.join(sub, "receipts.jsonl")))
+            skipped.extend(("%s/%s" % (name, n), "nested") for n in (_folders(sub, quiet=True) or ())
+                           if os.path.isfile(os.path.join(sub, n, "receipts.jsonl")))
             continue
-        have = {a for a, _ in answers}
-        items.extend(("%s/%s" % (name, a), p) for a, p in answers)
-        skipped.extend("%s/%s" % (name, a) for a in inner if a not in have)
+        inner = _folders(sub, quiet=True)
+        if inner is None:
+            skipped.append((name, "unreadable"))
+            continue
+        answers, empty, unreadable = [], [], []
+        for answer in inner:
+            at = os.path.join(sub, answer)
+            if not _first_visit(at, seen):
+                continue
+            label = "%s/%s" % (name, answer)
+            if os.path.isfile(os.path.join(at, "receipts.jsonl")):
+                answers.append((label, os.path.join(at, "receipts.jsonl")))
+            elif _folders(at, quiet=True) is None:
+                unreadable.append((label, "unreadable"))
+            else:
+                empty.append((label, "none"))
+        items.extend(answers)
+        if answers:
+            skipped.extend(empty)
+        elif not unreadable:
+            skipped.append((name, "none"))       # an item folder with no receipts (its outbox is no answer)
+        skipped.extend(unreadable)
     if not items:
         raise _Refused("No receipts.jsonl in %s or in a folder inside it." % (shown(_display(folder)),),
                        EXIT_USAGE)
     return items, folder, skipped
 
 
+def _first_visit(path, seen):
+    real = os.path.realpath(path)
+    if real in seen:
+        return False
+    seen.add(real)
+    return True
+
+
 def _folders(folder, quiet=False):
-    """The folder's subfolders, sorted; _Refused when it cannot be read (an empty list if quiet)."""
+    """The folder's subfolders, sorted; when it cannot be read, _Refused (or None if quiet)."""
     try:
         return sorted(n for n in os.listdir(folder) if os.path.isdir(os.path.join(folder, n)))
     except OSError as exc:
         if quiet:
-            return []
+            return None
         raise _Refused("Cannot read the folder %s: %s." % (shown(_display(folder)), type(exc).__name__),
                        EXIT_USAGE)
 
@@ -330,8 +361,8 @@ def _manifest(path, lines):
     whether its receipt_chain and counts agree with the lines just verified. Nothing else in it is read,
     and it never changes what is replayed."""
     where = os.path.join(os.path.dirname(path), "manifest.json")
-    if not os.path.isfile(where):
-        return None
+    if os.path.basename(path) != "receipts.jsonl" or not os.path.isfile(where):
+        return None                           # a manifest describes the receipts.jsonl beside it, no other file
     try:
         with open(where, "rb") as fh:
             data = fh.read(MANIFEST_MAX + 1)
@@ -366,6 +397,8 @@ def _manifest(path, lines):
         if len(differ) == before and same:
             agree.append("its counts, recounted from the lines: %s" % (", ".join(same),))
     tail = " (not checked: %s)" % (", ".join(unchecked),) if unchecked else ""
+    if not differ and not agree:
+        return "Manifest: holds no receipt chain or counts to check%s." % (tail,)
     if differ:
         return "Manifest DISAGREES with the receipts: %s%s. Only the receipts are replayed." % ("; ".join(differ), tail)
     return "Manifest: agrees with the receipts (%s)%s." % ("; ".join(agree), tail)
@@ -871,7 +904,7 @@ def _halted(p, why, seq, t):
         else:
             rows.append(INDENT + "In flight: as recorded, %s." % (shown(flight),))
     rows.append(INDENT + "Dropped: " + ("not recorded." if "dropped" not in p else
-                                        _dropped(p.get("dropped"), p.get("ledger"))))
+                                        _dropped(p.get("dropped"), p.get("ledger"), "ledger" in p)))
     if _is_int(p.get("stop_to_dead_ms")):
         rows.append(INDENT + "Stopped %d ms after the stop was asked for." % (p["stop_to_dead_ms"],))
     if p.get("requested_utc"):
@@ -912,7 +945,7 @@ def _flight(flight, ledger, t):
     return text
 
 
-def _dropped(dropped, ledger):
+def _dropped(dropped, ledger, hashed=False):
     if dropped is None:
         return ("unknown: the ledger could not be read." if ledger == "unreadable" else
                 "unknown (none recorded; ledger %s)." % (shown(ledger),))
@@ -925,11 +958,11 @@ def _dropped(dropped, ledger):
         if not isinstance(d, dict):
             actions.append(shown(d))
         elif d.get("kind") == "message":
-            messages.append(_key(d.get("message"), bare=True))
+            messages.append(_key(d.get("message"), hashed, bare=True))
         else:
             what = d.get("template") or d.get("booking_id")
             kind = shown(d.get("kind")) if d.get("kind") is not None else "an action of no recorded kind"
-            actions.append("%s%s for %s" % (kind, " " + shown(what) if what else "", _key(d.get("message"))))
+            actions.append("%s%s for %s" % (kind, " " + shown(what) if what else "", _key(d.get("message"), hashed)))
     bits = []
     if actions:
         bits.append("%d queued action(s): %s" % (len(actions), "; ".join(actions)))
@@ -939,14 +972,15 @@ def _dropped(dropped, ledger):
     return "; ".join(bits) + "."
 
 
-def _key(key, bare=False):
-    """A ledger key as the supervisor's halted line records it (supervisor.shown_key): a Message-ID as
-    written, "key-sha256:<hash>" when the key was shown only by its hash, or "sha256:<hash>", the key
-    of a mail with no Message-ID."""
-    if isinstance(key, str) and re.fullmatch(r"key-sha256:[0-9a-f]{64}", key):
+def _key(key, hashed, bare=False):
+    """A dropped item's ledger key. Only the supervisor's halted line (hashed: it records the ledger's
+    state) shows a key by its hash, "key-sha256:<hash>" (supervisor.shown_key); the loop's own line
+    writes every key as it is. "sha256:<hash>" is the key of a mail with no Message-ID, or a Message-ID
+    a sender wrote that way, so it is called a key, never either one."""
+    if hashed and isinstance(key, str) and re.fullmatch(r"key-sha256:[0-9a-f]{64}", key):
         return "key (hashed) %s" % (key[len("key-sha256:"):],)
     if isinstance(key, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", key):
-        return "a mail with no Message-ID (key %s)" % (key,)
+        return "key %s" % (key,)
     return shown(key) if bare else "Message-ID %s" % (shown(key),)
 
 

@@ -376,6 +376,54 @@ class RedteamTrace(unittest.TestCase):
         self.assertEqual(out.count("\nItem "), 206)
         self.assertNotIn("shown as recorded", out)
 
+    def tree(self, *files):
+        tmp = tempfile.mkdtemp(prefix="doris-replay-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = os.path.join(tmp, "T")
+        for rel in files:
+            os.makedirs(os.path.join(root, os.path.dirname(rel)), exist_ok=True)
+            if rel.endswith("receipts.jsonl"):
+                forge(os.path.join(root, rel), [START, END])
+        return root
+
+    def test_a_folder_that_cannot_be_read_is_never_called_empty(self):
+        root = self.tree("ok/ans/receipts.jsonl", "locked/ans/receipts.jsonl", "c2/locked/receipts.jsonl",
+                         "c2/fine/receipts.jsonl")
+        real, real_isfile = os.listdir, os.path.isfile
+
+        def listdir(path):
+            if os.path.basename(path) == "locked":
+                raise PermissionError(13, "Permission denied")
+            return real(path)
+        with mock.patch("os.listdir", listdir), mock.patch("os.path.isfile",
+                                                           lambda p: "locked" not in p and real_isfile(p)):
+            code, out = replay_cli([root])
+        self.assertEqual(code, 0, out)
+        first = out.splitlines()[0]
+        self.assertIn("2 receipt files", first)
+        self.assertIn("NOT replayed, could not be read: c2/locked, locked.", first)
+        self.assertNotIn("no receipts.jsonl in", first)
+
+    def test_receipts_inside_an_item_with_its_own_are_named(self):
+        root = self.tree("case/receipts.jsonl", "case/ans/receipts.jsonl", "case/empty/x")
+        code, out = replay_cli([root])
+        self.assertEqual(code, 0, out)
+        first = out.splitlines()[0]
+        self.assertIn(": 1 receipt file, ", first)
+        self.assertIn("NOT replayed, inside an item with its own receipts: case/ans.", first)
+        self.assertNotIn("empty", out)
+
+    def test_a_linked_folder_is_never_replayed_twice(self):
+        root = self.tree("a/receipts.jsonl")
+        try:
+            os.symlink(root, os.path.join(root, "loop"), target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("no symlinks here")
+        code, out = replay_cli([root])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("Item a: run "), 1, out)
+        self.assertNotIn("loop", out)
+
     def test_an_answer_folder_with_no_receipts_is_named_first(self):
         tmp = tempfile.mkdtemp(prefix="doris-replay-")
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -812,12 +860,22 @@ class AfterPR11Review(unittest.TestCase):
         code, out = self.replay_rows([START, ("halted", "", {"cause": "cli", "in_flight": None, "dropped": dropped,
                                                              "ledger": "ok"}, HALT)])
         self.assertEqual(code, 0, out)
-        self.assertIn("Dropped: 2 queued action(s): send_reply T4 for key (hashed) %s; send_reply T1 for a mail with "
-                      "no Message-ID (key sha256:%s); 2 message(s) not yet finished, left unprocessed in the ledger: "
-                      "key (hashed) %s, a mail with no Message-ID (key sha256:%s)." % ("ab" * 32, "cd" * 32, "ab" * 32,
-                                                                                       "cd" * 32), out)
+        self.assertIn("Dropped: 2 queued action(s): send_reply T4 for key (hashed) %s; send_reply T1 for key sha256:%s; "
+                      "2 message(s) not yet finished, left unprocessed in the ledger: key (hashed) %s, key sha256:%s."
+                      % ("ab" * 32, "cd" * 32, "ab" * 32, "cd" * 32), out)
         self.assertNotIn("Message-ID key-sha256", out)
         self.assertNotIn("Message-ID sha256", out)
+        self.assertNotIn("no Message-ID", out)               # a sender can write a Message-ID that looks like one
+
+    def test_only_the_supervisor_line_shows_a_key_by_its_hash(self):
+        # the loop's own halted line writes each key as it is, so a key-sha256: there is what the sender wrote
+        hashed = "key-sha256:" + "ab" * 32
+        dropped = [{"kind": "send_reply", "template": "T4", "message": hashed, "thread": "t1", "booking_id": None}]
+        code, out = self.replay_rows([START, ("halted", "", {"cause": "cli", "in_flight": "none", "dropped": dropped,
+                                                             "summary": "follows"}, HALT), END])
+        self.assertEqual(code, 0, out)
+        self.assertIn("Dropped: 1 queued action(s): send_reply T4 for Message-ID %s." % (hashed,), out)
+        self.assertNotIn("(hashed)", out)
 
     def test_the_started_row_shows_the_live_start(self):
         live = dict(START[2], mode="live", model_source="live", model="claude-x", simulated=False, fresh_start=True,
@@ -858,6 +916,22 @@ class AfterPR11Review(unittest.TestCase):
         self.assertIn("\nManifest DISAGREES with the receipts: its receipt chain says 20 lines, the file holds 21; it "
                       "counts handled 2, the lines hold 1 (not checked: extra). Only the receipts are replayed.\n", out)
         self.assertIn("  Closed    offer, T2 sent.", out)
+
+    def test_a_manifest_that_compares_nothing_never_agrees(self):
+        code, out = replay_cli([self.smoke_copy(lambda m: b'{"counts": {}, "outcome": "pass"}')])
+        self.assertEqual(code, 0, out)
+        self.assertIn("\nManifest: holds no receipt chain or counts to check.\n", out)
+        code, out = replay_cli([self.smoke_copy(lambda m: b'{"counts": {"sent": 99}, "receipt_chain": null}')])
+        self.assertIn("\nManifest: holds no receipt chain or counts to check (not checked: sent).\n", out)
+        self.assertNotIn("agrees", out)
+
+    def test_a_manifest_describes_receipts_jsonl_only(self):
+        folder = self.smoke_copy()
+        other = os.path.join(folder, "other.jsonl")
+        shutil.copyfile(os.path.join(folder, "receipts.jsonl"), other)
+        code, out = replay_cli([other])
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("Manifest", out)
 
     def test_a_manifest_that_cannot_be_read_or_holds_nothing_to_check(self):
         code, out = replay_cli([self.smoke_copy(lambda m: b"{not json")])
