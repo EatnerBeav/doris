@@ -158,8 +158,9 @@ def main():
         print("Remove the file from git, or have tests/tools/build_demo_fixtures.py write it (or list it in "
               "HAND_WRITTEN in tests/unit/demo_sandbox.py) and test it.", file=sys.stderr)
         return 1
-    print("sandbox check: git tracks the %d files of the committed sandbox under sandbox/, and no others"
-          % len(tracked))
+    recorded = sorted(set(tracked) & set(RECORDED))
+    print("sandbox check: git tracks the %d files of the committed sandbox under sandbox/%s, and no others"
+          % (len(tracked) - len(recorded), "".join(" plus the recorded " + r for r in recorded)))
     return 0
 
 

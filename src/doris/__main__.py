@@ -61,13 +61,18 @@ def run_name(source, mode, when=None):
     return "model-%s-%s-%s" % (source, mode, when.astimezone(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
 
 
-def _recorded_run(path):
+def _recorded_first(path, field):
     try:
         with open(path, encoding="utf-8") as fh:
             first = json.loads(fh.readline() or "{}")
-        return str(first.get("run_id") or "unknown")
+        value = first.get(field)
+        return value if isinstance(value, str) and value.strip() else None
     except (OSError, ValueError, AttributeError):
-        return "unknown"
+        return None
+
+
+def _recorded_run(path):
+    return _recorded_first(path, "run_id") or "unknown"
 
 
 def first_line(source, model_id):
@@ -303,10 +308,16 @@ def live_trace(run_dir, name, started, code, term):
 
 
 def sandbox_source():
-    """(model source, model ID) for a sandbox run: see demo_source; the ID only when called live."""
+    """(model source, model ID) for a sandbox run: see demo_source. Live: DORIS_MODEL or the default.
+    Replayed: the model the answers were recorded with, never DORIS_MODEL, since the model ID is part
+    of every request a recorded answer is matched by. Stub: none."""
     from . import model as model_mod
     source = demo_source(os.environ, os.path.exists(answers_path()))
-    return source, model_mod.default_model_id(os.environ) if source == "live" else None
+    if source == "live":
+        return source, model_mod.default_model_id(os.environ)
+    if source == "replayed":
+        return source, _recorded_first(answers_path(), "model_id") or model_mod.DEFAULT_MODEL
+    return source, None
 
 
 def sandbox_config(name, state, run_dir, source, model_id, **more):

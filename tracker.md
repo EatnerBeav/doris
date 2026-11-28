@@ -21,10 +21,8 @@ Status words: **done** (on main, tested) · **in review** (built, in a pull requ
   - Unblocked: the live booking passed tonight. Stays the main overnight run.
 - **in review** · Recorded answers from a real keyed demo run, so `demo` replays a real model · Wolf · Sat 12:00 PM, again at the freeze
   - Sat 4:33 AM on our server, main 18d160a: 13 handled, 2 held, 9 calls, $0.0337 ([traces/model-live-sandbox-20261128T123315Z/](traces/model-live-sandbox-20261128T123315Z/)). A zero-key demo replays it to the same day.
-  - Unblocked. Today the demo falls back to the keyword stand-in and says so.
 - **in review** · Fresh live-model Trap Pack run on merged main, RESULTS.md and RUNS.md to match · Wolf · Sat 12:00 PM
-  - Run 3, Sat 4:33 AM, main 18d160a, $0.0649: pass 20 on invariants; against the key met 14, safe and silent 6, missed 0, bug 0.
-  - Unblocked. The committed report is run 1's; run 2 (20/20) is on its own branch.
+  - Run 3, Sat 4:33 AM, main 18d160a, $0.0649: pass 20 on invariants; against the key met 13, safe and silent 7, missed 0, bug 0.
 - **not started** · Feature freeze and the video: the full unattended run, then a fresh run and the Stop landing mid-call; unlisted YouTube checked in a signed-out window, link in the README · Wolf with Shane · Sun evening
 - **not started** · The submission form (team, T1, repo, video link) · Shane · Sun night
 
