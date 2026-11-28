@@ -54,7 +54,7 @@ From the kickoff thread (Wolf), Fri Nov 27, 11:55 PM Pacific. That thread is clo
 1. Scratch on our server and Shane's PC: leave it all alone until after Mon 10 AM.
 2. Resolved (decision 106): Steve set the provider spend limit on the key.
 3. The form's team field: the tracker's recommendation; Steve submits Sunday.
-4. Repo description typo: Shane said fix it now; Wolf's tools can't change repo settings, so Shane does it at https://github.com/EatnerBeav/doris (gear beside About).
+4. Resolved: Shane fixed the repo description typo; it now reads "walk away from".
 5. Resolved (decision 106): the ruling 13 law fix landed Sat 1:33 AM and now matches decision 77 (law 15,967 chars).
 6. Keep the S2 line "Failed inbox reads: [k]."
 7. #17's trade-offs accepted as they are.
