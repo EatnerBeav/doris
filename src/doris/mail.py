@@ -714,10 +714,7 @@ def parse_eml(raw: bytes) -> Message:
 
     headers: Dict[str, str] = {}
     for name in KEPT_HEADERS:
-        try:
-            h = _decoded_header(msg, name)
-        except DecodeError:
-            raise
+        h = _decoded_header(msg, name)
         if h is not None:
             headers[name] = str(h).strip()
 
@@ -852,6 +849,12 @@ def decoded_views(raw: bytes) -> List[str]:
 
 
 def fold_for_match(text: str) -> str:
-    """NFKC, drop format characters: used by the stop and sensitive patterns, never stored."""
+    """NFKC, then every format character (category Cf: zero-width, bidi marks, soft hyphen) dropped.
+    The stop scan (screens) and the sensitive screen match their phrases on this; it is never stored.
+    The format characters are found once per distinct character, not once per character, so a
+    30 MB email costs seconds here, not a minute."""
     text = unicodedata.normalize("NFKC", text or "")
-    return "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    if text.isascii():
+        return text                       # no ASCII character is a format character
+    drop = dict.fromkeys(ord(ch) for ch in set(text) if unicodedata.category(ch) == "Cf")
+    return text.translate(drop) if drop else text

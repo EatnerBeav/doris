@@ -49,7 +49,7 @@ class Guard:
     def __init__(self, allowed_hosts):
         self.allowed = frozenset(_norm(h) for h in allowed_hosts)
         self.admitted = set()        # hosts below an allowed one, each added once a caller checked it (admit)
-        self.attempts = []           # type: List[Dict[str, Any]]
+        self.attempts: List[Dict[str, Any]] = []
         self._resolved = set()       # IP addresses looked up from an allowed name
         self._lock = threading.Lock()
 
@@ -157,8 +157,7 @@ def _restore():
     socket.getaddrinfo = saved["getaddrinfo"]
 
 
-def install(allowed_hosts=()):
-    # type: (Iterable[str]) -> Guard
+def install(allowed_hosts: Iterable[str] = ()) -> Guard:
     """Patch socket connects for this run and return its Guard.
 
     Guards nest (the traps runner holds one while loop.run may install its own): a connect goes

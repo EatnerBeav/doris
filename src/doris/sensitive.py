@@ -10,8 +10,9 @@ Only patterns and the sender list match, never a topic: "I just left the bank" i
 """
 
 import re
-import unicodedata
 from typing import Iterable, List, Optional
+
+from . import mail
 
 CHECKS = ("sender-domain", "subject-phrase", "one-time-code", "card-number", "bank-routing",
           "bank-account", "ssn", "reset-or-login-alert")
@@ -41,8 +42,7 @@ _PHONE_WORDS = re.compile(r"(?:\+|\b(?:tel|phone|cell|mobile|call|fax)\b[\s:.#]*
 
 
 def _fold(text: str) -> str:
-    text = unicodedata.normalize("NFKC", text or "")
-    return "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    return mail.fold_for_match(text)
 
 
 def _words(text: str) -> str:
@@ -269,7 +269,7 @@ def scan_message(msg) -> Optional[str]:
         return "subject-phrase"
     texts = [msg.subject or "", msg.text_plain or "", msg.visible_text or "", msg.hidden_text or ""]
     if msg.html and msg.text_plain is not None:
-        from . import mail                 # same owner; the HTML part is read too when a plain part exists
+        # the HTML part is read too when a plain part exists
         html_text, hidden, _, _ = mail.html_to_text(msg.html)
         texts.extend([html_text, hidden or ""])
     texts.append(msg.quoted_text or "")

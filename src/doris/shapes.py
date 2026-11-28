@@ -1,4 +1,4 @@
-"""Shared shapes. Every module builds against these; change them only through Wolf (the integrator).
+"""Shared shapes: the types every module passes to every other. A change here reaches every module.
 
 Times are timezone-aware UTC datetimes everywhere inside Doris. Pacific and the sender's
 zone exist only at the edges: parsing what a person wrote, and rendering what she sends.
@@ -6,7 +6,9 @@ zone exist only at the edges: parsing what a person wrote, and rendering what sh
 
 import datetime as _dt
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+from . import caps
 
 UTC = _dt.timezone.utc
 
@@ -152,10 +154,11 @@ class ParseResult:
     instant_utc: Optional[_dt.datetime]   # the one reading when verdict == "book"
     zone: Optional[str]               # sender's zone id for rendering (ruling 10), or None
     zone_pair: Optional[Tuple[str, str]] = None   # same-instant pair (row Q7)
-    steer_day: Optional[_dt.date] = None          # a named day to offer first
-    steer_window: Optional[Tuple[_dt.time, _dt.time]] = None   # vague-word window (in the sender's zone, else Pacific)
+    steer_day: Union[_dt.date, Tuple[_dt.date, ...], None] = None   # the day, or the days in offer order, to offer first
+    # the part of day the sender wrote, or the one time they asked for (in the sender's zone, else Pacific)
+    steer_window: Optional[Tuple[_dt.time, _dt.time]] = None
     excluded_utc: List[_dt.datetime] = field(default_factory=list)   # times negated in the text (Q5)
-    length_min: int = 30
+    length_min: int = caps.DEFAULT_LENGTH_MIN
     length_source: str = "default"    # written | default
     length_rule: Optional[str] = None # over_60 | open_ended | all_day | recurring | multiple | zero
     visible_body_hash: str = ""
