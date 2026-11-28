@@ -120,7 +120,8 @@ class RecordedAnswers(Isolated):
         self.recorded()
         code, out = run_cli(["demo"])
         self.assertEqual(code, 0, out)
-        self.assertRegex(out.splitlines()[0], r"^Sandbox\. Model answers replayed from recorded run model-live-sandbox-\S+\. No key found\.$")
+        self.assertRegex(out.splitlines()[0], r"^Sandbox\. Model answers replayed from recorded run model-live-sandbox-\S+\. "
+                                              r"No key in \.env or the environment\.$")
         (run,) = self.runs()
         self.assertTrue(os.path.basename(run).startswith("model-replayed-sandbox-"), run)
         receipts_path = os.path.join(run, "receipts.jsonl")
@@ -317,6 +318,162 @@ class Demo(Isolated):
         code, out = run_cli(["demo"])
         self.assertEqual(code, supervisor.EXIT_REFUSED_HALT, out)
         self.assertFalse(os.path.exists(os.path.join(self.state, "sandbox", "runs")))
+
+
+class KeyFromDotEnv(Isolated):
+    """Brief row 1.2 and the law: with a key in .env the same commands call the model. demo, the
+    sandbox run and traps read ANTHROPIC_API_KEY and DORIS_MODEL from .env at the repo root, else
+    src/.env; a name in the environment wins, even empty (so every other test here, which sets both
+    empty, never reads a developer's own .env). The worker inherits the key; no value is printed.
+    The spawn is faked: a keyed demo would call the API."""
+
+    KEY = "judge-key-" + "not-a-real-one-0123"      # not key-shaped; built at runtime anyway
+
+    def setUp(self):
+        super().setUp()
+        for name in cli.DOTENV_NAMES:
+            os.environ.pop(name, None)       # Isolated's patch.dict puts them back
+        self.root_env = os.path.join(self.tmp, "root.env")
+        self.src_env = os.path.join(self.tmp, "src.env")
+        patcher = mock.patch.object(cli, "dotenv_files", lambda: [self.root_env, self.src_env])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.spawned = []
+
+        def fake_supervise(mode, state, name, run_dir, config, say=None):
+            self.spawned.append({"config": config, "env": {n: os.environ.get(n) for n in cli.DOTENV_NAMES}})
+            return 0
+        for target, name, value in ((cli, "supervise", fake_supervise), (cli.story, "lines", lambda path: [])):
+            patcher = mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def write(self, path, text):
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+
+    def example_filled(self, key):
+        """The judge's step: .env.example copied as it ships, the key filled in."""
+        with open(os.path.join(paths.REPO, ".env.example"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("\nANTHROPIC_API_KEY=\n", text)
+        return text.replace("\nANTHROPIC_API_KEY=\n", "\nANTHROPIC_API_KEY=%s\n" % (key,), 1)
+
+    def test_the_example_copied_to_dotenv_with_a_key_makes_demo_call_the_model(self):
+        from doris import model
+        self.write(self.root_env, self.example_filled(self.KEY))
+        code, out = run_cli(["demo"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[0], "Sandbox. Model called live (%s, key from %s); its answers are recorded "
+                                              "with this run." % (model.DEFAULT_MODEL, paths.shown(self.root_env)))
+        (spawn,) = self.spawned
+        self.assertEqual(spawn["config"]["model_source"], "live")
+        self.assertEqual(spawn["env"]["ANTHROPIC_API_KEY"], self.KEY)         # her worker inherits it
+        self.assertNotIn(self.KEY, out)
+
+    def test_only_the_key_and_the_model_are_taken(self):
+        self.write(self.root_env, "ANTHROPIC_API_KEY=%s\nDORIS_MODEL=claude-sonnet-5-5\n"
+                                  "DORIS_APP_PASSWORD=never-taken\nDORIS_MEETING_LINK=https://meet.example/x\n" % self.KEY)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("DORIS_APP_PASSWORD", None)
+            os.environ.pop("DORIS_MEETING_LINK", None)
+            came = cli.load_dotenv()
+            self.assertEqual(sorted(came), ["ANTHROPIC_API_KEY", "DORIS_MODEL"])
+            self.assertNotIn("DORIS_APP_PASSWORD", os.environ)
+            self.assertNotIn("DORIS_MEETING_LINK", os.environ)
+
+    def test_doris_model_in_dotenv_names_the_model(self):
+        self.write(self.root_env, "ANTHROPIC_API_KEY=%s\nDORIS_MODEL=claude-other-model\n" % self.KEY)
+        code, out = run_cli(["demo"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.spawned[0]["config"]["model_id"], "claude-other-model")
+        self.assertIn("(claude-other-model, key from", out.splitlines()[0])
+
+    def test_src_dotenv_is_read_when_the_root_has_none(self):
+        self.write(self.src_env, "ANTHROPIC_API_KEY=%s\n" % self.KEY)
+        code, out = run_cli(["demo"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("key from %s)" % paths.shown(self.src_env), out.splitlines()[0])
+
+    def test_the_root_comes_first_and_an_empty_value_there_gives_way(self):
+        self.write(self.root_env, "ANTHROPIC_API_KEY=\n")
+        self.write(self.src_env, "ANTHROPIC_API_KEY=%s\n" % self.KEY)
+        self.assertEqual(cli.load_dotenv(environ={}), {"ANTHROPIC_API_KEY": self.src_env})
+        self.write(self.root_env, "ANTHROPIC_API_KEY=root-one\n")
+        env = {}
+        self.assertEqual(cli.load_dotenv(environ=env), {"ANTHROPIC_API_KEY": self.root_env})
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "root-one")
+
+    def test_the_environment_wins_even_empty(self):
+        self.write(self.root_env, "ANTHROPIC_API_KEY=%s\n" % self.KEY)
+        env = {"ANTHROPIC_API_KEY": "from-the-shell"}
+        self.assertEqual(cli.load_dotenv(environ=env), {})
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "from-the-shell")
+        env = {"ANTHROPIC_API_KEY": ""}
+        self.assertEqual(cli.load_dotenv(environ=env), {})
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "")
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "from-the-shell"}):
+            code, out = run_cli(["demo"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("key from the environment)", out.splitlines()[0])
+        self.assertEqual(self.spawned[0]["env"]["ANTHROPIC_API_KEY"], "from-the-shell")
+
+    def test_no_key_anywhere_replays_and_the_first_line_names_both_places(self):
+        self.write(self.root_env, "ANTHROPIC_API_KEY=\n")
+        shutil.copyfile(os.path.join(demo_sandbox.SANDBOX, "answers.jsonl"), os.path.join(self.sandbox, "answers.jsonl"))
+        code, out = run_cli(["demo"])
+        self.assertEqual(code, 0, out)
+        self.assertTrue(out.splitlines()[0].endswith("No key in .env or the environment."), out)
+        self.assertEqual(self.spawned[0]["config"]["model_source"], "replayed")
+
+    def test_a_broken_dotenv_is_said_with_its_line_and_nothing_starts(self):
+        self.write(self.root_env, "export ANTHROPIC_API_KEY=%s\n" % self.KEY)
+        code, out = run_cli(["demo"])
+        self.assertEqual(code, 2)
+        self.assertTrue(out.startswith("Not started: %s: line 1: export" % paths.shown(self.root_env)), out)
+        self.assertNotIn(self.KEY, out)
+        self.assertEqual(self.spawned, [])
+        self.assertFalse(os.path.isdir(os.path.join(self.state, "sandbox", "runs")))
+
+    def test_a_value_the_environment_cannot_take_is_said_not_a_traceback(self):
+        self.write(self.root_env, "ANTHROPIC_API_KEY=bad\x00key\n")
+        code, out = run_cli(["demo"])
+        self.assertEqual(code, 2)
+        self.assertIn("ANTHROPIC_API_KEY holds a character the environment cannot take", out)
+        self.assertNotIn("bad", out)
+        self.assertEqual(self.spawned, [])
+
+    def test_the_sandbox_run_reads_it_too(self):
+        self.write(self.root_env, "ANTHROPIC_API_KEY=%s\n" % self.KEY)
+        code, out = run_cli(["run"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("Model called live", out.splitlines()[0])
+        self.assertEqual(self.spawned[0]["env"]["ANTHROPIC_API_KEY"], self.KEY)
+
+    def test_a_live_run_never_reads_it(self):
+        """--live takes every setting from its own env file (--env), nothing from .env or the shell."""
+        self.write(self.root_env, "export broken\n")
+        code, out = run_cli(["run", "--live", "--env", os.path.join(self.tmp, "absent.env")])
+        self.assertNotEqual(code, 0)
+        self.assertNotIn("line 1", out)
+        self.assertNotIn("ANTHROPIC_API_KEY", os.environ)
+
+    def test_traps_reads_it_and_says_a_refused_call_once(self):
+        from doris import model, traps
+        self.write(self.root_env, "ANTHROPIC_API_KEY=%s\nDORIS_MODEL=claude-other-model\n" % self.KEY)
+        seen = {}
+
+        def fake_main(argv):
+            seen["key"], seen["model"] = os.environ.get("ANTHROPIC_API_KEY"), os.environ.get("DORIS_MODEL")
+            model.NOTICE("first")
+            model.NOTICE("second")
+            return 0
+        with mock.patch.object(traps, "main", fake_main):
+            code, out = run_cli(["traps", "--model", "live"])
+        self.assertEqual(code, 0)
+        self.assertEqual((seen["key"], seen["model"]), (self.KEY, "claude-other-model"))
+        self.assertEqual(out.splitlines(), ["first"])
+        self.assertIsNone(model.NOTICE)                     # put back as it was
 
 
 class PrintedPaths(unittest.TestCase):
