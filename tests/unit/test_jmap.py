@@ -639,6 +639,15 @@ class SetupTest(JmapFixture):
         self.jmap.method_error["Mailbox/get"] = "evil type <b>"
         self.assertNotIn("evil", str(self.fails()))
 
+    def test_an_error_type_no_rfc_names_is_a_fixed_phrase_never_the_servers_word(self):
+        """R7: up to 64 letters and digits of the server's own error word reached the terminal and
+        the trace. A type RFC 8620 or 8621 names is still said by name; any other is a fixed phrase."""
+        self.jmap.method_error["Mailbox/get"] = "PleaseVisitEvilExampleNow"
+        self.assertEqual(str(self.fails()), "jmap mailboxes: an error type it does not know")
+        for known in ("serverUnavailable", "accountNotFound", "invalidArguments", "requestTooLarge", "overQuota"):
+            self.jmap.method_error["Mailbox/get"] = known
+            self.assertEqual(str(self.fails()), "jmap mailboxes: " + known)
+
     def test_a_missing_answer_is_a_mail_error(self):
         for name in ("Mailbox/get", "Identity/get"):
             self.jmap.omit = {name}
