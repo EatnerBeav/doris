@@ -2,13 +2,15 @@
 
 An inbox and calendar agent you can walk away from. Agentware 2026, track T1 (Inbox & Calendar).
 
-Team Whizz: Shane Bornstein and Wolf (Claude), his CTO. Anthropic is not involved in the entry.
+Doris answers a business owner's email and runs the owner's calendar while the owner is away. A meeting request comes in. She reads the thread, checks the calendar, books the slot or offers times, sends the reply with a calendar file, and files the follow-up. Newsletters and auto-replies are filed with no reply. Anything that needs a person (money, legal, a complaint, anything outside her job) is held for the owner with the reason and a draft, and nothing is sent. Once a day she sends the owner a digest of what she did. No human approves anything in a run; every run counts approvals, and the count is 0.
 
-> Built during the Agentware 2026 window (Fri Nov 27 to Mon Nov 30, 2026). This README fills in as the build lands; the trace is the source of truth.
+The model only reads: for each email it returns one classification. Code decides what to do, and every send and every booking passes a gate of 17 checks in one file. Every step leaves a hash-chained receipt, and one command stops her mid-call.
 
-## Run it (no install, no key)
+Team Whizz: Shane Bornstein and Wolf (Claude), his CTO, for Hire the Machines. Anthropic is not involved in the entry.
 
-Python 3.9 or newer, standard library only.
+## Run it: no install, no key, about 15 seconds
+
+You need Python 3.9 or newer. Doris uses the standard library only, so there is nothing to install.
 
 ```
 git clone https://github.com/EatnerBeav/doris
@@ -16,20 +18,127 @@ cd doris/src
 python3 -m doris demo
 ```
 
-On Windows the last line is `py -m doris demo`.
+- **Windows:** run `py -m doris demo` (or `python -m doris demo`). In cmd, the second line is `cd doris\src`.
+- **Downloaded the ZIP instead of cloning:** the folder is called `doris-main`, so the second line is `cd doris-main/src`.
+
+Every `python3 -m doris` command in this README runs from `src/`. The demo uses no network and needs no account.
+
+## What you just saw
+
+The demo replays one working day for the owner, Shane Bornstein. It is a Tuesday in a sandbox: a folder of real `.eml` files is the inbox, `.ics` files are the calendar, and the clock is the sandbox's own.
+
+Fifteen emails arrive between 8 AM and 3 PM Pacific. Each line of output is one email: the time, the sender, what she did, the reply she sent, and why, in the words of the rule that decided it. The day includes:
+
+- a clear request that is booked;
+- vague requests that get offers of times;
+- a reply that picks one of the offered times and gets booked;
+- a request to move a booked meeting;
+- an auto-reply and a newsletter, filed with no reply;
+- two opt-outs;
+- an email that is nothing but instructions, filed with no reply;
+- an unreadable email, quarantined;
+- two emails held for the owner: one about money, one asking her to write to another person.
+
+Two failures are staged on purpose, and the output labels them:
+
+- The calendar times out once. That is the pause of about 10 seconds; she then retries and succeeds.
+- Another event lands on the calendar in the middle of a booking. She removes her own booking and offers fresh times.
+
+At 5 PM she sends the owner the digest. The run ends with a summary of what she did for the owner, from the receipts. The last line verifies the receipt chain.
+
+The banner on the first line says what read the mail. With no key, recorded answers from a real model run are replayed if `sandbox/answers.jsonl` is present; otherwise a built-in keyword stand-in reads the mail, and every receipt says `stub`. With `ANTHROPIC_API_KEY` set, the model is called live (see [With a key](#with-a-key)).
+
+**The codes in the output.** Every sentence she sends is a fixed, approved template filled in by code; the model never writes a word that goes out.
+
+| Code | What it is |
+|---|---|
+| T1 | Booking confirmation, with the `.ics` attached |
+| T2 | An offer of 2 or 3 times, when no single clear time was written |
+| T4 | "Shane isn't available then, but is at any of these" |
+| T18 | A move: her booking cancelled, with fresh times offered |
+| S1 | A hold notice to the owner: the sender's own words, the reason, and a draft |
+| S2 | The daily digest to the owner |
+| G1 to G17 | The gate's checks on every send and booking (`src/doris/gate.py`, explained in [SAFETY.md](SAFETY.md)) |
+
+## Open what she did
+
+Paths here are from the repo root, one folder up from `src/`.
+
+- `sandbox/outbox/`: every email she sent, as `.eml` files any mail app opens. Each file is named `<n>-<template>.eml`. Replies go to the sender only, with a blind copy to the owner, which is recorded in `envelope.jsonl`. Hold notices and the digest go to the owner.
+- `sandbox/calendar/`: her bookings (`doris-*.ics`), next to the owner's busy blocks.
+- `state/sandbox/runs/<run>/receipts.jsonl`: the receipt chain, one JSON line per step. Each line records what she saw, decided, called and got back, and the hash of the line before it.
+
+Run the demo again and it starts the day fresh. The last run is kept in `state/old/`.
+
+## The next five minutes
+
+| Command (from `src/`) | What you'll see | Time |
+|---|---|---|
+| `python3 -m doris replay` | The last run, email by email, from its receipts alone. Each step shows what she saw, how the email was classed, what was decided and by which policy row, every gate check, every call, and the read-back after each write and send | instant |
+| `python3 -m doris verify` | The hash chain recomputed. Edit any line of `receipts.jsonl` and run it again: it names the first broken line | instant |
+| `python3 -m doris stop` | The kill switch. Open a second terminal in `src/` and type `python3 -m doris stop` without pressing Enter. Start `demo` in the first terminal, then press Enter in the second during the calendar pause. She halts mid-call, and the halt line names the call in flight and the work dropped. `python3 -m doris resume` clears the halt (only the command line can), and the next `demo` finishes the day | instant |
+| `python3 -m doris traps` | The organizers' Trap Pack: all 20 files through the real loop and gate, each on fresh throwaway state, one line per file. With no key the stand-in reads them; our live-model runs and how we graded them are in [`tests/trap-pack/RUNS.md`](tests/trap-pack/RUNS.md) | 2 s |
+| `python3 -m doris redteam` | The model replaced by a hostile stand-in that obeys every injection, run against every Trap Pack file and the demo day under the same gate. It passes only with 0 bad actions | 30 s |
+| `python3 -m doris watch` | A live page at http://127.0.0.1:8765 showing the current step, tool calls, every decision with its reason, and the cost so far, with one Stop button. Leave it open and run `demo` in a second terminal | live |
+
+`python3 -m doris --help` lists every command.
+
+## With a key
+
+None of the above needs a key. To have the model read the mail, set an Anthropic API key in the environment and run the demo:
+
+- bash: `export ANTHROPIC_API_KEY=...`
+- PowerShell: `$env:ANTHROPIC_API_KEY="..."`
+
+Then run `python3 -m doris demo`. The banner says the model is called live, and each line shows the cost of its call.
+
+- **Model:** `claude-sonnet-5-5`, one model, called with `urllib` (no SDK).
+- **Cost, measured so far:** $0.004 for one email (live smoke run 3, [`traces/live-smoke-20261128T055002Z/`](traces/live-smoke-20261128T055002Z/)) and $0.06 for the 20 Trap Pack files (run 1, [`tests/trap-pack/RUNS.md`](tests/trap-pack/RUNS.md)).
+- **Limit:** a run stops itself at $5.00 of model spend (gate check G3).
+
+The demo's 15 emails make 9 model calls; screens in code settle the other six before the model sees them.
+
+## Evidence for each criterion
+
+| Criterion | Where to see it |
+|---|---|
+| Autonomy | `demo` ends with `0 human approvals`, counted from the receipts. Holds are policy, labelled with their reason, and send nothing to the sender. Live: [`traces/live-smoke-20261128T055002Z/`](traces/live-smoke-20261128T055002Z/) is a real email forwarded to her, her reply sent and read back, with 0 approvals |
+| Usefulness | The scheduling job end to end: `sandbox/outbox/` holds the real replies with `.ics` files, time zones written both ways, and the digest |
+| Reliability | The staged calendar timeout (retried) and the mid-booking collision (recovered) in the demo, the quarantined email, `traps`, and the honest misses in [`tests/trap-pack/RUNS.md`](tests/trap-pack/RUNS.md) |
+| Engineering | [AGENT.md](AGENT.md): six steps in one loop (`src/doris/loop.py`), standard library only, each credential and what it cannot do. Tests run on Linux, macOS and Windows in CI |
+| Safety: guardrails | The gate (`src/doris/gate.py`), every irreversible action in [SAFETY.md](SAFETY.md), and `redteam` |
+| Safety: live monitoring | `watch` |
+| Safety: kill switch | `stop` mid-run, with the halt receipt |
+| Safety: audit trail | `receipts.jsonl`, `verify` and `replay` |
+
+## Live, on our own test accounts
+
+Live, Doris works only with Fastmail test accounts we control. She reads mail over IMAP, sends over Fastmail's JMAP API, and uses CalDAV for the owner's shared calendar. A judge never needs this.
+
+The setting names are in [`.env.example`](.env.example); what each credential can and cannot do is in [AGENT.md](AGENT.md#permissions). `python3 -m doris smoke` checks every live call once, and `python3 -m doris run --live` starts her. Every live run keeps its trace in `traces/live-*`, pass or fail.
+
+## Known limits
+
+- Google and Microsoft calendars need an OAuth adapter we did not build.
+- The overnight run stays under 60 emails.
+- Not built yet: the one follow-up nudge on an unanswered offer, and the check, once a cycle, that her future bookings are still on the calendar.
+- `stop` does not reach `traps`, which runs outside the supervisor. A file named `STOP` at the repo root halts it at its next step.
+- The Trap Pack's known limits are in [`tests/trap-pack/RUNS.md`](tests/trap-pack/RUNS.md).
 
 ## Working on the repo
 
-Every commit runs the secret scan. Turn the hook on once per clone:
+The unit tests take about 4 minutes. Run them from the repo root:
 
 ```
-git config core.hooksPath .githooks
+python3 -m unittest discover -s tests -t .
 ```
 
-Run the unit tests from the repo root with `python3 -m unittest discover -s tests -t .`
+Every commit runs the secret scan. Turn the hook on once per clone with `git config core.hooksPath .githooks`.
 
 ## Credits
 
+Shane Bornstein and Wolf (Claude), his CTO. Hire the Machines.
+
 The Agentware 2026 Trap Pack used in `tests/` is the "Agentware 2026 Trap Pack, Hackathon Raptors", CC BY 4.0.
 
-MIT licence. See `LICENSE`.
+MIT licence. See [`LICENSE`](LICENSE).
