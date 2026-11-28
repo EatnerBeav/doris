@@ -404,6 +404,69 @@ class Verify(Isolated):
         self.assertIn("seq 5", out)
 
 
+    def changed_copy(self, name, ending=b"\n", change=True, tail=b""):
+        """A copy of the run's receipts with one character of seq 5 changed and every line ending `ending`."""
+        copy = os.path.join(self.tmp, name)
+        with open(self.path, "rb") as fh:
+            lines = fh.read().split(b"\n")[:-1]
+        if change:
+            self.assertIn(b'"ts":"2026-', lines[4])
+            lines[4] = lines[4].replace(b'"ts":"2026-', b'"ts":"2027-', 1)
+        with open(copy, "wb") as fh:
+            fh.write(b"".join(l + ending for l in lines) + tail)
+        return copy, len(lines)
+
+    def test_ok_is_said_once(self):
+        code, out = run_cli(["verify"])
+        self.assertEqual(code, 0, out)
+        self.assertRegex(out, r"\Aok: \d+ lines, every hash matches the line before it \([^()]*receipts\.jsonl\)\.\n\Z")
+
+    def test_a_torn_tail_moved_aside_is_noted_after_the_ok(self):
+        path = os.path.join(self.tmp, "runs", "r", "receipts.jsonl")
+        receipts.ReceiptWriter(path, "r", "sandbox").write("observed", {}, subject="startup")
+        with open(path, "ab") as fh:
+            fh.write(b'{"torn')
+        receipts.ReceiptWriter(path, "r", "sandbox").write("summary", {"handled": 0, "held": 0}, subject="run")
+        code, out = run_cli(["verify", path])
+        self.assertEqual(code, 0, out)
+        self.assertRegex(out, r"\Aok: 3 lines, every hash matches the line before it \([^()]*\)\. "
+                              r"Torn tail moved aside at seq 2\.\n\Z")
+
+    def test_the_broken_seq_is_said_once(self):
+        copy, _n = self.changed_copy("copy.jsonl")
+        code, out = run_cli(["verify", copy])
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r"\ABROKEN at seq 5: the hash does not match the line\. 4 lines verified before it "
+                              r"\([^()]*copy\.jsonl\)\.\n\Z")
+
+    def test_a_torn_tail_is_said_once(self):
+        copy, n = self.changed_copy("torn.jsonl", change=False, tail=b'{"torn')
+        code, out = run_cli(["verify", copy])
+        self.assertEqual(code, 1, out)
+        self.assertTrue(out.startswith("BROKEN at seq %d: torn tail: 6 bytes with no whole line. %d lines verified "
+                                       "before it (" % (n + 1, n)), out)
+
+    def test_a_powershell_resave_still_names_the_changed_line(self):
+        # PowerShell's Set-Content writes CRLF line endings: every line changes at once, and the edited
+        # line must not hide behind "BROKEN at seq 1 ... 0 lines verified"
+        copy, n = self.changed_copy("resaved.jsonl", ending=b"\r\n")
+        code, out = run_cli(["verify", copy])
+        self.assertEqual(code, 1, out)
+        self.assertTrue(out.startswith("BROKEN at seq 5: the hash does not match the line; "), out)
+        self.assertIn("%d of %d lines now end CRLF where Doris wrote LF" % (n, n), out)
+        self.assertIn(" 4 lines verified before it (", out)
+        self.assertNotIn("seq 1:", out)
+
+    def test_a_resave_that_changed_only_the_line_endings_says_so_and_still_fails(self):
+        copy, n = self.changed_copy("endings.jsonl", ending=b"\r\n", change=False)
+        code, out = run_cli(["verify", copy])
+        self.assertEqual(code, 1, out)
+        self.assertTrue(out.startswith("BROKEN at seq 1: the line endings were changed: %d of %d lines now end CRLF "
+                                       "where Doris wrote LF" % (n, n)), out)
+        self.assertIn("every line still matches its hash", out)
+        self.assertNotIn("canonical", out)
+        self.assertNotIn("0 lines verified", out)
+
     def test_lines_cut_from_the_end_fail(self):
         copy = os.path.join(self.tmp, "cut.jsonl")
         with open(self.path, "rb") as fh:

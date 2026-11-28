@@ -410,6 +410,99 @@ class Verify(Tmp):
         self.put(self.data().replace(b"\n", b"\r\n"))
         self.assertBad(1)
 
+    # A re-save with CRLF line endings (PowerShell's Set-Content, some editors) changes every line at
+    # once. The file never verifies, and the line that was really edited is still the one named.
+    def put_crlf(self, lines):
+        self.put(b"".join(l + b"\r\n" for l in lines))
+
+    def test_a_crlf_resave_alone_is_named_as_line_endings_not_as_an_edited_line(self):
+        self.five_lines()
+        self.put_crlf(self.lines())
+        for finished in (False, True):
+            res = receipts.verify(self.path, finished=finished)
+            self.assertEqual((res.ok, res.lines, res.first_bad_seq), (False, 0, 1), res)
+            self.assertTrue(res.reason.startswith("broken at seq 1: the line endings were changed"), res)
+            self.assertIn("5 of 5 lines now end CRLF where Doris wrote LF", res.reason)
+            self.assertIn("every line still matches its hash", res.reason)
+            self.assertNotIn("canonical", res.reason)
+
+    def test_a_crlf_resave_with_one_changed_character_names_that_line(self):
+        self.five_lines()
+        lines = self.lines()
+        self.assertIn(b'"action":"offer"', lines[2])
+        lines[2] = lines[2].replace(b'"action":"offer"', b'"action":"0ffer"')
+        self.put_crlf(lines)
+        self.assertBad(3, "broken at seq 3: the hash does not match the line")
+        self.assertIn("5 of 5 lines now end CRLF where Doris wrote LF", receipts.verify(self.path).reason)
+
+    def test_a_crlf_resave_with_a_deleted_line_names_where_it_was(self):
+        self.five_lines()
+        lines = self.lines()
+        self.put_crlf(lines[:1] + lines[2:])
+        self.assertBad(2, "seq 3 found where seq 2 belongs")
+        self.assertIn("CRLF", receipts.verify(self.path).reason)
+
+    def test_a_crlf_resave_with_lines_cut_from_the_end_fails_the_finished_check(self):
+        self.five_lines()
+        self.put_crlf(self.lines()[:3])
+        res = receipts.verify(self.path, finished=True)
+        self.assertEqual((res.ok, res.lines, res.first_bad_seq), (False, 3, 4), res)
+        self.assertTrue(res.reason.startswith("no closing line"), res)
+        self.assertIn("3 of 3 lines now end CRLF where Doris wrote LF", res.reason)
+        self.assertNotIn("every line still matches", res.reason)
+        self.assertEqual(receipts.verify(self.path).first_bad_seq, 1)     # still being written: the endings alone
+
+    def test_a_crlf_resave_with_a_torn_tail_names_the_tail(self):
+        self.five_lines()
+        self.put(b"".join(l + b"\r\n" for l in self.lines()) + b'{"ts":"2026')
+        res = receipts.verify(self.path)
+        self.assertEqual((res.ok, res.lines, res.first_bad_seq), (False, 5, 6), res)
+        self.assertTrue(res.reason.startswith("torn tail"), res)
+        self.assertIn("CRLF", res.reason)
+
+    def test_crlf_on_some_lines_only_starts_at_the_first_of_them(self):
+        self.five_lines()
+        lines = self.lines()
+        self.put(b"".join(l + b"\n" for l in lines[:2]) + b"".join(l + b"\r\n" for l in lines[2:]))
+        self.assertBad(3, "broken at seq 3: the line endings were changed")
+        self.assertIn("3 of 5 lines now end CRLF where Doris wrote LF", receipts.verify(self.path).reason)
+
+    def test_an_edit_ahead_of_the_first_crlf_line_is_named_as_before(self):
+        self.five_lines()
+        lines = self.lines()
+        lines[1] = lines[1].replace(b"calendar_query", b"calendar_qverY")
+        self.put(b"".join(l + b"\n" for l in lines[:3]) + b"".join(l + b"\r\n" for l in lines[3:]))
+        self.assertBad(2, "the hash does not match the line")
+
+    def test_a_line_wrong_beyond_one_cr_is_named_itself(self):
+        self.five_lines()
+        lines = self.lines()
+        for extra in (lines[3] + b"\r", lines[3] + b" ", b" " + lines[3], lines[3][:40] + b"\r" + lines[3][40:]):
+            with self.subTest(extra=extra[-12:]):
+                self.put_crlf(lines[:3] + [extra] + lines[4:])
+                res = receipts.verify(self.path)
+                self.assertEqual((res.ok, res.lines, res.first_bad_seq), (False, 3, 4), res)
+                self.assertIn("CRLF", res.reason)
+                self.assertNotIn("every line still matches", res.reason)
+
+    def test_an_lf_file_with_an_edit_says_nothing_of_line_endings(self):
+        self.five_lines()
+        lines = self.lines()
+        lines[2] = lines[2].replace(b'"action":"offer"', b'"action":"0ffer"')
+        self.put_lines(lines)
+        res = receipts.verify(self.path)
+        self.assertEqual(res.reason, "broken at seq 3: the hash does not match the line")
+
+    def test_a_crlf_file_is_never_ok_and_the_writer_refuses_it_untouched(self):
+        self.five_lines()
+        self.put_crlf(self.lines())
+        resaved = self.data()
+        with self.assertRaises(receipts.ChainError) as ctx:
+            self.writer()
+        self.assertIn("line endings were changed", str(ctx.exception))
+        self.assertEqual(self.data(), resaved)
+        self.assertEqual(os.listdir(os.path.dirname(self.path)), ["receipts.jsonl"])
+
     def test_missing_file_fails_and_empty_file_passes(self):
         res = receipts.verify(self.path)
         self.assertFalse(res.ok)

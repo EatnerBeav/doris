@@ -457,10 +457,15 @@ def verify(argv):
         return 2
     r = receipts.verify(path, finished=True)
     if r.ok:
-        print("ok: %d lines, every hash matches the line before it (%s). %s" % (r.lines, _display(path), r.reason))
+        notes = "; ".join(r.reason.split("; ")[1:])        # the reason is "ok", then anything the chain records
+        print("ok: %d lines, every hash matches the line before it (%s).%s"
+              % (r.lines, _display(path), " %s." % (notes[:1].upper() + notes[1:]) if notes else ""))
         return 0
     where = "seq %d" % r.first_bad_seq if r.first_bad_seq else "the file"
-    print("BROKEN at %s: %s. %d lines verified before it (%s)." % (where, r.reason, r.lines, _display(path)))
+    said = "broken at %s: " % where                        # the reason names the seq too: say it once
+    reason = r.reason[len(said):] if r.reason.startswith(said) else r.reason
+    before = ". %d line%s verified before it" % (r.lines, "" if r.lines == 1 else "s") if r.lines else ""
+    print("BROKEN at %s: %s%s (%s)." % (where, reason, before, _display(path)))
     return 1
 
 

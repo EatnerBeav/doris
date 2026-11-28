@@ -101,8 +101,8 @@ def _split(data):
     return parts, torn
 
 
-def _check(whole):
-    """Recompute the chain over whole lines -> (VerifyResult, parsed lines that verified)."""
+def _recompute(whole):
+    """Recompute the chain over whole lines, byte for byte -> (VerifyResult, parsed lines that verified)."""
     prev = GENESIS
     good = []
     for raw in whole:
@@ -139,6 +139,44 @@ def _check(whole):
     return VerifyResult(True, len(good), None, "ok"), good
 
 
+def _crlf(whole):
+    return "%d of %d lines now end CRLF where Doris wrote LF" % (sum(raw.endswith(b"\r") for raw in whole), len(whole))
+
+
+def _also_crlf(result, whole):
+    """The same verdict, adding that the line endings were changed as well."""
+    return result._replace(reason="%s; the line endings were changed too (%s) and were set aside for this check"
+                           % (result.reason, _crlf(whole)))
+
+
+def _examine(whole):
+    """_check, plus what verify needs to go on to the file's end -> (VerifyResult, lines that verified, content).
+
+    Her lines end LF and hold no CR, so a file re-saved with CRLF line endings (PowerShell's Set-Content,
+    some editors) is not the file she wrote and never verifies. But such a re-save touches every line at
+    once, and "broken at seq 1" would hide the line that was really edited. So when the first bad line ends
+    with a CR, the chain is recomputed with one CR set aside at the end of each line, and the verdict names
+    the first line that is wrong beyond its ending. When no line is, the verdict names the first CRLF line
+    and says the endings were changed; only then is content every line, parsed (else None)."""
+    result, good = _recompute(whole)
+    if result.ok or not whole[len(good)].endswith(b"\r"):
+        return result, good, None
+    under, content = _recompute([raw[:-1] if raw.endswith(b"\r") else raw for raw in whole])
+    if not under.ok:
+        return _also_crlf(under, whole), content, None
+    seq = len(good) + 1
+    return VerifyResult(False, len(good), seq,
+                        "broken at seq %d: the line endings were changed: %s (a re-save in PowerShell or some "
+                        "editors does this); with the endings set aside, every line still matches its hash"
+                        % (seq, _crlf(whole))), good, content
+
+
+def _check(whole):
+    """Recompute the chain over whole lines -> (VerifyResult, parsed lines that verified). Never ok for a
+    line that is not byte for byte hers; a CRLF re-save is seen through only to name the right line."""
+    return _examine(whole)[:2]
+
+
 CLOSING_KINDS = ("summary", "halted")
 
 
@@ -147,27 +185,38 @@ def verify(path, finished=False) -> VerifyResult:
     duplicated line, a seq gap and a torn tail. finished=True (a run that has ended: the verify
     command) also needs the last line to be its summary or halted line (not a halted line that
     promises a summary after it), so whole lines cut from the end are named too; without it, a chain
-    still being written passes. Reads only; never raises on bad content."""
+    still being written passes. A file re-saved with CRLF line endings never passes, and the line named is
+    the one that is wrong beyond its ending (_examine). Reads only; never raises on bad content."""
     try:
         with open(path, "rb") as fh:
             data = fh.read()
     except OSError as exc:
         return VerifyResult(False, 0, None, "cannot read the receipt file: %s" % (exc.__class__.__name__,))
     whole, torn = _split(data)
-    result, good = _check(whole)
+    result, good, content = _examine(whole)
+    if content is not None:                # only the line endings are wrong so far: is the file's end whole?
+        end = _end(content, torn, finished)
+        return _also_crlf(end, whole) if end else result
     if not result.ok:
         return result
+    end = _end(good, torn, finished)
+    if end:
+        return end
+    notes = ["torn tail moved aside at seq %d" % line["seq"] for line in good
+             if line["kind"] == "error" and line["subject"] == "torn-tail"]
+    return VerifyResult(True, len(good), None, "; ".join(["ok"] + notes))
+
+
+def _end(good, torn, finished):
+    """What is wrong at the end of a file whose whole lines all verified: a VerifyResult, or None."""
     if torn:
-        return VerifyResult(False, len(good), len(good) + 1,
-                            "torn tail at seq %d: %d bytes with no whole line" % (len(good) + 1, len(torn)))
+        return VerifyResult(False, len(good), len(good) + 1, "torn tail: %d bytes with no whole line" % len(torn))
     if finished and (not good or good[-1]["kind"] not in CLOSING_KINDS or _summary_follows(good[-1])):
         last = "%s line" % good[-1]["kind"] if good else "no line"
         return VerifyResult(False, len(good), len(good) + 1,
                             "no closing line: it ends at seq %d with %s, not a summary or halted line, so lines "
                             "may be cut from the end (or the run never finished)" % (len(good), last))
-    notes = ["torn tail moved aside at seq %d" % line["seq"] for line in good
-             if line["kind"] == "error" and line["subject"] == "torn-tail"]
-    return VerifyResult(True, len(good), None, "; ".join(["ok"] + notes))
+    return None
 
 
 def _summary_follows(line):
