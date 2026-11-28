@@ -772,6 +772,181 @@ class SendingTest(LiveFixture):
         self.assertEqual(len(self.to(PROSPECT)), 1)
 
 
+class HaltBeforeTheCallTest(LiveFixture):
+    """A halt that lands after a send is recorded pending and before the transport is called: G1
+    passed a moment before, but she reads the halt again right before the JMAP call, so nothing
+    goes, the send stays pending, no send line is left without its answer, and the run after
+    `resume` sends it once."""
+
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.object(loop, "_sleep", lambda seconds: None)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def halted_after_recording(self, template):
+        """Her 4:10 cycle: a stop is asked for right after the send of `template` is recorded pending."""
+        self.go(fresh=True)
+        self.inbox.add(request(1), u(2026, 12, 1, 16, 2))
+        self.clock = u(2026, 12, 1, 16, 10)
+        real = ledger_mod.Ledger.record_send
+
+        def recorded_then_stopped(db, message_id, kind, template_, *args, **kw):
+            out = real(db, message_id, kind, template_, *args, **kw)
+            if template_ == template:
+                supervisor.request_stop("live", "cli", state_dir=self.state)
+            return out
+
+        with mock.patch.object(ledger_mod.Ledger, "record_send", recorded_then_stopped):
+            return self.go()
+
+    def test_a_halt_between_pending_and_the_call_sends_nothing_and_the_restart_sends_once(self):
+        s = self.halted_after_recording("T1")
+        self.assertEqual(s.halted, "cli")
+        self.assertEqual(self.jmap.requests, [])                  # not even a session: the call never began
+        self.assertEqual(send_states(self.state), ["pending"])
+        lines = receipts.read_lines(s.receipts_path)
+        self.assertEqual([l for l in lines if l["kind"] == "called" and l["payload"]["call"] == "send"], [])
+        (halted,) = [l["payload"] for l in lines if l["kind"] == "halted"]
+        self.assertEqual((halted["cause"], halted["in_flight"]), ("cli", "none"))
+        self.assertTrue(s.verify_ok)
+        self.assertTrue(supervisor.resume("live", state_dir=self.state).ok)
+        self.clock = u(2026, 12, 1, 16, 20)
+        again = self.go()
+        self.assertEqual([rcpts for _, rcpts, _ in self.jmap.delivered], [[PROSPECT, OWNER]])   # once
+        self.assertEqual(send_states(self.state), ["confirmed"])
+        self.assertEqual((again.handled, again.held, again.sends), (1, 0, 1))
+        self.assertTrue(again.verify_ok)
+
+
+def send_results(summary):
+    """The state each send's result line names, in order."""
+    lines = receipts.read_lines(summary.receipts_path)
+    sends = set(l["seq"] for l in lines if l["kind"] == "called" and l["payload"]["call"] == "send")
+    return [l["payload"]["state"] for l in lines if l["kind"] == "result" and l["payload"]["call_seq"] in sends]
+
+
+class JmapAnswerTest(LiveFixture):
+    """The send states over the fake JMAP server's own answers, nothing in LiveMail patched: a
+    submission created is handed_over, written down before the Sent look; one turned away (a 4xx,
+    or not created) surely did not go and is pending again; no answer in time, a lost connection, a
+    5xx or an answer it cannot read once the submission request went is unknown, written down
+    before any look, and never sent again, whatever a restart finds. A fault is staged on her
+    first submission (T1) only; the hold notice after it goes as normal."""
+
+    def setUp(self):
+        super().setUp()
+        self.waits, self.at_look = [], []
+        real_look = live.LiveMail.find_in_sent
+
+        def look(mail, message_id):
+            self.at_look.append(send_states(self.state)[0])
+            return real_look(mail, message_id)
+
+        for patch in (mock.patch.object(loop, "_sleep", self.waits.append),
+                      mock.patch.object(live.LiveMail, "find_in_sent", look)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def to(self, address):
+        return [data for _, rcpts, data in self.jmap.delivered if rcpts[0] == address]
+
+    def first_send(self, **faults):
+        """faults (fault=, status=, not_created=) on the first submission request only."""
+        sends = []
+
+        def staged(kind):
+            if kind != "send":
+                return
+            sends.append(kind)
+            self.jmap.fault.pop("send", None)
+            self.jmap.status.pop("send", None)
+            self.jmap.not_created.clear()
+            if len(sends) == 1:
+                if "fault" in faults:
+                    self.jmap.fault["send"] = faults["fault"]
+                if "status" in faults:
+                    self.jmap.status["send"] = faults["status"]
+                if "not_created" in faults:
+                    self.jmap.not_created["EmailSubmission/set"] = faults["not_created"]
+        self.jmap.on_request = staged
+
+    def restart(self):
+        """The next run, ten minutes on: it must send nothing more."""
+        before = len(self.jmap.delivered)
+        self.clock += dt.timedelta(minutes=10)
+        again = self.go()
+        self.assertEqual(len(self.jmap.delivered), before)
+        self.assertTrue(again.verify_ok)
+        return again
+
+    def test_a_submission_created_is_handed_over_before_the_look_then_confirmed(self):
+        s = self.started_fresh_then_asked()
+        self.assertEqual(send_results(s), ["handed_over"])
+        self.assertEqual(self.at_look[0], "handed_over")
+        self.assertEqual(send_states(self.state), ["confirmed"])
+        self.assertEqual((len(self.to(PROSPECT)), s.handled, s.held), (1, 1, 0))
+        self.restart()
+
+    def refused_once(self, **fault):
+        self.first_send(**fault)
+        s = self.started_fresh_then_asked()
+        self.assertEqual(self.to(PROSPECT), [])
+        self.assertEqual(send_results(s), ["refused", "handed_over"])        # T1, then its hold notice
+        self.assertEqual(send_states(self.state), ["pending", "confirmed"])
+        self.assertEqual(held_outcomes(s), ["hold:send_unconfirmed"])
+        self.assertEqual(len(self.to(OWNER)), 1)
+        self.restart()
+        self.assertEqual(send_states(self.state), ["pending", "confirmed"])
+
+    def test_a_submission_the_server_turned_away_surely_did_not_go_and_is_pending_again(self):
+        self.refused_once(status=400)
+
+    def test_a_submission_not_created_surely_did_not_go_and_is_pending_again(self):
+        self.refused_once(not_created="forbiddenToSend")
+
+    def unknown_once(self, filed, **fault):
+        """T1 goes, then no clear answer: unknown before any look. Her copy filed in Sent settles it;
+        not filed, it is held and never sent again."""
+        if not filed:
+            self.jmap.on_deliver = lambda sender, rcpts, message: (None if rcpts[0] == PROSPECT
+                                                                   else self.sent.add(message, self.clock))
+        self.first_send(**fault)
+        s = self.started_fresh_then_asked()
+        self.assertEqual(send_results(s)[0], "unknown")
+        self.assertEqual(self.at_look[0], "unknown")
+        self.assertEqual(len(self.to(PROSPECT)), 1)
+        if filed:
+            self.assertEqual(send_states(self.state), ["confirmed"])
+            self.assertEqual((s.handled, s.held, len(self.to(OWNER))), (1, 0, 0))
+        else:
+            self.assertEqual(send_states(self.state), ["unknown", "confirmed"])
+            self.assertEqual(held_outcomes(s), ["hold:send_unconfirmed"])
+            self.assertEqual(self.waits, [caps.SENT_LOOK_WAIT_S])           # two looks for T1, the wait between
+        self.restart()
+        self.assertEqual(len(self.to(PROSPECT)), 1)
+
+    def test_no_answer_in_time_after_the_submission_is_unknown_and_never_sent_again(self):
+        self.jmap.hang_s = 1.0
+        short = mock.patch.object(jmap, "_https", lambda host, port, timeout: http.client.HTTPConnection(
+            "127.0.0.1", self.jmap.port, timeout=0.3))
+        short.start()
+        self.addCleanup(short.stop)
+        self.unknown_once(False, fault="hang")
+
+    def test_an_answer_it_cannot_read_after_the_submission_is_unknown_and_never_sent_again(self):
+        self.unknown_once(False, fault="garbage")
+
+    def test_a_server_error_after_the_submission_is_unknown_and_never_sent_again(self):
+        self.unknown_once(False, fault=502)
+
+    def test_a_connection_lost_after_the_submission_is_unknown_and_never_sent_again(self):
+        self.unknown_once(False, fault="drop")
+
+    def test_an_unknown_send_whose_copy_is_in_sent_is_confirmed_by_the_look(self):
+        self.unknown_once(True, fault="garbage")
+
+
 class Steps(object):
     """A kill at the k-th step of a run (review 2's probe, as a test): before and after each ledger
     write, each mail and calendar call and each receipt line. where names the step it landed on."""

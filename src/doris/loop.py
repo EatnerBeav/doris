@@ -1606,6 +1606,9 @@ class _Run:
 
     def deliver(self, e, mid, kind, template, to_addr, raw, body, envelope, tslots, before_send=None):
         """Recorded before it is sent; sent once; found in Sent after (one more look); never resent blind.
+        Right before the transport is called she reads the halt again (G1 passed before the record, and
+        a lookup in Sent can take a while): a halt in force then raises Halted with the send still
+        pending and no send line written, so the run after `resume` sends it once.
         It is marked sending right before the transport is called: from there it may have gone, and a
         kill or a crash before the transport's answer is written down leaves it so (review 2, finding
         1). The answer is read the same for any transport: accepted (a JMAP submission created) is handed_over,
@@ -1636,6 +1639,7 @@ class _Run:
                 self.ledger.reset_send(mid, body_sha)
         if before_send is not None:
             before_send()
+        self.check_halt()                   # G1 passed before this; a halt since then stops it here, still pending
         seq = self.called("send", target=template, subject=subject, message_id=mid,
                           to="sender" if kind == "send_reply" else "owner",
                           bcc="owner" if kind == "send_reply" else None, body_sha256=body_sha,

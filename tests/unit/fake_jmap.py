@@ -67,6 +67,8 @@ class FakeJMAP(http.server.ThreadingHTTPServer):
         self.delivered = []         # (envelope sender, [recipients], message bytes) for each submission created
         self.on_deliver = None      # called (sender, recipients, message) for each submission created: a test
                                     # files her copy in its fake IMAP Sent folder there, as Fastmail would
+        self.on_request = None      # called (kind) as each request arrives, before it is answered: a test
+                                    # stages a fault for one request there and clears it for the next
         self.status = {}            # request kind -> an HTTP status to answer with instead
         self.method_error = {}      # method name -> an error type, answered as an "error" response
         self.not_created = {}       # "Email/import" | "EmailSubmission/set" -> an error type in notCreated
@@ -323,6 +325,8 @@ class JMAPHandler(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b""
         kind = self.kind_of(body)
         srv.requests.append((kind, self.command, self.path, {k.lower(): v for k, v in self.headers.items()}, body))
+        if srv.on_request is not None:
+            srv.on_request(kind)
         if self.headers.get("Authorization") != "Bearer " + srv.token:
             return self.answer(401, raw=b"", kind="text/plain")
         if kind in srv.status:
