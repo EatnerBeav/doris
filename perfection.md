@@ -1,6 +1,6 @@
 # Perfection list
 
-One ranked list of what a mock judging panel says still costs us points. Written Sat Nov 28, 9:00 AM Pacific, and checked against main `2c09d69`. Highest lost points first. With [tracker.md](tracker.md) and [brief-compliance.md](brief-compliance.md) this is the to-do list until the freeze.
+One ranked list of what a mock judging panel says still costs us points. Written Sat Nov 28, 8:45 AM Pacific, and checked against main `2c09d69`. Highest lost points first. With [tracker.md](tracker.md) and [brief-compliance.md](brief-compliance.md) this is the to-do list until the freeze.
 
 ## Where we stand
 
