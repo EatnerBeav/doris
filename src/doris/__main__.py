@@ -28,6 +28,7 @@ import datetime as _dt
 import json
 import os
 import sys
+import time
 
 from . import caps, livetrace, loop, paths, receipts, story, supervisor
 
@@ -92,6 +93,14 @@ def demo(argv):
     except NotMoved as refused:
         print(refused)
         return 1
+    left = orphaned_outputs()
+    if left:
+        print("Not started: her sends or bookings from an earlier demo day are still in the sandbox, but that day's "
+              "state is not in %s, so a demo now would send and book them all again beside them. Move these into "
+              "that day's folder in %s (or out of the sandbox), then run the demo again:\n%s"
+              % (_display(paths.state_dir("sandbox")) + "/", _display(os.path.join(paths.STATE, "old")) + "/",
+                 "\n".join("  " + _display(f) for f, _ in left)))
+        return 1
     source, model_id = sandbox_source()
     state = paths.state_dir("sandbox")
     name, run_dir = new_run_dir(state, run_name(source, "sandbox"))
@@ -115,8 +124,19 @@ class NotMoved(Exception):
     where everything is."""
 
 
+MOVE_RETRY_WAITS_S = (0.1, 0.3, 0.6)
+
+
 def _move(src, dst):
-    os.rename(src, dst)     # one folder or file, never copied: Windows refuses one held open, and says so
+    """One folder or file, never copied. Windows refuses one held open; a virus scanner or the indexer
+    holds a just-written file for a moment, so that refusal is tried again a few times before it is said."""
+    for wait in MOVE_RETRY_WAITS_S:
+        try:
+            os.rename(src, dst)
+            return
+        except PermissionError:
+            time.sleep(wait)
+    os.rename(src, dst)
 
 
 def last_day_finished():
@@ -146,6 +166,15 @@ def her_outputs():
     return found
 
 
+def orphaned_outputs():
+    """Her sends or bookings in the sandbox with no sandbox ledger beside them: a day half moved aside (a
+    move that could not be put back, or one cut off). A demo then would start a new ledger and send and
+    book the whole day again beside them, so it is refused. [] when there is a ledger, or nothing of hers."""
+    if os.path.exists(os.path.join(paths.state_dir("sandbox"), "ledger.sqlite")):
+        return []
+    return her_outputs()
+
+
 def fresh_day():
     """Before a demo: when the last sandbox day finished, move it aside, never delete it, into
     state/old/sandbox-<UTC stamp>/ (the whole state/sandbox folder as one rename, then her sends in
@@ -162,6 +191,7 @@ def fresh_day():
             break
         kept = os.path.join(old, "%s-%d" % (base, n))
     moved = []                              # (from, to), in the order they moved
+    src = old
     try:
         os.makedirs(old, exist_ok=True)
         src = state
@@ -174,14 +204,15 @@ def fresh_day():
             moved.append((src, dst))
     except OSError as exc:
         stuck = _put_back(moved, kept)
-        said = ("Not started: the last demo day could not be moved aside. %s refused to move (%s: %s); "
-                "close whatever holds it open and run the demo again."
+        said = ("Not started: the last demo day could not be moved aside. %s refused to move (%s: %s)"
                 % (_display(src), type(exc).__name__, exc.strerror or exc))
         if stuck:
-            said += ("\nThese had already moved and could not be put back; nothing is lost, move them back by "
-                     "hand:\n" + "\n".join("  %s is now at %s" % (_display(a), _display(b)) for a, b in stuck))
+            said += (". These had already moved and could not be put back; nothing is lost. Move them back by "
+                     "hand before the next demo:\n"
+                     + "\n".join("  %s is now at %s" % (_display(a), _display(b)) for a, b in stuck))
         else:
-            said += " Nothing was moved: her state, sends and bookings are where they were."
+            said += ("; close whatever holds it open and run the demo again. Nothing was moved: her state, sends "
+                     "and bookings are where they were.")
         raise NotMoved(said) from exc
     return kept
 

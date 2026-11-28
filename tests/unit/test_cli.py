@@ -233,6 +233,37 @@ class Demo(Isolated):
         self.assertEqual(os.listdir(os.path.join(old, "outbox")), [os.path.basename(calls[1])])
         self.assertIn("%s is now at " % cli._display(calls[1]), out)
         self.assertIn("%s is now at " % cli._display(os.path.join(self.state, "sandbox")), out)
+        self.assertNotIn("run the demo again", out)
+        self.assertFalse(os.path.exists(os.path.join(self.state, "sandbox")))
+        left = self.her_outputs()
+        code, out = run_cli(["demo"])           # a demo now is refused, never a second day sent beside the first
+        self.assertEqual(code, 1, out)
+        self.assertIn("still in the sandbox", out)
+        self.assertEqual(self.her_outputs(), left)
+        self.assertFalse(os.path.exists(os.path.join(self.state, "sandbox")))
+
+    def test_a_kept_days_folder_that_cannot_be_made_refuses_the_demo_and_moves_nothing(self):
+        run_cli(["demo"])
+        (first_run,) = self.runs()
+        before = self.her_outputs()
+        with open(os.path.join(self.state, "old"), "w", encoding="utf-8"):
+            pass                                # state/old is a file, so no folder can be made there
+        code, out = run_cli(["demo"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("Not started: the last demo day could not be moved aside.", out)
+        self.assertIn("Nothing was moved", out)
+        self.assertEqual(self.runs(), [first_run])
+        self.assertEqual(self.her_outputs(), before)
+
+    def test_her_sends_left_in_the_sandbox_without_their_state_refuse_the_demo(self):
+        run_cli(["demo"])
+        before = self.her_outputs()
+        os.rename(os.path.join(self.state, "sandbox"), os.path.join(self.tmp, "elsewhere"))   # state gone, sends not
+        code, out = run_cli(["demo"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("a demo now would send and book them all again", out)
+        self.assertIn(before[0][0], out)
+        self.assertEqual(self.her_outputs(), before)
         self.assertFalse(os.path.exists(os.path.join(self.state, "sandbox")))
 
     def test_a_halt_in_force_refuses_the_demo(self):
