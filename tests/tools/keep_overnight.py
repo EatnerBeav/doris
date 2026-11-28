@@ -18,7 +18,8 @@ What it writes:
 - traces/live-overnight-<stamp>/: drip-log.jsonl and night.log as written, and overnight.json:
   both runs' traces, outcomes, costs and counts, the restart checks, the drip's tally, the total
   measured cost, and the night's outcome, pass or fail, with the first failing check.
-- status/<the night's Pacific date>.md: the one-screen status of the night, made from overnight.json.
+- status/<the night's Pacific date>-overnight.md: the one-screen status of the night, from overnight.json
+  (its own file: the day's hand-written status/<date>.md is never touched).
 
 It prints one KEEP line per path to commit, then one OVERNIGHT line. No setting, address, subject
 or body is read or written: the drip log holds Message-IDs and kinds only.
@@ -172,6 +173,8 @@ def summarize(night, started, ended, killed_at, run1, run2, drip, restart_named)
     check("under 60 emails from the test sender", len(sent) < 60, "%d sent" % len(sent))
     check("no message of the drip answered twice with the same kind", tally is not None
           and tally.get("answered_twice") == 0, "" if tally is None else "%s" % tally.get("answered_twice"))
+    check("no wrong answer (an answer where none was due, or the wrong kind)", tally is not None
+          and tally.get("wrong") == 0, "" if tally is None else "%s wrong" % tally.get("wrong"))
     check("human approvals: 0", counts["human_approvals"] == 0, "%d" % counts["human_approvals"])
     failing = next((c for c in checks if not c["ok"]), None)
     return {
@@ -183,7 +186,8 @@ def summarize(night, started, ended, killed_at, run1, run2, drip, restart_named)
                   "first_failing_step": r.get("first_failing_step"), "cost_usd": r["cost_usd"],
                   "counts": r["counts"], "ended_by": r.get("ended_by", "stop")} for r in runs],
         "drip": {"emails": len(sent), "expected_met": (tally or {}).get("met"), "expected_missed": (tally or {}).get("missed"),
-                 "answered_twice": (tally or {}).get("answered_twice"), "stopped": (tally or {}).get("stopped"),
+                 "safe": (tally or {}).get("safe"), "wrong": (tally or {}).get("wrong"),
+                 "unsent": (tally or {}).get("unsent"), "answered_twice": (tally or {}).get("answered_twice"), "stopped": (tally or {}).get("stopped"),
                  "not_as_expected": [r for r in (tally or {}).get("rows", []) if not r.get("ok") or r.get("twice")]},
         "checks": checks, "outcome": "fail" if failing else "pass",
         "first_failing_check": failing["check"] if failing else None}
@@ -217,19 +221,22 @@ def status_text(o, night_folder):
         lines.append("| %d (%s) | %s | %s | %s | %s | %s | %s | $%.4f | [%s](../%s) |" % (
             i, "killed by plan" if r["ended_by"] != "stop" else "stopped", when, r["outcome"], c.get("messages"),
             c.get("handled"), c.get("held"), c.get("sends"), r["cost_usd"], r["trace"], r["trace"]))
+    for path in o.get("opening_smoke") or ():
+        lines += ["", "Opening smoke (a fresh proof her mail reaches Sent, which run 2 needs 7 hours in): [%s](../%s)."
+                  % (path, path)]
     d = o["drip"]
     if d["expected_met"] is None:
         lines += ["", "Test sender (wolf.whizz, tests/tools/overnight_drip.py): %d emails; it wrote no tally." % d["emails"], ""]
     else:
         lines += ["",
                   "Test sender (wolf.whizz, tests/tools/overnight_drip.py): %d emails; %s of %s steps got the answer the "
-                  "plan expects; %s answered twice." % (d["emails"], d["expected_met"],
-                                                        (d["expected_met"] or 0) + (d["expected_missed"] or 0),
-                                                        d["answered_twice"]),
+                  "plan expects (safe %s, wrong %s, unsent %s); %s answered twice."
+                  % (d["emails"], d["expected_met"], (d["expected_met"] or 0) + (d["expected_missed"] or 0),
+                     d["safe"], d["wrong"], d["unsent"], d["answered_twice"]),
                   ""]
     for r in d["not_as_expected"]:
-        lines.append("- Not as expected: %s step %s expected %s, got %s%s." % (
-            r["thread"], r["step"], r["expect"], ", ".join(r["got"]) or "nothing",
+        lines.append("- %s: %s step %s expected %s, got %s%s." % (
+            r.get("grade", "not as expected"), r["thread"], r["step"], r["expect"], ", ".join(r["got"]) or "nothing",
             " (%s)" % r["why"] if r.get("why") else ""))
     if d["not_as_expected"]:
         lines.append("")
@@ -252,6 +259,8 @@ def main(argv):
     ap.add_argument("--traces-root", default=paths.TRACES)
     ap.add_argument("--status-dir", default=os.path.join(paths.REPO, "status"))
     ap.add_argument("--rehearsal", action="store_true")
+    ap.add_argument("--also", action="append", default=[], metavar="PATH",
+                    help="another trace of the night to commit (the opening smoke's)")
     args = ap.parse_args(argv)
     started, ended = _t(args.started), livetrace.now()
     killed_at = _t(args.killed_at) if args.killed_at else None
@@ -285,15 +294,18 @@ def main(argv):
                   restart_named)
     if args.rehearsal:
         o["rehearsal"] = True
+    also = [path for path in args.also if os.path.isdir(path)]
+    if also:
+        o["opening_smoke"] = [_rel(path) for path in also]
     with open(os.path.join(out_dir, "overnight.json"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write(json.dumps(o, indent=1, sort_keys=True) + "\n")
     keep.append(out_dir)
     os.makedirs(args.status_dir, exist_ok=True)
-    status = os.path.join(args.status_dir, "%s.md" % pacific(started).strftime("%Y-%m-%d"))
+    status = os.path.join(args.status_dir, "%s-overnight.md" % pacific(started).strftime("%Y-%m-%d"))
     with open(status, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(status_text(o, _rel(out_dir)))
     keep.append(status)
-    for path in keep:
+    for path in also + keep:
         print("KEEP %s" % _rel(path))
     print("OVERNIGHT %s: %s%s; cost $%.4f; %d emails from the test sender"
           % (night, o["outcome"], "" if o["outcome"] == "pass" else " (first failing check: %s)" % o["first_failing_check"],

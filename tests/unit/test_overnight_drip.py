@@ -123,8 +123,9 @@ class Rehearsal(unittest.TestCase):
         shutil.rmtree(cls.tmp, True)
 
     def test_every_step_got_the_answer_it_expects(self):
-        missed = [r for r in self.tally["rows"] if not r["ok"]]
+        missed = [r for r in self.tally["rows"] if r["grade"] != "met"]
         self.assertEqual(missed, [])
+        self.assertEqual((self.tally["safe"], self.tally["wrong"], self.tally["unsent"]), (0, 0, 0))
         self.assertEqual(self.tally["emails"], drip.planned_emails())
         self.assertIsNone(self.tally["stopped"])
 
@@ -196,7 +197,40 @@ class Rehearsal(unittest.TestCase):
         self.assertFalse(killed["receipt_chain"]["ok"])            # no closing line: the kill came first
         self.assertTrue(killed["receipt_chain_to_the_kill"]["ok"])
         self.assertEqual(killed["started_utc"], "2026-11-29T04:00:00Z")
-        self.assertTrue(os.path.isfile(os.path.join(status, "2026-11-28.md")))
+        self.assertTrue(os.path.isfile(os.path.join(status, "2026-11-28-overnight.md")))
+        self.assertFalse(os.path.exists(os.path.join(status, "2026-11-28.md")))   # the day's own status is never touched
+
+    def keep_with(self, rows, **tally):
+        """keep_overnight on a hand-made drip log (no runs): its overnight.json."""
+        night = tempfile.mkdtemp(prefix="doris-keep-", dir=self.tmp)
+        log = [{"event": "sent", "thread": "t01", "step": 0}]
+        log.append(dict(dict(emails=1, met=0, safe=0, wrong=0, unsent=0, missed=0, answered_twice=0, stopped=None,
+                             rows=rows), event="tally", **tally))
+        with open(os.path.join(night, "drip-log.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in log))
+        smoke = os.path.join(night, "traces", "live-smoke-20261129T035500Z")
+        os.makedirs(smoke)
+        with redirect_stdout(io.StringIO()) as out:
+            keep.main(["--night", night, "--started", "2026-11-29T04:00:00Z", "--traces-root",
+                       os.path.join(night, "traces"), "--status-dir", os.path.join(night, "status"),
+                       "--also", smoke, "--rehearsal"])
+        self.assertIn("live-smoke-20261129T035500Z", out.getvalue())
+        (folder,) = [n for n in os.listdir(os.path.join(night, "traces")) if n.startswith("live-overnight-")]
+        with open(os.path.join(night, "traces", folder, "overnight.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_a_wrong_answer_fails_the_night_and_a_safe_one_is_reported(self):
+        wrong = self.keep_with([{"thread": "t04", "step": 0, "expect": "none", "got": ["offer"], "grade": "wrong",
+                                 "ok": False, "twice": False}], wrong=1, missed=1)
+        failed = [c["check"] for c in wrong["checks"] if not c["ok"]]
+        self.assertIn("no wrong answer (an answer where none was due, or the wrong kind)", failed)
+        safe = self.keep_with([{"thread": "t16", "step": 0, "expect": "offer", "got": [], "grade": "safe",
+                                "ok": False, "twice": False}], safe=1, missed=1)
+        self.assertNotIn("no wrong answer (an answer where none was due, or the wrong kind)",
+                         [c["check"] for c in safe["checks"] if not c["ok"]])
+        self.assertEqual(safe["drip"]["safe"], 1)
+        self.assertEqual(len(safe["drip"]["not_as_expected"]), 1)
+        self.assertEqual(len(safe["opening_smoke"]), 1)
 
 
 class Drip(unittest.TestCase):

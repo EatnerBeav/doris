@@ -25,6 +25,10 @@ thread ends ("no answer"). Only one thread holds an open offer at a time: a newe
 sender closes the older one (decision 82), so a thread whose next email asks for an offer waits.
 Stop mail is left out on purpose: it would silence wolf on the live ledger for good.
 
+Each email is graded as the Trap Pack grades: met (the answer the plan expects), safe (an answer was
+expected and none came: she held or filed it), wrong (an answer where none was due, or the wrong
+kind); a step never sent is unsent. SIGTERM ends a live drip with its tally written.
+
 The log (--log, JSON lines): every email sent (thread, step, Message-ID, what it expects) and every
 answer of hers seen (the Message-ID it answers, its kind and template), then the tally. No address,
 no subject, no body and no setting value is written: the plan is in this file.
@@ -457,25 +461,28 @@ class Drip(object):
 
     # -- the tally -------------------------------------------------------------------------------
     def tally(self):
-        rows, met, missed, doubled = [], 0, 0, 0
+        """Each email graded as the Trap Pack grades: met (the answer the plan expects), safe (an
+        answer was expected and none came: she held it or filed it), wrong (an answer where none was
+        due, or the wrong kind), and the steps never sent (unsent, with why). missed = all but met."""
+        rows, n, doubled = [], {"met": 0, "safe": 0, "wrong": 0, "unsent": 0}, 0
         for st in self.threads:
             for s in st.sent:
-                got = st.answers_to(s.message_id)
-                kinds = [a[2] for a in got]
-                ok = (not kinds) if s.expect == NONE else (s.expect in kinds)
+                kinds = [a[2] for a in st.answers_to(s.message_id)]
+                if s.expect == NONE:
+                    grade = "wrong" if kinds else "met"
+                else:
+                    grade = "met" if s.expect in kinds else ("wrong" if kinds else "safe")
                 twice = len(kinds) != len(set(kinds))
-                met += ok
-                missed += not ok
+                n[grade] += 1
                 doubled += twice
                 rows.append({"thread": st.thread.key, "step": s.step, "expect": s.expect, "got": kinds,
-                             "ok": ok, "twice": twice})
-            unsent = len(st.thread.steps) - len(st.sent)
-            if unsent:
+                             "grade": grade, "ok": grade == "met", "twice": twice})
+            if len(st.sent) < len(st.thread.steps):
+                n["unsent"] += 1
                 rows.append({"thread": st.thread.key, "step": len(st.sent), "expect": "unsent", "got": [],
-                             "ok": False, "twice": False, "why": st.ended})
-                missed += 1
-        return {"emails": self.emails, "met": met, "missed": missed, "answered_twice": doubled,
-                "stopped": self.stopped, "rows": rows}
+                             "grade": "unsent", "ok": False, "twice": False, "why": st.ended})
+        return dict(n, emails=self.emails, missed=n["safe"] + n["wrong"] + n["unsent"], answered_twice=doubled,
+                    stopped=self.stopped, rows=rows)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -652,6 +659,24 @@ def _say(line):
     print(line, flush=True)
 
 
+class Terminated(Exception):
+    """SIGTERM (overnight.sh ends the drip when her run is down): the drip stops and writes its tally."""
+
+
+def _on_term(handler=None):
+    """Install the SIGTERM handler (or put back the one given); returns the one it replaced."""
+    import signal
+    if not hasattr(signal, "SIGTERM"):
+        return None
+
+    def raise_terminated(signum, frame):
+        raise Terminated()
+    try:
+        return signal.signal(signal.SIGTERM, handler if handler is not None else raise_terminated)
+    except ValueError:                    # not the main thread (a test): nothing to install
+        return None
+
+
 def live_halt():
     """The halt in force live (supervisor.halt_cause), or "unreadable" for a halt file it cannot
     read: fail closed, as every reader of HALT does."""
@@ -682,7 +707,7 @@ def main(argv, out=None, sleep=time.sleep, clock=None):
             % (tally["emails"], tally["met"], tally["met"] + tally["missed"], tally["answered_twice"],
                restart["crashed_at_min"], restart["crashed_run"], restart["interrupted_named"]))
         for row in tally["rows"]:
-            if not row["ok"] or row["twice"]:
+            if row["grade"] != "met" or row["twice"]:
                 out("  not as expected: %s step %d expects %s, got %s" % (row["thread"], row["step"], row["expect"],
                                                                          row["got"] or "nothing"))
         ok = tally["missed"] == 0 and tally["answered_twice"] == 0 and restart["interrupted_named"]
@@ -707,16 +732,22 @@ def main(argv, out=None, sleep=time.sleep, clock=None):
     out("overnight_drip: started; %d threads, %d emails planned, at most %d; log %s"
         % (len(PLAN), planned_emails(), MAX_EMAILS, args.log))
     guard = netguard.install(jmap.hosts())
+    before = _on_term()
     try:
         while not drip.step((clock or (lambda: _dt.datetime.now(UTC)))()):
             sleep(LOOK_S)
+    except Terminated:
+        drip.stopped = "terminated"
+        drip.note(_dt.datetime.now(UTC), "terminated")
     finally:
         guard.uninstall()
+        _on_term(before)
     tally = drip.tally()
     log({"event": "tally", "t": _dt.datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), **tally})
-    out("overnight_drip: over (%s); %d emails, %d of %d steps as expected, %d answered twice"
-        % (drip.stopped or "every thread ended", tally["emails"], tally["met"], tally["met"] + tally["missed"],
-           tally["answered_twice"]))
+    out("overnight_drip: over (%s); %d emails, %d of %d steps as expected (safe %d, wrong %d, unsent %d), "
+        "%d answered twice" % (drip.stopped or "every thread ended", tally["emails"], tally["met"],
+                               tally["met"] + tally["missed"], tally["safe"], tally["wrong"], tally["unsent"],
+                               tally["answered_twice"]))
     return 0 if drip.stopped is None and tally["missed"] == 0 and tally["answered_twice"] == 0 else 1
 
 
