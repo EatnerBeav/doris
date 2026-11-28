@@ -29,7 +29,7 @@ import json
 import os
 import sys
 
-from . import caps, livetrace, loop, paths, receipts, supervisor
+from . import caps, livetrace, loop, paths, receipts, story, supervisor
 
 SANDBOX_OWNER = loop.SANDBOX_OWNER
 SANDBOX_DORIS = loop.SANDBOX_DORIS
@@ -99,8 +99,11 @@ def demo(argv):
     if kept:
         _say("A fresh sandbox day: the last demo's state and her sends and bookings are kept in %s."
              % (_display(kept) + "/",))
-    return supervise("sandbox", state, name, run_dir,
+    code = supervise("sandbox", state, name, run_dir,
                      sandbox_config(name, state, run_dir, source, model_id, digest=True))
+    for line in story.lines(os.path.join(run_dir, "receipts.jsonl")):     # what she did, from her receipts alone
+        _say(line)
+    return code
 
 
 # --- a fresh day for each demo -------------------------------------------------------------------

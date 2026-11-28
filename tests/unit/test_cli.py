@@ -104,6 +104,15 @@ class Demo(Isolated):
             config = json.load(fh)
         self.assertEqual((config["model_source"], config["calendar_timeout_s"]), ("stub", 0.3))
 
+    def test_the_demo_ends_with_the_owners_story_from_her_receipts(self):
+        code, out = run_cli(["demo"])
+        self.assertEqual(code, 0, out)
+        story_lines = out.partition("What Doris did for Shane")[2]        # her worker's own lines go to the terminal
+        self.assertIn("15 emails came in: 13 handled by her", story_lines)
+        self.assertIn("2 held for Shane", story_lines)
+        self.assertIn("0 human approvals", story_lines)
+        self.assertRegex(story_lines, r"Receipts: \d+ lines, chain verified\.")
+
     def old_days(self):
         old = os.path.join(self.state, "old")
         return [os.path.join(old, n) for n in sorted(os.listdir(old))] if os.path.isdir(old) else []
@@ -152,7 +161,9 @@ class Demo(Isolated):
         stopper.start()
         code, out = run_cli(["demo"])
         stopper.join()
-        self.assertEqual(code, supervisor.EXIT_HALTED, out)
+        self.assertEqual(code, supervisor.EXIT_HALTED, out)           # the story never changes the exit code
+        self.assertIn("up to the stop, from her receipts.", out)
+        self.assertIn("Nothing more goes out until python -m doris resume.", out)
         (halted_run,) = self.runs()
         self.assertEqual(run_cli(["resume"])[0], 0)
         code, out = run_cli(["demo"])
