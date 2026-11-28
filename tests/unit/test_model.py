@@ -328,16 +328,26 @@ class RefusedCall(unittest.TestCase):
         self.assertIn("(HTTP 404 not_found_error: model: claude-sonnet-5-5)", line)
         self.assertIn("This key cannot use claude-sonnet-5-5: check its tier, or DORIS_MODEL.", line)
 
-    def test_billing_and_rate_limits_are_said_too(self):
-        m, _ = self.live((402, self.error("billing_error", "Your credit balance is too low.")),
-                         (402, self.error("billing_error", "Your credit balance is too low.")))
+    def test_billing_is_said_too(self):
+        m, _ = self.live(*[(402, self.error("billing_error", "Your credit balance is too low."))] * 2)
         m.classify(PRIYA)
         self.assertIn("Check the billing of the key's Anthropic account.", self.said[0])
-        self.said[:] = []
-        model.NOTICE = model.Notice(self.said.append)
-        m, _ = self.live(*[(429, self.error("rate_limit_error", "Number of requests has exceeded your rate limit"))] * 2)
-        m.classify(PRIYA)
-        self.assertIn("The key's tier limit was reached.", self.said[0])
+
+    def test_a_refusal_about_one_request_or_a_rate_limit_is_not_said_and_leaves_the_once_unspent(self):
+        """400 and 413 are about that request, 429 may clear: each is that email's hold, in its receipt.
+        A later refused key in the same run is still said."""
+        m, _ = self.live((400, self.error("invalid_request_error", "messages: too long")),
+                         (400, self.error("invalid_request_error", "messages: too long")),
+                         *[(429, self.error("rate_limit_error", "Number of requests has exceeded your rate limit"))] * 2,
+                         *[(401, self.error("authentication_error", "invalid x-api-key"))] * 2)
+        self.assertFalse(m.classify(PRIYA).ok)
+        self.assertIn("HTTP 400 invalid_request_error: messages: too long", m.last_error)
+        self.assertFalse(m.classify(PRIYA).ok)
+        self.assertIn("HTTP 429 rate_limit_error", m.last_error)
+        self.assertEqual(self.said, [])
+        self.assertFalse(m.classify(PRIYA).ok)
+        (line,) = self.said
+        self.assertTrue(line.startswith("Model call refused (HTTP 401 authentication_error: invalid x-api-key)."), line)
 
     def test_an_outage_or_a_refusal_that_clears_on_the_retry_is_not_said(self):
         m, _ = self.live((529, self.error("overloaded_error", "Overloaded")), OSError("reset"))
@@ -356,12 +366,19 @@ class RefusedCall(unittest.TestCase):
         self.assertIn("[key]", self.said[0])
         self.assertNotIn(KEY, m.last_error)
 
+    def test_a_key_echoed_across_the_cut_is_redacted_before_it(self):
+        """The 160-character cut comes after the redaction, so no part of the key survives it."""
+        for pad in range(150, 165):
+            m, _ = self.live(*[(401, self.error("authentication_error", "x" * pad + KEY))] * 2)
+            m.classify(PRIYA)
+            self.assertNotIn(KEY[:8], m.last_error, pad)
+
     def test_the_api_words_are_one_short_printable_line(self):
-        m, _ = self.live(*[(400, self.error("invalid_request_error", "line one\nline\ttwo \u2014 " + "x" * 400))] * 2)
+        m, _ = self.live(*[(401, self.error("authentication_error", "line one\nline\ttwo \u2014 " + "x" * 400))] * 2)
         m.classify(PRIYA)
-        words = m.last_error.split("HTTP 400 ", 1)[1]
+        words = m.last_error.split("HTTP 401 ", 1)[1]
         self.assertLessEqual(len(words), 160)
-        self.assertTrue(words.startswith("invalid_request_error: line one line two x"), words)
+        self.assertTrue(words.startswith("authentication_error: line one line two x"), words)
         self.assertTrue(all(" " <= c <= "~" for c in self.said[0]))
 
     def test_no_hook_and_a_broken_hook_change_nothing(self):

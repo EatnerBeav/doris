@@ -429,9 +429,11 @@ def _yes_man_answer(msg):
 
 # --- a refused call, said once ---------------------------------------------------------------------
 # NOTICE is None, or a function(text) that `python -m doris` sets for the process: her worker's say,
-# print for traps. When the API refuses a call (a 4xx after the retry: the key, its billing, its tier,
-# the model), the terminal is told once, plainly and with the status, before that email's hold line,
-# so a refused key reads as one cause and not as a hold per email. Every refusal is in the receipts.
+# print for traps. When the API refuses a call for a reason that holds for every call of the run (the
+# key, its billing, its tier or the model: 401, 402, 403, 404, after the retry), the terminal is told
+# once, plainly and with the status, before that email's hold line, so a refused key reads as one
+# cause and not as a hold per email. A refusal about one request (400, 413) or a rate limit (429) is
+# not said: it may not last, and that email's receipt holds it like every other.
 NOTICE = None
 
 _REFUSED_HINTS = {
@@ -439,7 +441,6 @@ _REFUSED_HINTS = {
     402: "Check the billing of the key's Anthropic account.",
     403: "This key may not use %(model)s: check its tier, or DORIS_MODEL.",
     404: "This key cannot use %(model)s: check its tier, or DORIS_MODEL.",
-    429: "The key's tier limit was reached.",
 }
 
 
@@ -458,20 +459,20 @@ class Notice(object):
 def refused_line(status, error, model_id):
     """The one line for a refused call: the status and the API's own words, what to check, and what
     happens to the mail meanwhile."""
-    hint = _REFUSED_HINTS.get(status, "") % {"model": model_id}
-    return ("Model call refused (%s).%s Until that is fixed, each email the model would read is held for "
-            "the owner and nothing is sent to its sender." % (error, " " + hint if hint else ""))
+    return ("Model call refused (%s). %s Until that is fixed, each email the model would read is held for "
+            "the owner and nothing is sent to its sender." % (error, _REFUSED_HINTS[status] % {"model": model_id}))
 
 
-def _api_error(data):
-    """" <type>: <message>" from an API error body, printable ASCII, at most 160 characters; "" when it
-    can't be read."""
+def _api_error(data, key):
+    """" <type>: <message>" from an API error body, the key redacted first, printable ASCII, at most
+    160 characters; "" when it can't be read."""
     try:
         err = json.loads(data.decode("utf-8")).get("error") or {}
         parts = [p for p in (err.get("type"), err.get("message")) if isinstance(p, str) and p.strip()]
     except (ValueError, AttributeError, TypeError, UnicodeDecodeError):
         return ""
-    text = " ".join(re.sub(r"[^\x20-\x7e]", " ", ": ".join(parts)).split())[:160]
+    text = ": ".join(parts).replace(key, "[key]") if key else ": ".join(parts)
+    text = " ".join(re.sub(r"[^\x20-\x7e]", " ", text).split())[:160]
     return " " + text if text else ""
 
 
@@ -546,8 +547,8 @@ class Model(object):
                 error = "call failed: %s" % (type(exc).__name__,)
                 continue
             if status != 200:
-                error = "HTTP %s%s" % (status, _api_error(data))
-                refused = status if isinstance(status, int) and 400 <= status < 500 else None
+                error = "HTTP %s%s" % (status, _api_error(data, key))
+                refused = status if status in _REFUSED_HINTS else None
                 continue
             try:
                 resp = json.loads(data.decode("utf-8"))

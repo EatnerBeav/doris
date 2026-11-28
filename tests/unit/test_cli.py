@@ -435,6 +435,14 @@ class KeyFromDotEnv(Isolated):
         self.assertEqual(self.spawned, [])
         self.assertFalse(os.path.isdir(os.path.join(self.state, "sandbox", "runs")))
 
+    def test_a_value_the_environment_cannot_take_is_said_not_a_traceback(self):
+        self.write(self.root_env, "ANTHROPIC_API_KEY=bad\x00key\n")
+        code, out = run_cli(["demo"])
+        self.assertEqual(code, 2)
+        self.assertIn("ANTHROPIC_API_KEY holds a character the environment cannot take", out)
+        self.assertNotIn("bad", out)
+        self.assertEqual(self.spawned, [])
+
     def test_the_sandbox_run_reads_it_too(self):
         self.write(self.root_env, "ANTHROPIC_API_KEY=%s\n" % self.KEY)
         code, out = run_cli(["run"])

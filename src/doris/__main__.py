@@ -79,7 +79,11 @@ def load_dotenv(environ=None, files=None):
         for name in DOTENV_NAMES:
             value = (values.get(name) or "").strip()
             if value and name not in environ and name not in came_from:
-                environ[name] = value
+                try:
+                    environ[name] = value
+                except ValueError:           # a NUL in the value: the system refuses it
+                    raise envfile.EnvFileError("%s: %s holds a character the environment cannot take"
+                                               % (_display(path), name)) from None
                 came_from[name] = path
     return came_from
 
@@ -107,7 +111,7 @@ def refusals_said(say):
 
 
 def _not_started_env(exc):
-    print("Not started: %s. Fix that line or remove the file." % (exc,))
+    print("Not started: %s. Fix the .env file or remove it." % (exc,))
     return 2
 
 
