@@ -785,15 +785,35 @@ class SubmitTest(JmapFixture):
         self.assertEqual(self.jmap.kinds(), ["session", "setup", "upload", "send", "destroy"])
         self.assert_one_try()
 
-    def test_a_submission_error_answer_is_a_mail_error_and_the_draft_is_destroyed(self):
+    def test_a_submission_error_answer_after_her_draft_was_imported_is_send_unknown_and_never_retried(self):
+        """Her draft went in; the submission's answer is an error for the whole method, which cannot
+        say no submission was made. Unknown, never pending again: the caller looks in Sent."""
         self.jmap.method_error["EmailSubmission/set"] = "forbidden"
-        self.assertEqual(str(self.refused(reply_bytes(), [PROSPECT], MID)), "jmap submission: forbidden")
-        self.assertEqual((self.jmap.submissions, self.jmap.emails), ([], {}))
+        self.assertEqual(str(self.unknown(reply_bytes(), [PROSPECT], MID)), "jmap submission: forbidden")
+        self.assertEqual(self.jmap.kinds(), ["session", "setup", "upload", "send"])      # her draft is kept
+        self.assertEqual(len(self.jmap.emails), 1)
+        self.assert_one_try()
 
-    def test_a_missing_submission_answer_is_a_mail_error_and_the_draft_is_destroyed(self):
+    def test_an_answer_without_the_submission_after_her_draft_was_imported_is_send_unknown(self):
+        """The server made the submission and left its answer out: it went, and nothing here says not."""
         self.jmap.omit = {"EmailSubmission/set", "Email/set"}
-        self.assertIn("jmap submission", str(self.refused(reply_bytes(), [PROSPECT], MID)))
-        self.assertEqual(len(self.destroyed()), 1)
+        self.assertEqual(str(self.unknown(reply_bytes(), [PROSPECT], MID)), "jmap submission: no answer")
+        self.assertEqual(len(self.jmap.submissions), 1)
+        self.assertEqual(self.jmap.kinds(), ["session", "setup", "upload", "send"])
+        self.assertIsNone(self.sender.last_copy_in_sent)
+        self.assert_one_try()
+
+    def test_an_answer_with_neither_the_import_nor_the_submission_is_send_unknown(self):
+        self.jmap.omit = {"Email/import", "EmailSubmission/set", "Email/set"}
+        self.assertEqual(str(self.unknown(reply_bytes(), [PROSPECT], MID)), "jmap submission: no answer")
+        self.assert_one_try()
+
+    def test_a_submission_refused_with_no_import_answer_surely_did_not_go(self):
+        """notCreated for the submission says it was not made, whatever the import's answer."""
+        self.jmap.omit = {"Email/import"}
+        self.jmap.not_created["EmailSubmission/set"] = "forbiddenToSend"
+        self.assertEqual(str(self.refused(reply_bytes(), [PROSPECT], MID)), "jmap submission: forbiddenToSend")
+        self.assertEqual(self.jmap.submissions, [])
 
     def test_a_destroy_that_fails_never_hides_the_send_error(self):
         self.jmap.not_created["EmailSubmission/set"] = "tooManyRecipients"

@@ -32,11 +32,14 @@ The rules every send of hers keeps:
   or Resent-Bcc header, exactly one From and it is hers alone, exactly one Message-ID and it is
   the one given, the envelope a non-empty list of bare addresses.
 - MailError: it surely did not go. Any failure in steps 1 to 3; a step-4 request that never fully
-  went or that the server turned away (4xx); an answer saying the import or the submission was
-  not created, or holding no answer for one (then the imported draft is destroyed, best effort).
+  went or that the server turned away (4xx); an answer saying the submission was not created
+  (notCreated), or that the import failed (notCreated, or an error for the whole method), so no
+  draft was there to submit (then any imported draft is destroyed, best effort).
 - SendUnknown: the step-4 request went and no readable answer came back (lost connection,
-  timeout, a 5xx, an answer that cannot be read). The caller looks in Sent; nothing here sends
-  it again. No step is ever retried here.
+  timeout, a 5xx, an answer that cannot be read); or the answer holds no answer for the
+  submission, or an error for its whole method, while the import did not fail (review: neither
+  says no submission was made). The caller looks in Sent; nothing here sends it again. No step
+  is ever retried here.
 - A created submission is a send, even when moving her copy to Sent failed. last_copy_in_sent is
   then False: her copy may sit in Drafts, where a lookup in Sent will not find it.
 - Every part of the message is inline text/plain or her own .ics (review 14): checked before any
@@ -377,13 +380,14 @@ def _one_role(boxes, role, label, step):
 
 def _outcome(responses, call_id, name, creation_id):
     """What the answer says of one record a call was to create:
-    ("created", the record), ("refused", an error type), ("missing", None) when no answer came
-    for the call, or ("unclear", None) when the answer names the record neither way."""
+    ("created", the record), ("refused", an error type) when notCreated names it, ("error", an
+    error type) when the whole method answered with an error, ("missing", None) when no answer
+    came for the call, or ("unclear", None) when the answer names the record neither way."""
     for rname, args, rid in responses:
         if rid != call_id:
             continue
         if rname == "error":
-            return "refused", _error_type(args)
+            return "error", _error_type(args)
         if rname == name:
             created, not_created = args.get("created"), args.get("notCreated")
             if isinstance(created, dict) and creation_id in created:
@@ -590,13 +594,15 @@ class JmapSender(object):
         if submitted == "created":
             self.last_copy_in_sent = _moved(responses, "submit", email_id)
             return
-        if submitted == "unclear":
-            raise _failure(SendUnknown, "jmap submission", detail="the answer cannot be read")
+        no_draft = imported in ("refused", "error")       # the import surely failed: nothing to submit
+        if submitted == "unclear" or (submitted in ("missing", "error") and not no_draft):
+            raise _failure(SendUnknown, "jmap submission", detail={
+                "unclear": "the answer cannot be read", "missing": "no answer"}.get(submitted, why))
         if email_id is not None:
             self._destroy(account, email_id)
-        if imported in ("refused", "missing"):
-            raise _failure(MailError, "jmap import", detail=draft if imported == "refused" else "no answer")
-        raise _failure(MailError, "jmap submission", detail=why if submitted == "refused" else "no answer")
+        if no_draft:                                       # the cause, whatever the submission's answer
+            raise _failure(MailError, "jmap import", detail=draft)
+        raise _failure(MailError, "jmap submission", detail=why)     # notCreated names the submission
 
     def _destroy(self, account, email_id):
         """Remove the draft of a send that did not go. Best effort: never raises."""

@@ -1143,7 +1143,7 @@ class JmapAnswerTest(LiveFixture):
         return [data for _, rcpts, data in self.jmap.delivered if rcpts[0] == address]
 
     def first_send(self, **faults):
-        """faults (fault=, status=, not_created=) on the first submission request only."""
+        """faults (fault=, status=, not_created=, omit=) on the first submission request only."""
         sends = []
 
         def staged(kind):
@@ -1153,6 +1153,7 @@ class JmapAnswerTest(LiveFixture):
             self.jmap.fault.pop("send", None)
             self.jmap.status.pop("send", None)
             self.jmap.not_created.clear()
+            self.jmap.omit = set()
             if len(sends) == 1:
                 if "fault" in faults:
                     self.jmap.fault["send"] = faults["fault"]
@@ -1160,6 +1161,8 @@ class JmapAnswerTest(LiveFixture):
                     self.jmap.status["send"] = faults["status"]
                 if "not_created" in faults:
                     self.jmap.not_created["EmailSubmission/set"] = faults["not_created"]
+                if "omit" in faults:
+                    self.jmap.omit = set(faults["omit"])
         self.jmap.on_request = staged
 
     def restart(self):
@@ -1236,6 +1239,10 @@ class JmapAnswerTest(LiveFixture):
 
     def test_an_unknown_send_whose_copy_is_in_sent_is_confirmed_by_the_look(self):
         self.unknown_once(True, fault="garbage")
+
+    def test_an_answer_without_the_submission_after_her_draft_went_in_is_unknown_and_never_sent_again(self):
+        """The server made the submission and left its answer out (review): never pending again."""
+        self.unknown_once(False, omit={"EmailSubmission/set", "Email/set"})
 
 
 class Steps(object):
