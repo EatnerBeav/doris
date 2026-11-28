@@ -225,6 +225,19 @@ class DemoDay(unittest.TestCase):
             self.assertEqual(fh.read(), data)
 
 
+class PrintedPaths(unittest.TestCase):
+    def test_a_windows_path_keeps_single_backslashes_and_hostile_bits_stay_escaped(self):
+        with mock.patch.object(replay.os, "sep", "\\"), \
+                mock.patch.object(replay.paths, "shown", lambda p: "..\\state\\sandbox\\runs\\r\x1b1\\receipts.jsonl"):
+            self.assertEqual(replay._shown_path("ignored"), "..\\state\\sandbox\\runs\\r\\x1b1\\receipts.jsonl")
+
+    def test_a_path_is_from_the_folder_you_ran_in_with_this_systems_separator(self):
+        path = os.path.join(paths.REPO, "state", "sandbox", "runs", "r1", "receipts.jsonl")
+        with mock.patch.dict(os.environ, {paths.SHOWN_FROM: paths.SRC}):
+            self.assertEqual(replay._shown_path(path),
+                             os.path.join("..", "state", "sandbox", "runs", "r1", "receipts.jsonl"))
+
+
 class BrokenChain(unittest.TestCase):
     """verify's check first: a changed, cut or torn file is refused in one line, nothing stepped through."""
 

@@ -1869,6 +1869,9 @@ def main(argv=None):
               last_line(rep)]
     for line in lines[1:]:
         print(line)
+    # what the command printed, kept with the trace; its paths from the repository root, as committed files read
+    lines[0] = rep.setup_line
+    lines[-3:-1] = ["Trace: %s/" % traps._display(rep.trace_dir), "Report: %s" % traps._display(rep.results_path)]
     with open(os.path.join(rep.trace_dir, "terminal.log"), "w", encoding="utf-8", newline="\n") as fh:
-        fh.write("".join(line + "\n" for line in lines))      # what the command printed, kept with the trace
+        fh.write("".join(line + "\n" for line in lines))
     return 0 if rep.bad_total == 0 and not rep.unchecked else 1

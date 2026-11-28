@@ -319,7 +319,7 @@ def _time(ts):
     try:
         return _pacific(_dt.datetime.strptime("%s %s" % m.groups(), "%Y-%m-%d %H:%M:%SZ").replace(
             tzinfo=_dt.timezone.utc))
-    except ValueError:
+    except (ValueError, OverflowError):     # not a date, or one the Pacific clock can't reach (year 1)
         return "?"
 
 

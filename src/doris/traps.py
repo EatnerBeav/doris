@@ -1023,14 +1023,15 @@ def _run_names(model_source, stamp, state_root, traces_root):
 def setup_line(run_name, model_source, run_state, pack_dir, n_files, allowed, show=None):
     """The run's setup in one line. Its paths are from the repository root, as the report reads (show:
     paths.shown for the line the terminal prints)."""
+    where = "%s/<NN>/" % _display(run_state) if show is None else os.path.join(show(run_state), "<NN>", "")
     show = show or _display
     return ("Setup: run %s; model %s%s; owner %s (the pack's own inbox owner, traps runs only); Doris %s; "
             "clock %s (Tue Dec 1 2026, 9:00 AM Pacific), clock_mode fixed; calendar empty; fresh throwaway "
-            "state per item under %s/<NN>/ (NN its place in the pack: its own ledger, an inbox holding the one "
+            "state per item under %s (NN its place in the pack: its own ledger, an inbox holding the one "
             ".eml, an empty calendar, an outbox); network guard allows %s; forwarded: simulated; pack %s (%d files)."
             % (run_name, model_source,
                " (deterministic keyword stub, not a real model)" if model_source == "stub" else "",
-               OWNER_ADDR, DORIS_ADDR, CLOCK_UTC, show(run_state),
+               OWNER_ADDR, DORIS_ADDR, CLOCK_UTC, where,
                ", ".join(allowed) if allowed else "no host", show(pack_dir), n_files))
 
 
