@@ -414,6 +414,25 @@ class LiveRunTest(LiveFixture):
                          + [("127.0.0.1", "api.fastmail.com", "api.anthropic.com")])
         self.assertIsNone(netguard.active())
 
+    def test_the_fetch_result_counts_the_smokes_requests_it_left_out(self):
+        """R5: mail a live run leaves out as the smoke's own test request (its keyword, or a Message-ID
+        carrying the smoke's mark) left no line. The fetch's result line now counts it."""
+        self.go(fresh=True)
+        minted = "<%s0123456789abcdef0123456789abcdef@fastmail.com>" % live.SMOKE_MID_MARK
+        self.inbox.add(request(1), u(2026, 12, 1, 16, 2))
+        marked = self.inbox.add(wolf_request(), u(2026, 12, 1, 16, 3))
+        self.inbox.messages[marked]["flags"].add(live.SMOKE_TEST_KEYWORD)
+        self.inbox.add(wolf_request(minted), u(2026, 12, 1, 16, 4))       # cut short before its mark
+        self.clock = u(2026, 12, 1, 16, 10)
+        s = self.go()
+        lines = receipts.read_lines(s.receipts_path)
+        fetches = [l["seq"] for l in lines if l["kind"] == "called" and l["payload"]["call"] == "mail_fetch"]
+        results = [l["payload"] for l in lines if l["kind"] == "result" and l["payload"]["call_seq"] in fetches]
+        self.assertEqual(len(results), len(fetches))
+        for result in results:                  # each fetch hands over Priya's and counts the two it left out
+            self.assertEqual((result["ok"], result["count"], result.get("smoke_left_out")), (True, 1, 2), result)
+        self.assertEqual(s.handled, 1)
+
 
 class SessionHostTest(LiveFixture):
     """Fastmail's real session names apiUrl and uploadUrl on the account's own host below

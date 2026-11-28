@@ -827,7 +827,8 @@ class _Run:
         except MailError as exc:
             self.result(seq, ok=False, error=type(exc).__name__)
             raise                          # a refused login is loud: never read as an empty inbox
-        self.result(seq, ok=True, count=len(items))
+        left_out = getattr(self.mail, "smoke_left_out", 0)     # live: the smoke's own requests it left out
+        self.result(seq, ok=True, count=len(items), **({"smoke_left_out": left_out} if left_out else {}))
         return items
 
     def is_new(self, item):
