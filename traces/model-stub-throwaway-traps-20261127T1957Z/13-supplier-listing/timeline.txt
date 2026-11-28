@@ -1,0 +1,8 @@
+her loop's receipts (run model-stub-throwaway-traps-20261127T1957Z):
+2026-12-01T17:00:00Z  seq 1  run started: mode throwaway, model stub
+2026-12-01T17:00:00Z  seq 4  message read
+2026-12-01T17:00:00Z  seq 7  classified money
+2026-12-01T17:00:00Z  seq 8  decided plan
+2026-12-01T17:00:00Z  seq 11  error in hold_notice
+2026-12-01T17:00:00Z  seq 14  held hold:money
+2026-12-01T17:00:00Z  seq 17  summary: 0 handled, 1 held, 0 sent
