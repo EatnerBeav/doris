@@ -23,7 +23,9 @@ the digest, a halt (its cause, the call in flight, the dropped queue) and the su
 worded only from what its own lines hold; what a line does not record is said to be not recorded.
 
 It reads the receipt files and nothing else: each file's bytes are read once, checked, and stepped
-through from those same bytes. No model, mail adapter, calendar, ledger or loop code is loaded
+through from those same bytes. The one exception is a manifest.json beside a receipts file (a live
+trace's): its receipt_chain and counts are checked against the verified lines and one line says
+whether they agree; nothing else in it is read, and it never changes what is replayed. No model, mail adapter, calendar, ledger or loop code is loaded
 (templates is used only to print times in Pacific); a network guard allowing no host is installed for
 the whole command; nothing is written anywhere. Every value shown goes through shown(): control,
 format and separator characters, runs of spaces and backslashes are escaped, so a sender's text can
@@ -316,7 +318,73 @@ def _heading(lines, path, label, start):
     about = "Mode %s; %s." % (shown(mode), _source_words(start.get("model_source"), start.get("model")))
     if start.get("simulated") is True:
         about += " Simulated: her clock, inbox and calendar are the sandbox's; times are her clock's."
-    return "\n".join((first, chain, about))
+    manifest = _manifest(path, lines)
+    return "\n".join((first, chain) + ((manifest,) if manifest else ()) + (about,))
+
+
+MANIFEST_MAX = 1 << 20                        # bytes of a manifest.json read, at most
+
+
+def _manifest(path, lines):
+    """One line on the manifest.json beside a receipts file (a live trace's), or None when there is none:
+    whether its receipt_chain and counts agree with the lines just verified. Nothing else in it is read,
+    and it never changes what is replayed."""
+    where = os.path.join(os.path.dirname(path), "manifest.json")
+    if not os.path.isfile(where):
+        return None
+    try:
+        with open(where, "rb") as fh:
+            data = fh.read(MANIFEST_MAX + 1)
+        if len(data) > MANIFEST_MAX:
+            raise ValueError("over %d bytes" % MANIFEST_MAX)
+        m = json.loads(data.decode("utf-8"))
+        if not isinstance(m, dict):
+            raise ValueError("not a JSON object")
+    except Exception as exc:
+        return ("Manifest: the manifest.json beside it could not be read (%s); nothing in it was checked."
+                % (type(exc).__name__,))
+    chain, counts = m.get("receipt_chain"), m.get("counts")
+    if not isinstance(chain, dict) and not isinstance(counts, dict):
+        return "Manifest: holds no receipt chain or counts to check."
+    agree, differ, unchecked = [], [], []
+    if isinstance(chain, dict):
+        if chain.get("lines") != len(lines) or _is_int(chain.get("lines")) is False:
+            differ.append("its receipt chain says %s lines, the file holds %d" % (shown(chain.get("lines")), len(lines)))
+        if chain.get("ok") is not True:
+            differ.append("its receipt chain says ok %s, verify found it ok" % (shown(chain.get("ok")),))
+        if not differ:
+            agree.append("its receipt chain: %d lines, ok" % (len(lines),))
+    if isinstance(counts, dict):
+        mine, same, before = _counted(lines), [], len(differ)
+        for key in sorted(counts, key=str):
+            if key not in mine:
+                unchecked.append(shown(key))
+            elif json.dumps(counts[key]) == json.dumps(mine[key]):
+                same.append("%s %d" % (shown(key), mine[key]))
+            else:
+                differ.append("it counts %s %s, the lines hold %d" % (shown(key), shown(counts[key]), mine[key]))
+        if len(differ) == before and same:
+            agree.append("its counts, recounted from the lines: %s" % (", ".join(same),))
+    tail = " (not checked: %s)" % (", ".join(unchecked),) if unchecked else ""
+    if differ:
+        return "Manifest DISAGREES with the receipts: %s%s. Only the receipts are replayed." % ("; ".join(differ), tail)
+    return "Manifest: agrees with the receipts (%s)%s." % ("; ".join(agree), tail)
+
+
+def _counted(lines):
+    """The counts a live trace's manifest holds, counted from the lines as its writer counts them
+    (livetrace.counts and loop.count_outcomes), without loading either."""
+    calls = [_payload(l).get("call") for l in lines if l.get("kind") == "called"]
+    out = {"messages": sum(1 for l in lines if l.get("kind") == "observed" and _payload(l).get("step") != "start"),
+           "model_calls": calls.count("model"), "sends": calls.count("send"),
+           "errors": sum(1 for l in lines if l.get("kind") == "error"), "handled": 0, "held": 0, "human_approvals": 0}
+    for line in lines:
+        p = _payload(line)
+        if line.get("kind") == "approved" or p.get("human_approval") is True:
+            out["human_approvals"] += 1
+        if line.get("kind") in ("decided", "held") and "outcome" in p:
+            out["held" if str(p["outcome"]).startswith("hold:") else "handled"] += 1
+    return out
 
 
 def _source_words(source, model):

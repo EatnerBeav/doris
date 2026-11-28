@@ -830,6 +830,43 @@ class AfterPR11Review(unittest.TestCase):
         self.assertIn("  Started   Tue Dec 1, 8:00 AM Pacific. It went on from the live ledger already there. Mail "
                       "read from: not recorded. [seq 1]", out)
 
+    def smoke_copy(self, manifest=None):
+        tmp = tempfile.mkdtemp(prefix="doris-replay-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        folder = os.path.join(tmp, SMOKE)
+        shutil.copytree(os.path.join(paths.REPO, "traces", SMOKE), folder)
+        if manifest is not None:
+            with open(os.path.join(folder, "manifest.json"), "rb") as fh:
+                data = manifest(json.loads(fh.read().decode("utf-8")))
+            with open(os.path.join(folder, "manifest.json"), "wb") as fh:
+                fh.write(data)
+        return folder
+
+    def test_a_manifest_that_agrees_says_so(self):
+        code, out = replay_cli([os.path.join(paths.REPO, "traces", SMOKE)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("\nManifest: agrees with the receipts (its receipt chain: 21 lines, ok; its counts, recounted "
+                      "from the lines: errors 0, handled 1, held 0, human_approvals 0, messages 1, model_calls 1, "
+                      "sends 1).\n", out)
+
+    def test_a_manifest_that_disagrees_is_named_and_the_receipts_are_replayed(self):
+        def wrong(m):
+            m["receipt_chain"]["lines"], m["counts"]["handled"], m["counts"]["extra"] = 20, 2, 5
+            return json.dumps(m).encode("utf-8")
+        code, out = replay_cli([self.smoke_copy(wrong)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("\nManifest DISAGREES with the receipts: its receipt chain says 20 lines, the file holds 21; it "
+                      "counts handled 2, the lines hold 1 (not checked: extra). Only the receipts are replayed.\n", out)
+        self.assertIn("  Closed    offer, T2 sent.", out)
+
+    def test_a_manifest_that_cannot_be_read_or_holds_nothing_to_check(self):
+        code, out = replay_cli([self.smoke_copy(lambda m: b"{not json")])
+        self.assertEqual(code, 0, out)
+        self.assertIn("\nManifest: the manifest.json beside it could not be read (JSONDecodeError); nothing in it "
+                      "was checked.\n", out)
+        code, out = replay_cli([self.smoke_copy(lambda m: b"{}")])
+        self.assertIn("\nManifest: holds no receipt chain or counts to check.\n", out)
+
     def test_the_committed_live_smoke_shows_its_start(self):
         code, out = replay_cli([os.path.join(paths.REPO, "traces", SMOKE)])
         self.assertEqual(code, 0, out)
