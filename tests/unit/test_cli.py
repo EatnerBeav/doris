@@ -15,17 +15,11 @@ from unittest import mock
 
 from doris import __main__ as cli
 from doris import caps, paths, receipts, supervisor
+from tests.unit import demo_sandbox
 
 
 def fresh_sandbox(tmp):
-    sandbox = os.path.join(tmp, "sandbox")
-    shutil.copytree(paths.SANDBOX, sandbox,
-                    ignore=shutil.ignore_patterns("doris-*.ics", "staged-*.ics", "*.eml.sent"))
-    outbox = os.path.join(sandbox, "outbox")
-    for name in os.listdir(outbox):
-        if name != ".gitkeep":
-            os.remove(os.path.join(outbox, name))
-    return sandbox
+    return demo_sandbox.copy_committed(paths.SANDBOX, os.path.join(tmp, "sandbox"))
 
 
 def run_cli(argv):

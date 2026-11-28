@@ -14,6 +14,7 @@ import tempfile
 import unittest
 
 from doris import loop, paths, receipts, why
+from tests.unit import demo_sandbox
 
 OWNER = "whizz@fastmail.com"
 DORIS = "doris.htm@fastmail.com"
@@ -23,13 +24,8 @@ class DemoDay(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp(prefix="doris-demo-")
-        cls.sandbox = os.path.join(cls.tmp, "sandbox")
-        shutil.copytree(paths.SANDBOX, cls.sandbox,
-                        ignore=shutil.ignore_patterns("doris-*.ics", "*.eml.sent", "keywords.json"))
+        cls.sandbox = demo_sandbox.copy_committed(paths.SANDBOX, os.path.join(cls.tmp, "sandbox"))
         outbox = os.path.join(cls.sandbox, "outbox")
-        for name in os.listdir(outbox):
-            if name != ".gitkeep":
-                os.remove(os.path.join(outbox, name))
         cfg = loop.RunConfig(mode="throwaway", run_name="model-stub-sandbox-test", state_dir=os.path.join(cls.tmp, "state"),
                              sandbox_root=cls.sandbox, owner_addr=OWNER, doris_addr=DORIS, model_source="stub",
                              clock_mode="advance", digest=True)

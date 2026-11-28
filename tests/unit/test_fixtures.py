@@ -6,8 +6,9 @@ on the wrong email, a busy block in the wrong place, an address that is not the 
 fixtures drifting from tests/tools/build_demo_fixtures.py.
 
 Every expected value below is copied from demo-day.md by hand, not computed by the generator.
-The tests tolerate what a demo run adds (her doris-*.ics bookings, her sends in outbox/) and a judge's own
-.eml dropped in after the demo's fifteen.
+The tests tolerate what a demo run adds (her doris-*.ics bookings, the staged-*.ics event a staged fault
+puts on the calendar, her sends in outbox/; see demo_sandbox.py) and a judge's own .eml dropped in after the
+demo's fifteen.
 """
 
 import datetime as dt
@@ -21,6 +22,8 @@ import os
 import re
 import tempfile
 import unittest
+
+from tests.unit import demo_sandbox
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -178,8 +181,8 @@ def read_ics(path):
 
 
 def owner_ics_files():
-    """The owner's events: every .ics but her own bookings (doris-*), which a demo run adds."""
-    return sorted(f for f in os.listdir(CALENDAR) if f.endswith(".ics") and not f.startswith("doris-"))
+    """The owner's events: every .ics but what a demo run adds (her doris-* bookings, staged-* events)."""
+    return demo_sandbox.owner_ics_files(CALENDAR)
 
 
 def pacific_utc(hhmm):
