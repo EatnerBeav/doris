@@ -23,7 +23,7 @@ import time
 import unittest
 from unittest import mock
 
-from doris import __main__ as cli
+from doris import __main__ as cli, story
 from doris import caps, paths, receipts, supervisor, watch
 from doris.why import why
 from tests.unit.test_cli import fresh_sandbox
@@ -302,6 +302,23 @@ class SandboxDay(unittest.TestCase):
             self.assertNotIn(html.escape(raw), blob)
 
 
+    def test_the_story_section_tells_the_day_in_plain_words_from_the_same_lines(self):
+        summary = self.lines[-1]["payload"]
+        st = self.snap["story"]
+        self.assertEqual(st["error"], "")
+        self.assertIn("%d handled by her" % summary["handled"], st["headline"])
+        self.assertIn("%d held for Shane" % summary["held"], st["headline"])
+        self.assertTrue(st["headline"].endswith("0 human approvals."), st["headline"])
+        self.assertEqual([sec["title"].split(" (")[0] for sec in st["sections"]],
+                         ["Needs Shane", "On Shane's calendar", "Thread by thread"])
+        self.assertIn(["2:20 PM", "Marcus Lee", "asks to add or write to another person"], st["sections"][0]["rows"])
+        self.assertIn('<section class="story"', self.page)
+        self.assertIn(html.escape(st["headline"]), self.page)
+        self.assertIn("<td>Marcus Lee</td>", self.page)
+        for words in ("three-month pilot", "cofounder", "full calendar"):     # mail bodies the day holds
+            self.assertNotIn(words, self.page + json.dumps(self.snap))
+
+
 # ---------------------------------------------------------------------------------------------------
 # Runs written line by line: panes, escaping, what never reaches the page, the chain
 # ---------------------------------------------------------------------------------------------------
@@ -374,6 +391,45 @@ class Panes(TempState):
         read = [r for r in snap["rows"] if r["step"] == "read"][0]
         self.assertIn("<script>alert(1)</script>", read["what"])         # the data stays as written: text
         self.assertNotIn("‮", page + json.dumps(snap, ensure_ascii=False))   # no right-to-left override
+
+    def test_the_story_names_a_hostile_sender_as_text_and_says_so_far_before_the_closing_line(self):
+        write_run(self.state, "model-replayed-sandbox-20261128T010000Z", busy_day())
+        snap = self.look()
+        st = snap["story"]
+        self.assertIn("so far", st["scope"])
+        threads = st["sections"][2]["rows"]
+        self.assertTrue(threads[0][0].startswith("<script>alert(1)</script>"), threads)   # the data stays text
+        page = watch.render_page(snap, token="t", nonce="n")
+        story_html = page[page.index('<section class="story"'):page.index('<section class="tail">')]
+        self.assertNotIn("<script", story_html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", story_html)
+        self.assertNotIn("\u202e", json.dumps(st, ensure_ascii=False))
+
+    def test_after_a_stop_and_resume_the_story_tells_the_whole_day(self):
+        stopped = write_run(self.state, "model-replayed-sandbox-20261128T010000Z",
+                            busy_day() + [("halted", halted_payload(18), "", why("halt.watch_button"))])
+        os.utime(stopped, (time.time() - 60, time.time() - 60))
+        newer = "model-replayed-sandbox-20261128T020000Z"
+        resumed = write_run(self.state, newer, [
+            start_line(newer),
+            ("observed", {"from_name": "Ken Ito", "from_addr": "ken@ito.example", "thread": "k1"}, "k1"),
+            ("decided", {"outcome": "file", "template": "-", "thread": "k1"}, "k1", why("policy.file_fyi")),
+            ("summary", {"handled": 1, "held": 0, "human_approvals": 0})], started=time.time() + 5)
+        st = self.look()["story"]
+        day = story.build(receipts.read_lines(stopped) + receipts.read_lines(resumed))
+        self.assertEqual(st["headline"], day["headline"])
+        self.assertNotEqual(day["headline"], story.build(receipts.read_lines(resumed))["headline"])
+        self.assertIn("Then resumed: this covers both runs.", st["halt"])
+
+    def test_a_story_that_cannot_be_built_leaves_the_rest_of_the_page_standing(self):
+        write_run(self.state, "model-replayed-sandbox-20261128T010000Z", busy_day())
+        with mock.patch("doris.story.build", side_effect=ValueError("odd line")):
+            snap = self.look()
+        self.assertEqual(snap["story"]["error"], "This section could not be built (ValueError). The rest of the "
+                                                 "page stands.")
+        self.assertEqual(snap["story"]["sections"], [])
+        self.assertEqual(snap["panes"][1]["value"], "5")
+        self.assertNotIn("odd line", watch.render_page(snap, token="t", nonce="n"))
 
     def test_no_model_words_no_mail_body_and_no_error_text_reach_the_page(self):
         write_run(self.state, "model-replayed-sandbox-20261128T010000Z", busy_day())
@@ -675,6 +731,7 @@ class Server(TempState):
         self.assertTrue(first["reset"])
         self.assertEqual([r["seq"] for r in first["rows"]], list(range(1, 19)))
         self.assertEqual((first["run"], first["after"]), (name, 18))
+        self.assertIn("1 held for Shane", first["story"]["headline"])
         later = state_json(self.server, run=name, after=15)
         self.assertFalse(later["reset"])
         self.assertEqual([r["seq"] for r in later["rows"]], [16, 17, 18])

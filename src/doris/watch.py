@@ -40,7 +40,7 @@ from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-from . import paths, receipts, supervisor, zones
+from . import paths, receipts, story, supervisor, zones
 from .loop import count_outcomes
 from .shapes import CLASSES
 
@@ -454,7 +454,7 @@ def snapshot(run):
         return {"run": "", "title": "Doris watch: no run yet", "run_line": "No run yet.", "source": "",
                 "status": "", "chain": "", "chain_ok": True, "state": "none",
                 "panes": [{"label": label, "value": "\u2014", "note": ""} for label in LABELS],
-                "rows": [], "after": 0, "more": "",
+                "rows": [], "after": 0, "more": "", "story": _no_story(),
                 "empty": "No run yet. Start one with %s, or %s; this page picks it up as soon as it "
                          "starts." % (paths.command("demo"), paths.command("run"))}
     path = os.path.join(run.folder, "receipts.jsonl")
@@ -552,7 +552,9 @@ def snapshot(run):
             "source": " ".join(w for w in (MODE_WORDS.get(mode, ""), SOURCE_WORDS.get(source, ""),
                                            SMOKE_WORDS if run.smoke else "") if w),
             "status": status, "chain": chain, "chain_ok": chain_ok, "state": state, "panes": panes,
-            "rows": rows, "after": max([r["seq"] for r in rows] or [0]), "more": more, "empty": ""}
+            "rows": rows, "after": max([r["seq"] for r in rows] or [0]), "more": more, "empty": "",
+            "story": story_view(story.with_earlier_runs(path, lines), before_break=not chain_ok) if lines
+            else _no_story()}
 
 
 def unreadable(run, exc):
@@ -565,7 +567,42 @@ def unreadable(run, exc):
                       "%s %s" % (exc.__class__.__name__, paths.command("verify"), path),
             "chain": "", "chain_ok": False, "state": "unreadable",
             "panes": [{"label": label, "value": "?", "note": ""} for label in LABELS],
-            "rows": [], "after": 0, "more": "", "empty": ""}
+            "rows": [], "after": 0, "more": "", "empty": "", "story": _no_story()}
+
+
+# ------------------------------------------------------------------------------------------
+# What she did for the owner: the demo's closing story (story.py), from the same verified lines
+# ------------------------------------------------------------------------------------------
+STORY_CLIP = 1000                   # a thread's sentences run long; the receipt file holds every step
+
+
+def _no_story(error=""):
+    return {"title": "", "scope": "", "headline": "", "halt": "", "note": "", "error": error, "sections": [],
+            "foot": []}
+
+
+def story_view(lines, before_break=False):
+    """The story section for the page: story.build on the lines that verified, every string through _text
+    (controls and direction characters blanked). A failure here costs this one section, never the page."""
+    try:
+        s = story.build(lines)
+    except Exception as exc:            # noqa: BLE001 - the panes, the rows and Stop still show
+        view = _no_story("This section could not be built (%s). The rest of the page stands." % exc.__class__.__name__)
+        view["title"] = "What Doris did for the owner"
+        return view
+
+    def t(value):
+        return _text(value, STORY_CLIP)
+    sections = []
+    if not s["quiet"]:
+        for key in ("needs", "calendar", "threads"):
+            sec = s[key]
+            sections.append({"title": t(sec["title"]), "rows": [[t(c) for c in r] for r in sec["rows"]],
+                             "more": t(sec.get("more", ""))})
+    foot = [t(x) for x in (s["waiting"], s["digest"], "%s %s" % (s["cost"], s["gate"])) if x.strip()]
+    note = "From the %s before the break only." % _s(len(lines), "line") if before_break and lines else ""
+    return {"title": t(s["title"]), "scope": t(s["scope"]), "headline": t(s["headline"]), "halt": t(s["halt"]),
+            "note": note, "error": "", "sections": sections, "foot": foot}
 
 
 def _halt_note(line):
@@ -664,6 +701,22 @@ def _row_html(r):
                        code='<span class="code">%s</span>' % _e(r["code"]) if r["code"] else "")
 
 
+def _story_html(st):
+    """The story's sections as escaped HTML (the page's script builds the same with textContent)."""
+    out = []
+    for sec in st["sections"]:
+        out.append("<h3>%s</h3>" % _e(sec["title"]))
+        if sec["rows"]:
+            out.append('<table class="story-rows"><tbody>%s</tbody></table>' % "".join(
+                "<tr>%s</tr>" % "".join("<td>%s</td>" % _e(c) for c in row) for row in sec["rows"]))
+        else:
+            out.append('<p class="none">None.</p>')
+        if sec["more"]:
+            out.append('<p class="more">%s</p>' % _e(sec["more"]))
+    out += ['<p class="foot">%s</p>' % _e(line) for line in st["foot"]]
+    return "".join(out)
+
+
 _PAGE = string.Template("""<!doctype html>
 <html lang="en">
 <head>
@@ -735,6 +788,21 @@ body[data-state="finished"] .pane:first-child { border-left-color: var(--ok); }
 .pane .value { margin: 0; font-size: 1.9rem; line-height: 1.15; font-weight: 600; overflow-wrap: anywhere; }
 .pane:first-child .value { font-size: 1.3rem; line-height: 1.3; }
 .pane .note { margin: 6px 0 0; font-size: .9rem; color: var(--muted); overflow-wrap: anywhere; }
+.story { margin: 24px 0 0; max-width: 110ch; }
+.story[hidden] { display: none; }
+.story h2 { margin: 0 0 2px; font-size: 1.15rem; }
+.story .scope { margin: 0; color: var(--muted); font-size: .9rem; }
+.story .headline { margin: 8px 0 0; font-size: 1.1rem; font-weight: 600; }
+.story .halt, .story .alarm { margin: 8px 0 0; padding: 4px 8px; background: var(--alarm-bg); font-weight: 600; }
+.story .note { margin: 6px 0 0; color: var(--muted); }
+#story-halt:empty, #story-error:empty, #story-note:empty { display: none; }
+.story h3 { margin: 18px 0 4px; font-size: .95rem; font-weight: 600; color: var(--muted); }
+.story-rows { width: auto; }
+.story-rows td { padding: 4px 16px 4px 0; border-bottom: 1px solid var(--rule); }
+.story-rows td:not(:last-child) { white-space: nowrap; }
+.story .none, .story .more { margin: 4px 0 0; color: var(--muted); }
+.story .foot { margin: 6px 0 0; }
+.story .foot:first-of-type { margin-top: 16px; }
 .tail h2 { margin: 28px 0 2px; font-size: 1.15rem; }
 .tail .lede { margin: 0 0 12px; color: var(--muted); max-width: 78ch; }
 .scroll { overflow-x: auto; }
@@ -792,6 +860,15 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
   <div class="pane"><h2>$label2</h2><p class="value" id="pane-2-value">$value2</p><p class="note" id="pane-2-note">$note2</p></div>
   <div class="pane"><h2>$label3</h2><p class="value" id="pane-3-value">$value3</p><p class="note" id="pane-3-note">$note3</p></div>
 </section>
+<section class="story" id="story" aria-label="What she did for the owner"$story_hidden>
+  <h2 id="story-title">$story_title</h2>
+  <p class="scope" id="story-scope">$story_scope</p>
+  <p class="headline" id="story-headline">$story_headline</p>
+  <p class="halt" id="story-halt">$story_halt</p>
+  <p class="alarm" id="story-error" role="alert">$story_error</p>
+  <p class="note" id="story-note">$story_note</p>
+  <div id="story-body">$story_body</div>
+</section>
 <section class="tail">
   <h2>Every step, newest first</h2>
   <p class="lede">One row per receipt line, as it lands. A decision's why is written by code from a fixed list,
@@ -845,6 +922,42 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
     if (r.code) { tag(why, "code", r.code); }
     return tr;
   }
+  var storyKey = "";
+  function el(parent, name, cls, value) {
+    var node = document.createElement(name);
+    if (cls) { node.className = cls; }
+    if (value !== undefined) { node.textContent = value; }
+    parent.appendChild(node);
+    return node;
+  }
+  function showStory(st) {
+    var key = JSON.stringify(st), body = document.getElementById("story-body"), i, j, k, tbody, tr, sec;
+    if (key === storyKey) { return; }
+    storyKey = key;
+    document.getElementById("story").hidden = !st.title;
+    put("story-title", st.title);
+    put("story-scope", st.scope);
+    put("story-headline", st.headline);
+    put("story-halt", st.halt);
+    put("story-error", st.error);
+    put("story-note", st.note);
+    while (body.firstChild) { body.removeChild(body.firstChild); }
+    for (i = 0; i < st.sections.length; i += 1) {
+      sec = st.sections[i];
+      el(body, "h3", "", sec.title);
+      if (sec.rows.length) {
+        tbody = el(el(body, "table", "story-rows"), "tbody", "");
+        for (j = 0; j < sec.rows.length; j += 1) {
+          tr = el(tbody, "tr", "");
+          for (k = 0; k < sec.rows[j].length; k += 1) { el(tr, "td", "", sec.rows[j][k]); }
+        }
+      } else {
+        el(body, "p", "none", "None.");
+      }
+      if (sec.more) { el(body, "p", "more", sec.more); }
+    }
+    for (i = 0; i < st.foot.length; i += 1) { el(body, "p", "foot", st.foot[i]); }
+  }
   function show(s) {
     var i;
     // watch was started again: this page's Stop token is void, so load the page afresh (and its new token)
@@ -872,6 +985,7 @@ tr.t-summary td.seq { border-left-color: var(--ok); }
       put("pane-" + i + "-value", s.panes[i].value);
       put("pane-" + i + "-note", s.panes[i].note);
     }
+    showStory(s.story);
     document.body.setAttribute("data-chain", s.chain_ok ? "ok" : "broken");
     document.body.setAttribute("data-state", s.state);
     put("lost", "");
@@ -921,6 +1035,10 @@ def render_page(snap, token, nonce, pressed="", now=None):
               "stop_cmd": _e(paths.command("stop")), "resume_cmd": _e(paths.command("resume")),
               "tip": _e(snap["rows"][-1]["hash"] if snap["rows"] else ""),
               "rows": "".join(_row_html(r) for r in reversed(snap["rows"][-MAX_ROWS:]))}
+    st = snap.get("story") or _no_story()
+    fields.update({"story_hidden": "" if st["title"] else " hidden", "story_title": _e(st["title"]),
+                   "story_scope": _e(st["scope"]), "story_headline": _e(st["headline"]), "story_halt": _e(st["halt"]),
+                   "story_error": _e(st["error"]), "story_note": _e(st["note"]), "story_body": _story_html(st)})
     for i, pane in enumerate(snap["panes"]):
         fields.update({"label%d" % i: _e(pane["label"]), "value%d" % i: _e(pane["value"]),
                        "note%d" % i: _e(pane["note"])})
