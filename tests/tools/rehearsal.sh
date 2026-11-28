@@ -9,7 +9,7 @@
 #   bash /root/doris_rehearsal_on_wide.sh start    checkout main, resume, `run --live` in tmux doris-live,
 #                                                  `watch` in tmux doris-watch (127.0.0.1:8765 on wide)
 #   bash /root/doris_rehearsal_on_wide.sh status   what she has done so far
-#   bash /root/doris_rehearsal_on_wide.sh finish   stop her (`python3 -m doris stop`), let `run --live` write
+#   bash /root/doris_rehearsal_on_wide.sh finish staging|rehearsal   stop her (`python3 -m doris stop`), let `run --live` write
 #        traces/live-run-<stamp>/ itself, verify it, commit it from a NEW clone on the thread's branch, push.
 # Leaves HALT in force afterwards (the overnight go runs `resume`) and the watch page up. Prints no setting's value.
 set -u
@@ -134,7 +134,7 @@ start() {
   [ -e "$LOOP/started" ] && die "$LOOP/started exists (start ran before): use status or finish"
   ls "$LOOP"/aside/ledger.sqlite.before-rehearsal-* >/dev/null 2>&1 || die "no ledger copy aside: run prep first"
   pgrep -af "doris (run|_worker)" && die "a doris run or worker is alive"
-  for s in doris-live doris-mix doris-night doris-watch; do tmux has-session -t "$s" 2>/dev/null && die "tmux $s exists"; done
+  for s in doris-live doris-mix doris-night; do tmux has-session -t "$s" 2>/dev/null && die "tmux $s exists"; done
   cd "$DORIS" || die "no $DORIS"
   [ -z "$(git status --porcelain --untracked-files=no)" ] || die "tracked files changed in $DORIS"
   say "checkout before: $(git rev-parse --short HEAD)"
@@ -162,9 +162,13 @@ start() {
   say "run --live is up: $(pgrep -af 'doris (run|_worker)' | wc -l) process(es)"
   tail -n 25 "$LOOP/run.out"
   ledger_look state/live/ledger.sqlite
-  tmux new -d -s doris-watch "cd $DORIS/src && exec python3 -m doris watch >>$LOOP/watch.out 2>&1"
-  sleep 3
-  cat "$LOOP/watch.out"
+  if tmux has-session -t doris-watch 2>/dev/null; then
+    say "watch page already up (tmux doris-watch): left as it is"
+  else
+    tmux new -d -s doris-watch "cd $DORIS/src && exec python3 -m doris watch >>$LOOP/watch.out 2>&1"
+    sleep 3
+  fi
+  tail -n 3 "$LOOP/watch.out"
   say "STARTED"
 }
 
@@ -174,6 +178,16 @@ status() {
 }
 
 finish() {
+  case "${1:-}" in
+    staging) WHAT="The staging run before the Sat Nov 28 rehearsal: python3 -m doris run --live on main in tmux doris-live,
+the first live run on ledger schema 4 (the follow-up, the nudge, ruling 17's check). No mail was sent to her
+by us in it. Stopped with python3 -m doris stop so the rehearsal could start on a newer main." ;;
+    rehearsal) WHAT="The Sat Nov 28 rehearsal's live run: python3 -m doris run --live on main in tmux doris-live, Rae's
+emails sent by hand from her Gmail in a browser (her path's first live run, decision 115), stopped
+with python3 -m doris stop." ;;
+    *) die "finish takes which run this was: staging or rehearsal" ;;
+  esac
+  [ -e "$LOOP/started" ] || die "no $LOOP/started: no run of this script's is going"
   cd "$DORIS" || die "no $DORIS"
   found() { ls -d "$DORIS"/traces/live-run-* 2>/dev/null; }
   # main holds earlier runs' traces: this run's folder is the one not there before the stop
@@ -196,10 +210,15 @@ finish() {
   say "timeline.txt (last 80 lines):"; tail -n 80 "$T/timeline.txt"
   ( cd src && python3 -m doris verify "$T/receipts.jsonl" ); say "verify exit $?"
   [ -z "$(git status --porcelain --untracked-files=no)" ] || say "NOTE: $DORIS shows tracked changes: $(git status --porcelain --untracked-files=no | tr '\n' ' ')"
-  [ -e "$WORK" ] && die "$WORK already exists; not reusing it (trace left in $T)"
-  git clone -q "$(git remote get-url origin)" "$WORK" || die "clone failed"
-  cd "$WORK" || die "cd $WORK"
-  git checkout -q -b "$BRANCH" "origin/$BRANCH" || die "branch $BRANCH"
+  if [ -e "$WORK" ]; then        # an earlier finish's clone: brought up to the branch, nothing else in it
+    cd "$WORK" || die "cd $WORK"
+    [ -z "$(git status --porcelain)" ] || die "$WORK has changes; not reusing it (trace left in $T)"
+    git fetch -q origin "$BRANCH" && git checkout -q "$BRANCH" && git merge -q --ff-only "origin/$BRANCH" || die "could not bring $WORK up to $BRANCH"
+  else
+    git clone -q "$(git remote get-url origin)" "$WORK" || die "clone failed"
+    cd "$WORK" || die "cd $WORK"
+    git checkout -q -b "$BRANCH" "origin/$BRANCH" || die "branch $BRANCH"
+  fi
   say "clone at $BRANCH $(git rev-parse --short HEAD)"
   git config core.hooksPath .githooks
   git config user.name EatnerBeav
@@ -222,11 +241,10 @@ print("outcome %s, first failing step %s, exit %s; %s to %s UTC; commit %s; mode
   git status --short
   git diff --cached --quiet && die "nothing to commit"
   cat > /root/doris-rehearsal-msg.txt <<MSG
-Rehearsal trace from wide: traces/$NAME (pass or fail, committed as kept)
+Live trace from wide ($1 run): traces/$NAME (pass or fail, committed as kept)
 
-The Sat Nov 28 rehearsal's live run: python3 -m doris run --live on main in tmux doris-live, Rae's
-emails sent by hand from her Gmail in a browser (her path's first live run, decision 115), stopped
-with python3 -m doris stop. run --live wrote traces/$NAME itself.
+$WHAT
+run --live wrote traces/$NAME itself.
 $SUMMARY
 
 Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
@@ -247,6 +265,7 @@ MSG
   say "untracked in $DORIS now: $(git -C "$DORIS" ls-files --others --exclude-standard | tr '\n' ' ')"
   say "halt files now: $(ls "$DORIS"/state/live/ "$DORIS"/state/sandbox/ 2>/dev/null | grep -i halt | tr '\n' ' ')"
   say "watch page: $(pgrep -af 'doris watch' | wc -l) process(es), left up"
+  mv "$LOOP/started" "$LOOP/finished-$STAMP" && mv "$LOOP/run.out" "$LOOP/run-$STAMP.out" && say "markers moved on: start can run again"
   say "ALL DONE"
 }
 
@@ -255,6 +274,6 @@ case "${1:-}" in
   drymigrate) drymigrate ;;
   start) start ;;
   status) shift; status "${1:-}" ;;
-  finish) finish ;;
-  *) echo "usage: $0 prep | drymigrate | start | status [lines] | finish"; exit 2 ;;
+  finish) shift; finish "${1:-}" ;;
+  *) echo "usage: $0 prep | drymigrate | start | status [lines] | finish staging|rehearsal"; exit 2 ;;
 esac
