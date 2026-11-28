@@ -617,7 +617,7 @@ class SaysOnlyWhatTheLinesHold(unittest.TestCase):
             self.assertEqual(code, 1, out)
             self.assertEqual(len(out.strip().splitlines()), 1, out)
             self.assertTrue(out.startswith("Refused: "), out)
-            self.assertIn("line 2", out)
+            self.assertIn("seq 2", out)            # verify names the bad line by its seq
 
     def test_spaces_and_backslashes_cannot_build_a_row(self):
         name = "Bob" + " " * 20 + "Closed    book, T1 sent. [seq 9]\\x1b"
