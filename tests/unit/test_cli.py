@@ -210,7 +210,7 @@ class Demo(Isolated):
         stopper.join()
         self.assertEqual(code, supervisor.EXIT_HALTED, out)           # the story never changes the exit code
         self.assertIn("up to the stop, from her receipts.", out)
-        self.assertIn("Nothing more goes out until python -m doris resume.", out)
+        self.assertIn("Nothing more goes out until %s." % paths.command("resume"), out)
         (halted_run,) = self.runs()
         self.assertEqual(run_cli(["resume"])[0], 0)
         code, out = run_cli(["demo"])

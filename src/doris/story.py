@@ -1,6 +1,6 @@
 """What Doris did for the owner, in plain words, from her receipts alone.
 
-    story.lines(receipts_path)   the lines `python -m doris demo` prints when its run ends
+    story.lines(receipts_path)   the lines the demo prints when its run ends (with the day's earlier runs)
     story.build(lines)           the story as plain-text sections, from receipt lines that verified
     story.render(story)          those sections as terminal lines
 
@@ -19,12 +19,13 @@ body, quote, subject or model word is read here, and nothing is written anywhere
 """
 
 import datetime as _dt
+import os
 import re
 import shutil
 import sys
 import textwrap
 
-from . import digest, holds, receipts, replay, templates, why as why_mod
+from . import digest, holds, paths, receipts, replay, templates, why as why_mod
 
 OWNER = "Shane"                 # as every template names him
 MAX_THREADS = 25                # a long live run has many; the rest are counted and pointed to replay
@@ -32,6 +33,7 @@ NAME_WIDTH = 24                 # the name column on the terminal; longer names 
 WIDTH = 100                     # the terminal's width when it can't be read (a pipe, a file, CI)
 CALENDAR_CALLS = ("calendar_query", "calendar_create", "calendar_get", "calendar_delete")
 UNREADABLE = "(unreadable message)"
+BOOKING = "booking:"                             # the subject of a check of one of her bookings (ruling 17)
 SENSITIVE = "(sensitive mail, unread)"           # as the loop's own line shows it
 MAX_COST = 1e6                                   # a recorded cost past this is no cost the story adds up
 MAX_MINUTES = 24 * 60
@@ -126,6 +128,8 @@ class _Message:
         self.replies = []        # (send line, found in Sent: True, False or None)
         self.notices = []
         self.failed = []         # error words of calendar calls that came back failed
+        self.booking = False     # a check of one of her bookings (ruling 17), not an email
+        self.addr = ""           # the sender's address, lower case, to end their offers on an opt-out
 
 
 # --- the story --------------------------------------------------------------------------------------
@@ -141,14 +145,16 @@ def build(lines):
     mode = mode if isinstance(mode, str) else None
     source = sp.get("model_source")
 
-    calls, results, lookups = {}, {}, {}
+    calls, results, lookups = {}, {}, {}   # keyed (run, seq): each run of a day numbers its lines from 1
+    run = 0
     for line in lines:
         kind, p = line.get("kind"), _payload(line)
+        run += _starts(line)
         if kind == "called" and _int(line.get("seq")) is not None:
-            calls[line["seq"]] = line
+            calls[run, line["seq"]] = line
         elif kind == "result" and _int(p.get("call_seq")) is not None:
-            results[p["call_seq"]] = line
-            called = calls.get(p["call_seq"])
+            results[run, p["call_seq"]] = line
+            called = calls.get((run, p["call_seq"]))
             cp = _payload(called) if called else {}
             if cp.get("call") == "sent_lookup" and isinstance(cp.get("message_id"), str):
                 lookups[cp["message_id"]] = (p.get("found") is True) if p.get("ok") is True else None
@@ -158,6 +164,11 @@ def build(lines):
     bookings = {}                       # booking ID -> facts, in the order first written
     model_calls, cost, checks, blocked, approvals = 0, 0.0, 0, 0, 0
     digests, halted, summary, stamps = [], None, None, []
+    stops = []                          # (halted line, her last step's time before it), for stops resumed after
+    after = None                        # her last step's time, on the day's clock
+    offers = {}                         # thread -> message whose times are open to its sender, in offer order
+    runs, last = 0, None
+    nudges, nudging = [], None          # her one nudge per offer: {thread, sender, name, found}
     inbox = None                        # how many messages her last inbox read saw
     inbox_failed = False                # her last inbox read came back failed
 
@@ -166,7 +177,21 @@ def build(lines):
         if m is None:
             p = _payload(line) if line is not None else {}
             thread = p.get("thread") if isinstance(p.get("thread"), str) else subject
-            m = messages[subject] = _Message(subject, _who(p), thread)
+            # her own check line, never the subject alone: a subject is a sender's Message-ID
+            who, check = _who(p), p.get("step") == "booking_check"
+            if check:                   # told on the thread of the email that made the booking, under its name
+                bid = p.get("booking_id") if isinstance(p.get("booking_id"), str) else subject[len(BOOKING):]
+                key = p.get("message") if isinstance(p.get("message"), str) else None
+                made = messages.get(key) if key else None
+                made = made or messages.get(bookings.get(bid, {}).get("subject"))
+                if made is not None:
+                    thread, who = made.thread, made.who
+                elif who == UNREADABLE:     # her line names no one: say whose it is as plainly as she can
+                    who = "(one of her bookings)"
+            m = messages[subject] = _Message(subject, who, thread)
+            m.booking = check
+            addr = p.get("from_addr")
+            m.addr = addr.strip().lower() if isinstance(addr, str) else ""
             if thread not in by_thread:
                 by_thread[thread] = []
                 threads.append(thread)
@@ -176,16 +201,19 @@ def build(lines):
     for line in lines:
         kind, p, subject = line.get("kind"), _payload(line), line.get("subject")
         subject = subject if isinstance(subject, str) else ""
+        runs += _starts(line)
         t = _time(line.get("ts"))
-        if t is not None:
+        if t is not None and not _wall(line, mode):     # a stop's real time is not a time of her day
             stamps.append(t)
+            if kind != "halted":
+                last = t
         if p.get("human_approval") is True or kind == "approved":
             approvals += 1
         if kind == "observed" and p.get("step") != "start" and subject:
             message(subject, line)
         elif kind == "called":
             call = p.get("call")
-            res = _payload(results.get(line.get("seq"), {}))
+            res = _payload(results.get((runs, line.get("seq")), {}))
             if call == "mail_fetch" and res:
                 inbox_failed = res.get("ok") is not True
                 if not inbox_failed and _int(res.get("count")) is not None:
@@ -198,7 +226,11 @@ def build(lines):
             elif call == "send":
                 mid = p.get("message_id")
                 found = lookups.get(mid) if isinstance(mid, str) else None
-                if p.get("target") == "S2":
+                if p.get("target") == "T9" and nudging is not None:
+                    nudging["found"] = found
+                    nudges.append(nudging)
+                    nudging = None
+                elif p.get("target") == "S2":
                     digests.append((line, found))
                 elif subject in messages:
                     m = messages[subject]
@@ -222,15 +254,23 @@ def build(lines):
             checks += 1
             if p.get("passed") is not True:
                 blocked += 1
+        elif kind == "decided" and p.get("step") == "nudge":
+            sender, name = p.get("sender"), p.get("from_name")
+            nudging = {"thread": p.get("thread") if isinstance(p.get("thread"), str) else None,
+                       "sender": sender.strip().lower() if isinstance(sender, str) else "",
+                       "name": holds.sender_name(name if isinstance(name, str) else "",
+                                                 sender if isinstance(sender, str) else ""), "found": None}
         elif kind in ("decided", "held") and "outcome" in p and subject:
             m = message(subject, line)
             m.close = line
+            _offer_state(offers, m)
             if p.get("outcome") == "book" and isinstance(p.get("booking_id"), str):
                 b = _booking(bookings, p["booking_id"], subject)
                 b["written"] = b["booked"] = True
         elif kind == "halted":
-            halted = line
-        elif kind == "observed" and halted is not None:   # a start after the stop: the stop is not the end
+            halted, after = line, last
+        elif _starts(line) and halted is not None:       # a start after the stop: resumed, so not the end
+            stops.append((halted, after))
             halted = None
         elif kind == "summary":
             summary = line
@@ -242,9 +282,13 @@ def build(lines):
     one_day = len({_day(t) for t in stamps}) <= 1
     when = (lambda t: _clock(t)) if one_day else _full
 
-    # the counts
-    held = [m for m in messages.values() if m.close is not None and m.close.get("kind") == "held"]
-    closed = [m for m in messages.values() if m.close is not None and m.close.get("kind") == "decided"]
+    # the counts: emails, then her bookings' checks that were held apart
+    emails = [m for m in messages.values() if not m.booking]
+    held_all = [m for m in messages.values() if m.close is not None and m.close.get("kind") == "held"]
+    held = [m for m in held_all if not m.booking]
+    closed = [m for m in emails if m.close is not None and m.close.get("kind") == "decided"]
+    gone = sum(1 for m in held_all if m.booking and _code(m.close) == "hold.owner_removed")
+    checks_held = len(held_all) - len(held) - gone
     answered = noreply = unconfirmed = 0
     for m in closed:
         template = _payload(m.close).get("template")
@@ -261,21 +305,29 @@ def build(lines):
                 and (b["there"] is True or (b["booked"] and b["there"] is None))]
     handled = "%d handled by her (%d answered, %d needed no reply%s)" % (
         len(closed), answered, noreply, ", %d closed without a confirmed reply" % unconfirmed if unconfirmed else "")
-    unfinished = len(messages) - len(closed) - len(held)
+    unfinished = len(emails) - len(closed) - len(held)
     approved = _plural(approvals, "human approval")
-    if messages:
-        headline = "%s came in: %s, %d held for %s%s. %s on his calendar. %s." % (
-            _plural(len(messages), "email"), handled, len(held), OWNER,
-            ", %d not finished" % unfinished if unfinished else "", _plural(len(standing), "meeting"), approved)
+    for n in nudges:                    # named as the day names them, where it does
+        known = by_thread.get(n["thread"]) or [m for m in emails if n["sender"] and m.addr == n["sender"]]
+        if known and known[0].who != UNREADABLE:
+            n["name"] = known[0].who
+    also = ((" %s he removed by hand %s held for him." % (_plural(gone, "booking"), "is" if gone == 1 else "are")
+             if gone else "") + (" %s of her bookings held for him." % _plural(checks_held, "check")
+                                 if checks_held else "") + _nudge_words(nudges))
+    if emails:
+        headline = "%s came in: %s, %d held for %s%s. %s on his calendar.%s %s." % (
+            _plural(len(emails), "email"), handled, len(held), OWNER,
+            ", %d not finished" % unfinished if unfinished else "", _plural(len(standing), "meeting"), also, approved)
     elif inbox:
-        headline = "No new mail: the inbox held %s, none of them new to her. %s." % (_plural(inbox, "message"), approved)
+        headline = "No new mail: the inbox held %s, none of them new to her.%s %s." % (
+            _plural(inbox, "message"), also, approved)
     else:
-        headline = "No new mail: %s. %s." % ("her inbox read failed" if inbox_failed else "the inbox was empty"
-                                            if inbox == 0 else "no inbox read is recorded", approved)
+        headline = "No new mail: %s.%s %s." % ("her inbox read failed" if inbox_failed else "the inbox was empty"
+                                              if inbox == 0 else "no inbox read is recorded", also, approved)
 
     # needs the owner
     rows, all_noticed = [], True
-    for m in held:
+    for m in held_all:
         code = _code(m.close)
         reason = _hold_reason(m.close)
         if any(found for _, found in m.notices):
@@ -291,8 +343,8 @@ def build(lines):
             all_noticed = False
         t = _time(m.close.get("ts"))
         rows.append([when(t) if t else "?", m.who, reason])
-    title = "Needs %s (%d)" % (OWNER, len(held))
-    if held and not any(m.replies for m in held):     # these emails, not their threads: Marcus got times before
+    title = "Needs %s (%d)" % (OWNER, len(held_all))
+    if held_all and not any(m.replies for m in held_all):     # these emails, not their threads: Marcus got times before
         title += ": she sent no reply to these"
         if all_noticed:
             title += "; for each, a notice with a draft reply went to him"
@@ -327,18 +379,22 @@ def build(lines):
             if m.who != first:
                 text = "%s: %s" % (m.who, text[0].lower() + text[1:] if text else text)
             said.append(_sentence(text))
+        for n in nudges:
+            if n["thread"] == key:
+                said.append("She nudged them once, with her times still free%s." % (
+                    "" if n["found"] else " (not found in her Sent folder)"))
         thread_rows.append([first, " ".join(s for s in said if s)])
     extra = len(threads) - MAX_THREADS
     threads_out = {"title": "Thread by thread (%d)" % len(threads), "rows": thread_rows,
-                   "more": "%s: python -m doris replay shows every step." % _plural(extra, "more thread")
+                   "more": "%s: %s shows every step." % (_plural(extra, "more thread"), paths.command("replay"))
                    if extra > 0 else ""}
 
-    # waiting on a pick: the digest's own count of open offers
-    now = stamps[-1] if stamps else _dt.datetime(2000, 1, 1, tzinfo=_UTC)
-    try:
-        offered = digest.build(lines, now)["offered_to"]
-    except Exception:                       # noqa: BLE001 - the rest of the story stands without this line
-        offered = []
+    # waiting on a pick: threads whose last closing line offered times that her lookup found in Sent (a pick
+    # read but cut off by a stop leaves the offer open: only a closing line closes it)
+    offered = []
+    for m in offers.values():
+        if any(found for _, found in m.replies) and m.who not in offered:
+            offered.append(m.who)
     waiting = "Waiting to pick one of her times: %s." % ", ".join(offered) if offered else ""
 
     # the digest
@@ -361,8 +417,15 @@ def build(lines):
     # cost, gate, halt
     cost_words = "none (stub)" if source == "stub" else "$%.4f%s" % (cost, " (recorded)" if source == "replayed" else "")
     cost_line = "Model calls %d, cost %s." % (model_calls, cost_words)
-    gate = "Gate: %s on her sends and calendar writes, %d blocked." % (_plural(checks, "check"), blocked)
-    halt = _halt_words(halted, when) if halted is not None else ""
+    gate = "The gate ran %s, once before each send or calendar write; %d blocked." % (_plural(checks, "time"),
+                                                                                     blocked)
+    said = [_stop_words(line, at, when, mode) for line, at in stops]
+    halt = ""
+    if said:
+        halt = " Then resumed. ".join(said) + " Then resumed: this covers %s." % (
+            "both runs" if runs == 2 else "all %d runs" % runs)
+    if halted is not None:
+        halt = (halt + " " if halt else "") + _halt_words(halted, after, when, mode)
 
     dates = sorted({_day(t): t for t in stamps}.items(), key=lambda kv: kv[1])
     span = dates[0][0] if len(dates) == 1 else "%s to %s" % (dates[0][0], dates[-1][0]) if dates else ""
@@ -371,6 +434,44 @@ def build(lines):
     return {"title": "What Doris did for %s" % OWNER, "scope": scope, "state": state, "headline": headline,
             "halt": halt, "needs": needs, "calendar": calendar, "threads": threads_out, "waiting": waiting,
             "digest": digest_line, "cost": cost_line, "gate": gate, "mode": mode or "", "quiet": not messages}
+
+
+def _nudge_words(nudges):
+    """' She nudged 2 people once, with her times still free: A, B.' (a name her lookup did not find in
+    Sent says so)."""
+    if not nudges:
+        return ""
+    names = ["%s%s" % (n["name"], "" if n["found"] else " (not found in her Sent folder)") for n in nudges]
+    return " She nudged %s once, with her times still free: %s." % (
+        _plural(len(nudges), "person", "people"), ", ".join(names))
+
+
+def _starts(line):
+    """1 for a run's start line (each run of a day begins with one), else 0."""
+    return 1 if line.get("kind") == "observed" and _payload(line).get("step") == "start" else 0
+
+
+def _wall(line, mode):
+    """A halted line the supervisor wrote: stamped by the wall clock, while a sandbox day runs on its own."""
+    p = _payload(line)
+    return line.get("kind") == "halted" and mode != "live" and ("stop_to_dead_ms" in p or "requested_utc" in p)
+
+
+OPENS = ("offer", "reoffer", "move")                    # a closing line that leaves times open to the sender
+SHUTS = ("book", "cancel", "suppress")                  # one that ends them (as does any hold)
+
+
+def _offer_state(offers, m):
+    p, code = _payload(m.close), _code(m.close)
+    outcome = p.get("outcome") if isinstance(p.get("outcome"), str) else ""
+    if outcome in OPENS:
+        offers.pop(m.thread, None)
+        offers[m.thread] = m
+    elif code in digest.STOP_CODES and m.addr:          # an opt-out ends every offer to that sender
+        for thread in [t for t, o in offers.items() if o.addr == m.addr or t == m.thread]:
+            offers.pop(thread)
+    elif outcome in SHUTS or outcome.startswith("hold:") or code in digest.CLOSE_CODES or code in digest.STOP_CODES:
+        offers.pop(m.thread, None)
 
 
 def _booking(bookings, bid, subject):
@@ -496,18 +597,35 @@ def _retried(errors):
     return "a calendar call failed %s; she retried" % times
 
 
-def _halt_words(line, when):
-    p = _payload(line)
-    text = _why_text(line) or "Halted."
-    if text.startswith("Halted: "):
-        text = text[len("Halted: "):]
+def _when_stopped(line, at, when, mode):
+    """' at 10:31 AM', or for a stop stamped by the wall clock in a sandbox day, ' Sat Nov 28 at 12:58 AM
+    Pacific, real time, after her 2:20 PM step'."""
     t = _time(line.get("ts"))
-    out = ["Halted%s: %s" % (" at %s" % when(t) if t else "", _sentence(text))]
+    if t is None:
+        return ""
+    if not _wall(line, mode):
+        return " at %s" % when(t)
+    return " %s at %s Pacific, real time%s" % (_day(t), _clock(t), ", after her %s step" % when(at) if at else "")
+
+
+def _stop_text(line):
+    text = _why_text(line) or "Halted."
+    return _sentence(text[len("Halted: "):] if text.startswith("Halted: ") else text)
+
+
+def _stop_words(line, at, when, mode):
+    """A stop the day was resumed after."""
+    return "Stopped%s: %s" % (_when_stopped(line, at, when, mode), _stop_text(line))
+
+
+def _halt_words(line, at, when, mode):
+    p = _payload(line)
+    out = ["Halted%s: %s" % (_when_stopped(line, at, when, mode), _stop_text(line))]
     flight = p.get("in_flight")
     if isinstance(flight, dict):
         call = flight.get("call") if isinstance(flight.get("call"), str) else "a call"
         out.append("Cut off mid-call: %s." % call)
-    elif flight == "none":
+    elif flight == "none" or ("in_flight" in p and flight is None):    # the loop writes "none", the supervisor null
         out.append("Nothing was in flight.")
     else:
         out.append("What was in flight is not recorded.")
@@ -516,7 +634,7 @@ def _halt_words(line, when):
         out.append("%s dropped." % _plural(len(dropped), "queued item") if dropped else "Nothing queued was dropped.")
     else:
         out.append("The dropped work is unknown.")
-    out.append("Nothing more goes out until python -m doris resume.")
+    out.append("Nothing more goes out until %s." % paths.command("resume"))
     return " ".join(out)
 
 
@@ -531,12 +649,14 @@ def _cell(text, width):
 
 
 _GLUE = re.compile(r"(\d) (AM|PM)\b")
+_COMMAND = re.compile(r"\S+ -m doris \w+")
 
 
 def _wrap(text, width, indent=0):
     """One line, wrapped at width; continuation lines start under the first one's text (indent). A time
-    keeps its AM or PM on its line. The text is escaped already, so it holds no NUL of its own."""
-    glued = _GLUE.sub("\\1\0\\2", text)
+    keeps its AM or PM on its line, and a command stays whole, so it can be copied. The text is escaped
+    already, so it holds no NUL of its own."""
+    glued = _COMMAND.sub(lambda m: m.group(0).replace(" ", "\0"), _GLUE.sub("\\1\0\\2", text))
     out = textwrap.wrap(glued, width=max(width, indent + 20), subsequent_indent=" " * indent, break_on_hyphens=False)
     return [line.replace("\0", " ") for line in out] or [""]
 
@@ -590,40 +710,128 @@ def render(story, width=None):
     return out
 
 
+def _read(path):
+    """(lines that verified, a torn tail after them, the check's result) for one receipt file, by verify's
+    own steps."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    whole, torn = receipts._split(data)          # noqa: SLF001 - verify's own steps, on this one read
+    result, good = receipts._check(whole)        # noqa: SLF001
+    return good, torn, result
+
+
+MAX_EARLIER_RUNS = 20                            # a sandbox day is a few runs; the walk never reads more
+_STAMP = re.compile(r"(\d{8}T\d{6}Z)(?:-(\d+))?$")  # a run folder's name ends with its UTC start (new_run_dir)
+_READS = {}                                     # (path, mtime, size) -> _read's answer: the watch page polls
+
+
+def _order(name, when):
+    m = _STAMP.search(name)
+    return (m.group(1), int(m.group(2) or 1), when, name) if m else ("", 0, when, name)
+
+
+def _read_once(path):
+    st = os.stat(path)
+    key = (os.path.abspath(path), st.st_mtime, st.st_size)
+    if key not in _READS:
+        if len(_READS) > 4 * MAX_EARLIER_RUNS:
+            _READS.clear()
+        _READS[key] = _read(path)
+    return _READS[key]
+
+
+def _finished(run_lines):
+    """The day ended with this run: its summary written and no halt before it (as the demo's own
+    last_day_finished decides whether the next demo starts the day fresh)."""
+    kinds = [l.get("kind") for l in run_lines]
+    return "summary" in kinds and "halted" not in kinds
+
+
+def _earlier_runs(path, run_lines=None):
+    """The sandbox day's runs before this one that never finished (stopped, then resumed), oldest first,
+    walking back from this run to the last one that finished: [(path, lines, torn)], and the path of an
+    earlier run that did not verify (the walk stops there), or None. Only for a sandbox run inside a runs
+    folder: a live run's history has no day to bound it."""
+    folder = os.path.dirname(os.path.dirname(os.path.abspath(path)))
+    mode = next((l.get("mode") for l in run_lines or () if isinstance(l, dict)), None)
+    if os.path.basename(folder) != "runs" or mode != "sandbox":
+        return [], None
+    me = os.path.abspath(path)
+    mine = _order(os.path.basename(os.path.dirname(me)), os.path.getmtime(path))
+    others = []
+    for name in os.listdir(folder):
+        other = os.path.join(folder, name, "receipts.jsonl")
+        if os.path.abspath(other) != me and os.path.isfile(other):
+            key = _order(name, os.path.getmtime(other))
+            if key < mine:
+                others.append((key, other))
+    found = []
+    for _key, other in sorted(others, reverse=True)[:MAX_EARLIER_RUNS]:
+        good, torn, result = _read_once(other)
+        if not result.ok:
+            return found[::-1], other
+        if not good:                             # an empty file is no run
+            continue
+        if _finished(good):
+            break
+        found.append((other, good, torn))
+    return found[::-1], None
+
+
+UNVERIFIED = "An earlier run of this day does not verify (%s), so this story starts after it."
+
+
+def with_earlier_runs(receipts_path, run_lines):
+    """(this run's verified lines after those of the day's earlier stopped runs, a note naming an earlier
+    run that did not verify or ""), so the watch page tells the same day as lines(). On any trouble
+    reading the earlier runs, this run's lines alone."""
+    try:
+        earlier, unverified = _earlier_runs(receipts_path, run_lines)
+    except Exception:                            # noqa: BLE001 - the page shows this run, as it did before
+        return list(run_lines), ""
+    return ([l for _p, done, _t in earlier for l in done] + list(run_lines),
+            UNVERIFIED % paths.shown(unverified) if unverified else "")
+
+
 def lines(receipts_path, width=None):
     """The lines the demo prints when its run ends: the story, the chain's check, and where to look.
-    No receipt file (a start refused before her first line), no lines. A chain that does not verify gets
-    one line naming where it breaks, and no story: nothing past a break can be trusted."""
+    The story is the day's: this run's lines after those of any earlier run that was stopped and resumed
+    (a stop does not end a day; a finished run does). No receipt file (a start refused before her first
+    line), no lines. A chain that does not verify gets one line naming where it breaks, and no story:
+    nothing past a break can be trusted."""
+    width = width or _width()
     try:
-        with open(receipts_path, "rb") as fh:
-            data = fh.read()
+        good, torn, result = _read(receipts_path)
     except FileNotFoundError:
         return []
     except OSError as exc:
         return ["", "No summary: the receipt file can't be read (%s)." % exc.__class__.__name__]
-    whole, torn = receipts._split(data)          # noqa: SLF001 - verify's own steps, on this one read
-    result, good = receipts._check(whole)        # noqa: SLF001
-    shown_path = _shown(_display(receipts_path))
     if not result.ok:
-        return [""] + _wrap("No summary: the receipt chain is BROKEN at line %d (%s). Check it with python -m "
-                            "doris verify %s" % (result.first_bad_seq, result.reason.split(": ", 1)[-1], shown_path),
-                            width or _width())
-    width = width or _width()
+        return [""] + _wrap("No summary: the receipt chain is BROKEN at line %d (%s). Check it with %s %s" % (
+            result.first_bad_seq, result.reason.split(": ", 1)[-1], paths.command("verify"),
+            _shown(paths.shown(receipts_path))), width)
     try:
-        s = build(good)
+        earlier, unverified = _earlier_runs(receipts_path, good)
+    except OSError:
+        earlier, unverified = [], None
+    day = [l for _p, run_lines, _t in earlier for l in run_lines] + good
+    try:
+        s = build(day)
         out = render(s, width)
     except Exception as exc:                     # noqa: BLE001 - one line, never a traceback at the demo's end
-        return [""] + _wrap("No summary: it could not be built from these receipts (%s). Check them with python "
-                            "-m doris verify and python -m doris replay." % exc.__class__.__name__, width)
-    if torn:
-        out += _wrap("Receipts: %d lines verified; the line after them was cut short." % len(good), width)
+        return [""] + _wrap("No summary: it could not be built from these receipts (%s). Check them with %s and "
+                            "%s." % (exc.__class__.__name__, paths.command("verify"), paths.command("replay")), width)
+    if unverified:
+        out += _wrap(UNVERIFIED % _shown(paths.shown(unverified)), width)
+    cut = torn or any(t for _p, _l, t in earlier)
+    if not earlier:
+        said = ("Receipts: %d lines verified; the line after them was cut short." % len(good) if cut
+                else "Receipts: %d lines, chain verified." % len(good))
     else:
-        out += _wrap("Receipts: %d lines, chain verified." % len(good), width)
+        said = "Receipts: %d lines in %d runs, each chain verified%s." % (
+            len(day), len(earlier) + 1, "; a run's last line was cut short" if cut else "")
+    out += _wrap(said, width)
     if s["mode"] == "sandbox":
         out += _wrap("See for yourself: her sent mail in sandbox/outbox/, her bookings in sandbox/calendar/, "
-                     "every step with python -m doris replay.", width)
+                     "every step with %s." % paths.command("replay"), width)
     return out
-
-
-def _display(path):
-    return replay._display(path)                 # noqa: SLF001 - the repo-relative path, as the demo shows paths

@@ -68,7 +68,7 @@ Paths here are from the repo root, one folder up from `src/`.
 - `sandbox/calendar/`: her bookings (`doris-*.ics`), next to the owner's busy blocks.
 - `state/sandbox/runs/<run>/receipts.jsonl`: the receipt chain, one JSON line per step. Each line records what she saw, decided, called and got back, and the hash of the line before it.
 
-Run the demo again and it starts the day fresh; earlier days are moved to `state/old/`, which appears after your second run. After a stop, the next demo continues the same day instead, and its summary counts from the resume.
+Run the demo again and it starts the day fresh; earlier days are moved to `state/old/`, which appears after your second run. After a stop, the next demo continues the same day instead, and its summary covers the whole day.
 
 ## The next five minutes
 
