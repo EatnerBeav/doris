@@ -292,6 +292,45 @@ class StopAndResume(Isolated):
         self.assertIsNone(supervisor.halt_cause("sandbox"))
         self.assertIsNone(supervisor.halt_cause("live"))
 
+    def refusing(self, *modes):
+        real = supervisor.request_stop
+
+        def request_stop(mode, cause="cli", state_dir=None):
+            if mode in modes:
+                raise supervisor.HaltWriteError("HALT could not be written (PermissionError, 5 tries): "
+                                                "the stop is NOT in force")
+            return real(mode, cause, state_dir=state_dir)
+
+        return mock.patch.object(supervisor, "request_stop", request_stop)
+
+    def test_a_stop_the_sandbox_refuses_still_halts_live_and_says_which_did_not_land(self):
+        with self.refusing("sandbox"):
+            code, out = run_cli(["stop"])
+        self.assertNotEqual(code, 0, out)
+        self.assertEqual(supervisor.halt_cause("live"), "cli")          # the live stop was not lost
+        self.assertIsNone(supervisor.halt_cause("sandbox"))
+        self.assertIn("NOT halted in the sandbox: HaltWriteError: HALT could not be written", out)
+        self.assertIn("Halted live.", out)
+        self.assertNotIn("Stopped: Doris is halted in the sandbox and live", out)
+
+    def test_a_stop_live_refuses_still_halts_the_sandbox_and_exits_non_zero(self):
+        with self.refusing("live"):
+            code, out = run_cli(["stop"])
+        self.assertNotEqual(code, 0, out)
+        self.assertEqual(supervisor.halt_cause("sandbox"), "cli")
+        self.assertIsNone(supervisor.halt_cause("live"))
+        self.assertIn("NOT halted live: HaltWriteError", out)
+        self.assertIn("Halted in the sandbox.", out)
+
+    def test_a_stop_that_lands_nowhere_says_so_for_each_and_claims_no_halt(self):
+        with self.refusing("sandbox", "live"):
+            code, out = run_cli(["stop"])
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("NOT halted in the sandbox", out)
+        self.assertIn("NOT halted live", out)
+        self.assertNotIn("Halted", out.replace("NOT halted", ""))
+        self.assertNotIn("Stopped:", out)
+
     def test_resume_with_nothing_halted_says_so(self):
         code, out = run_cli(["resume"])
         self.assertEqual(code, 0, out)

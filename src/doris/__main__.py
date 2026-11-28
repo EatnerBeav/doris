@@ -34,6 +34,7 @@ from . import caps, livetrace, loop, paths, receipts, supervisor
 SANDBOX_OWNER = loop.SANDBOX_OWNER
 SANDBOX_DORIS = loop.SANDBOX_DORIS
 STOP_MODES = ("sandbox", "live")
+STOP_WHERE = {"sandbox": "in the sandbox", "live": "live"}
 WORKER = "_worker"
 SHOWN_FROM = "DORIS_SHOWN_FROM"    # set for her worker only: the folder the command was run in (_display)
 RUN_CYCLE_S = loop.CYCLE.total_seconds()   # `run`: the wall-clock wait from one pass to her next cycle
@@ -365,11 +366,26 @@ def worker(argv):
 def stop(argv):
     argparse.ArgumentParser(prog="python3 -m doris stop",
                             description="Halt Doris now, in the sandbox and live.").parse_args(argv)
-    for mode in STOP_MODES:
-        supervisor.request_stop(mode, "cli")
-    print("Stopped: Doris is halted in the sandbox and live. A run in progress is killed mid-call and its "
-          "receipt names what was dropped. Nothing more is sent or booked until `python -m doris resume`.")
-    return 0
+    halted, failed = [], []
+    for mode in STOP_MODES:                 # every mode is tried, whatever the one before it did
+        try:
+            supervisor.request_stop(mode, "cli")
+            if supervisor.halt_cause(mode) is None:       # read back from disk: said only when it is there
+                raise OSError("no halt is in force after the write")
+            halted.append(mode)
+        except Exception as exc:            # noqa: BLE001 - the other mode is still stopped, and this is said
+            failed.append((mode, "%s: %s" % (type(exc).__name__, exc)))
+    if not failed:
+        print("Stopped: Doris is halted in the sandbox and live. A run in progress is killed mid-call and its "
+              "receipt names what was dropped. Nothing more is sent or booked until `python -m doris resume`.")
+        return 0
+    for mode, why in failed:
+        print("NOT halted %s: %s." % (STOP_WHERE[mode], why.rstrip(".")))
+    for mode in halted:
+        print("Halted %s. Nothing more is sent or booked there until `python -m doris resume`."
+              % (STOP_WHERE[mode],))
+    print("The stop did NOT land everywhere: run `python -m doris stop` again now, and check that no run goes on.")
+    return 1
 
 
 def resume(argv):
