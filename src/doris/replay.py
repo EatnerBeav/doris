@@ -325,8 +325,8 @@ def _reader(source, target=None):
 
 
 def _flagger(source):
-    return {"live": "the model", "replayed": "the model's recorded answer", "stub": "the stand-in",
-            "yes-man": "the yes-man stand-in"}.get(source, "the reader")
+    return _pick({"live": "the model", "replayed": "the model's recorded answer", "stub": "the stand-in",
+                  "yes-man": "the yes-man stand-in"}, source, "the reader")
 
 
 def _title(subject, group):
@@ -372,6 +372,11 @@ def _steps(group, t, run_level=False):
         except Exception:                                 # an odd shape is shown as recorded, never a crash
             out.append(_row(_label_for(kind), "%s line, shown as recorded: %s" % (shown(kind), shown(p)),
                             _seqs([line.get("seq")])))
+            first = t.results.get(line.get("seq"), [None])[0] if kind == "called" and _is_int(line.get("seq")) \
+                else None
+            if first is not None:                         # its result was skipped above as shown beside it
+                out.append(_row("Got back", "its result, shown as recorded: %s" % (shown(_payload(first)),),
+                                _seqs([first.get("seq")])))
     return out
 
 
@@ -400,6 +405,8 @@ def _step(line, t, state):
         label, what = _call_words(p, state)
         if p.get("call") == "calendar_get" and isinstance(r, dict) and "fields_match" in r:
             state["reread_due"] = True                    # the next calendar read is the re-read after the write
+        if p.get("call") == "calendar_query" and label == "Verified" and (r is None or r.get("ok") is not True):
+            state["reread_due"] = True                    # its retry is the re-read still
         first = t.results.get(seq, [None])[0]
         return [_row(label, "%s -> %s" % (what, _result_words(p, r, seq in t.in_flight)),
                      _seqs([seq, first.get("seq") if first is not None else None]))]
@@ -416,7 +423,7 @@ def _step(line, t, state):
     if kind == "halted":
         return _halted(p, line.get("why"), seq, t)
     if kind == "summary":
-        return [_row("Ended", _ended(p), _seqs([seq]))]
+        return [_row("Ended", _ended(p, t.start.get("model_source")), _seqs([seq]))]
     return [_row("Line", "%s line, shown as recorded: %s" % (shown(kind), shown(p)), _seqs([seq]))]
 
 
@@ -479,14 +486,20 @@ def _saw(subject, p):
         count = len(attachments) if isinstance(attachments, list) else attachments
         opened = p.get("opened")
         text += "; %s, %s, %s" % (_count(p.get("links_seen"), "link"), _count(count, "attachment"),
-                                  "nothing opened" if opened == 0 else "opened: %s" % shown(opened))
+                                  "nothing opened" if opened == 0 and not isinstance(opened, bool)
+                                  else "opened: %s" % shown(opened))
     return text + "."
 
 
 def _count(n, word):
+    return _tally(n, word, word + "s")
+
+
+def _tally(n, one, many):
+    """'1 booking', '2 bookings'; 'bookings: not recorded' when the line holds no count."""
     if _is_int(n):
-        return "%d %s%s" % (n, word, "" if n == 1 else "s")
-    return "%s %ss" % (shown(n), word)
+        return "%d %s" % (n, one if n == 1 else many)
+    return "%s: %s" % (many, shown(n))
 
 
 def _classed(p):
@@ -503,8 +516,10 @@ def _classed(p):
     text = shown(p.get("cls"))
     if bits:
         text += ": " + ", ".join(bits)
-    text += "; %s." % ("%s flagged an instruction in it" % _flagger(p.get("source")) if p.get("injection_seen")
-                       else "no instruction seen in it")
+    seen = p.get("injection_seen")
+    text += "; %s." % ("%s flagged an instruction in it" % _flagger(p.get("source")) if seen is True else
+                       "no instruction seen in it" if seen is False else
+                       "not recorded whether an instruction was seen")
     return text
 
 
@@ -565,7 +580,13 @@ def _checked(p, why):
             not_applied.append(shown(name))
         else:
             applied.append("%s %s" % (shown(name), shown(status)))
-    verdict = "passed" if p.get("passed") is True else "BLOCKED at %s" % (shown(p.get("first_fail")),)
+    if p.get("passed") is True:
+        verdict = "passed"
+    elif p.get("passed") is False:
+        verdict = ("BLOCKED at %s" % (shown(p.get("first_fail")),) if p.get("first_fail") else
+                   "BLOCKED (failing check not recorded)")
+    else:
+        verdict = "verdict not recorded"
     text = "%s: %s: %s" % (target, verdict, ", ".join(applied) or "no check recorded")
     if not_applied:
         text += "; not applicable: %s" % (", ".join(not_applied),)
@@ -583,10 +604,11 @@ def _call_words(p, state):
         span = _span(p.get("start"), p.get("end"))
         if state.get("reread_due"):
             state["reread_due"] = False
-            return "Verified", "calendar re-read %s after the write%s" % (span, attempt)
+            after = "the write" if state.get("wrote") else "the read-back"
+            return "Verified", "calendar re-read %s after %s%s" % (span, after, attempt)
         return "Called", "calendar read %s%s" % (span, attempt)
     if call == "calendar_create":
-        state["reread_due"] = False
+        state["reread_due"], state["wrote"] = False, True
         return "Called", "calendar write, booking %s%s" % (shown(target), attempt)
     if call == "calendar_delete":
         state["reread_due"] = False
@@ -594,7 +616,7 @@ def _call_words(p, state):
     if call == "calendar_get":
         return "Verified", "read back booking %s%s" % (shown(target), attempt)
     if call == "send":
-        to = {"sender": "the sender", "owner": "the owner"}.get(p.get("to"), shown(p.get("to")))
+        to = _pick({"sender": "the sender", "owner": "the owner"}, p.get("to"), shown(p.get("to")))
         bcc = ", BCC the owner" if p.get("bcc") == "owner" else (
             ", BCC %s" % (shown(p.get("bcc")),) if p.get("bcc") else "")
         return "Called", "send %s to %s%s (Message-ID %s)" % (shown(target), to, bcc, shown(p.get("message_id")))
@@ -632,7 +654,7 @@ def _result_words(p, r, in_flight, state=None):
     if call == "send":
         return _sent(r)
     if call == "sent_lookup":
-        return "found" if r.get("found") is True else "not found"
+        return _found(r)
     if call == "mail_fetch":
         return "%s message(s) handed over" % (shown(r.get("count")),)
     return "ok"
@@ -643,11 +665,23 @@ def _outcome(r, in_flight):
         return "no result recorded" + (" (in flight when the run halted)" if in_flight else "")
     if r.get("ok") is True:
         return "ok"
-    return "failed%s" % (": %s" % (shown(r.get("error")),) if r.get("error") else "")
+    if r.get("ok") is False:
+        return "failed%s" % (": %s" % (shown(r.get("error")),) if r.get("error") else "")
+    return "outcome not recorded" + (" (ok: %s)" % (shown(r.get("ok")),) if "ok" in r else "")
+
+
+def _found(r):
+    found = r.get("found")
+    return "found" if found is True else "not found" if found is False else "not recorded whether found"
 
 
 def _money(cost):
-    return "$%.4f" % cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else shown(cost)
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        try:
+            return "$%.4f" % cost
+        except OverflowError:
+            pass
+    return shown(cost)
 
 
 def _events(r):
@@ -669,7 +703,7 @@ def _events(r):
 
 def _read_back(r):
     if r.get("found") is not True:
-        return "not found"
+        return _found(r)
     if "fields_match" not in r:
         match = "not compared"
     elif r.get("fields_match") is True:
@@ -691,21 +725,25 @@ def _sent(r):
 
 
 def _inbox_reads(reads, t):
-    ok, failed, pending = 0, [], []
+    ok, failed, pending, unsaid = 0, [], [], []
     for line in reads:
         r = t.result(line.get("seq"))
         if r is None:
             pending.append(line.get("seq"))
         elif r.get("ok") is True:
             ok += 1
-        else:
+        elif r.get("ok") is False:
             failed.append("seq %s: %s" % (shown(line.get("seq")), _outcome(r, False)))
+        else:
+            unsaid.append(line.get("seq"))
     text = "the inbox %d time%s: " % (len(reads), "" if len(reads) == 1 else "s")
     if ok == len(reads):
         return text + "every read ok."
     bits = ["%d ok" % ok] if ok else []
     if failed:
         bits.append("%d failed (%s)" % (len(failed), "; ".join(failed)))
+    for seq in unsaid:
+        bits.append("outcome not recorded for seq %s" % (shown(seq),))
     for seq in pending:
         bits.append("no result recorded for seq %s%s" % (
             shown(seq), " (in flight when the run halted)" if seq in t.in_flight else ""))
@@ -726,14 +764,7 @@ def _halted(p, why, seq, t):
     else:
         flight = p.get("in_flight")
         if isinstance(flight, dict):
-            text = "In flight: %s %s [seq %s]" % (shown(flight.get("call")), shown(flight.get("target")),
-                                                   shown(flight.get("seq")))
-            subject = (t.called.get(flight.get("seq")) or {}).get("subject")
-            if subject:
-                text += ", for Message-ID %s" % (shown(subject),)
-            if flight.get("unconfirmed"):
-                text += ", marked unconfirmed in the ledger"
-            rows.append(INDENT + text + ".")
+            rows.append(INDENT + _flight(flight, p.get("ledger"), t) + ".")
         elif flight in (None, "none"):
             open_calls = t.unanswered_before(seq) if _is_int(seq) else []
             rows.append(INDENT + ("In flight: none recorded, though %s no result line." % (
@@ -759,6 +790,31 @@ def _halted(p, why, seq, t):
     return rows
 
 
+def _flight(flight, ledger, t):
+    """The call a halted line names as in flight, and whether the ledger took its mark (record_halt marks
+    it only when the ledger opened, by Message-ID for a send and by booking otherwise)."""
+    call, seq = flight.get("call"), flight.get("seq")
+    text = "In flight: %s" % (shown(call) if call is not None else "call not recorded",)
+    if flight.get("target") is not None:
+        text += " %s" % (shown(flight.get("target")),)
+    text += " [seq %d]" % seq if _is_int(seq) else " (seq not recorded)"
+    subject = (_pick(t.called, seq, None) or {}).get("subject")
+    if subject:
+        text += ", for Message-ID %s" % (shown(subject),)
+    if flight.get("unconfirmed") is True:
+        key = flight.get("message_id") if call == "send" else flight.get("target")
+        if ledger == "ok" and key:
+            text += ", marked unconfirmed in the ledger"
+        elif ledger == "ok":
+            text += ", not marked in the ledger (no %s recorded to mark it by)" % (
+                "Message-ID" if call == "send" else "booking")
+        else:
+            text += ", not marked in the ledger (%s)" % (_pick(
+                {"unreadable": "it could not be read", "absent": "there was none"}, ledger,
+                "ledger %s" % (shown(ledger),)),)
+    return text
+
+
 def _dropped(dropped, ledger):
     if dropped is None:
         return ("unknown: the ledger could not be read." if ledger == "unreadable" else
@@ -775,8 +831,8 @@ def _dropped(dropped, ledger):
             messages.append(shown(d.get("message")))
         else:
             what = d.get("template") or d.get("booking_id")
-            actions.append("%s%s for Message-ID %s" % (shown(d.get("kind")), " " + shown(what) if what else "",
-                                                       shown(d.get("message"))))
+            kind = shown(d.get("kind")) if d.get("kind") is not None else "an action of no recorded kind"
+            actions.append("%s%s for Message-ID %s" % (kind, " " + shown(what) if what else "", shown(d.get("message"))))
     bits = []
     if actions:
         bits.append("%d queued action(s): %s" % (len(actions), "; ".join(actions)))
@@ -786,12 +842,19 @@ def _dropped(dropped, ledger):
     return "; ".join(bits) + "."
 
 
-def _ended(p):
-    text = "%s handled, %s held, %s; %s sent to prospects, %s, %s; %s, cost %s; %s quarantined, %s." % (
-        shown(p.get("handled")), shown(p.get("held")), _count(p.get("human_approvals"), "human approval"),
-        shown(p.get("sends")), _count(p.get("hold_notices"), "hold notice"), _count(p.get("bookings"), "booking"),
-        _count(p.get("model_calls"), "model call"), _money(p.get("cost_usd")), shown(p.get("quarantined")),
-        _count(p.get("errors"), "error"))
+def _ended(p, source):
+    reads = _pick({"live": ("model call", "model calls"),
+                   "replayed": ("replayed model answer", "replayed model answers"),
+                   "stub": ("read by the stand-in (stub)", "reads by the stand-in (stub)"),
+                   "yes-man": ("read by the yes-man stand-in", "reads by the yes-man stand-in")},
+                  source, ("classify call", "classify calls"))
+    text = "%s, %s, %s; %s, %s, %s; %s, cost %s; %s, %s." % (
+        _tally(p.get("handled"), "handled", "handled"), _tally(p.get("held"), "held", "held"),
+        _count(p.get("human_approvals"), "human approval"),
+        _tally(p.get("sends"), "sent to prospects", "sent to prospects"),
+        _count(p.get("hold_notices"), "hold notice"), _count(p.get("bookings"), "booking"),
+        _tally(p.get("model_calls"), *reads), _money(p.get("cost_usd")),
+        _tally(p.get("quarantined"), "quarantined", "quarantined"), _count(p.get("errors"), "error"))
     if p.get("halted"):
         text += " Halted (%s) before the end." % (shown(p.get("halted")),)
     if p.get("read_failed"):
@@ -807,6 +870,14 @@ def _payload(line):
 
 def _is_int(value):
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _pick(mapping, key, default):
+    """mapping[key], or default when it is not there or the key cannot be one (a list a forged line holds)."""
+    try:
+        return mapping.get(key, default)
+    except TypeError:
+        return default
 
 
 def when(value):
@@ -828,7 +899,7 @@ def shown(value, limit=SHOWN):
     escaped (\\x1b, \\u202e, \\r), and so are a backslash (\\\\) and every space after the first in a run
     (\\x20): nothing a sender wrote can move the cursor, start a line or pad itself into a fake row."""
     if value is None:
-        text = "none"
+        text = "not recorded"
     elif isinstance(value, str):
         text = value
     elif isinstance(value, (bool, int, float)):

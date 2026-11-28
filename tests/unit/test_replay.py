@@ -637,6 +637,125 @@ class SaysOnlyWhatTheLinesHold(unittest.TestCase):
         self.assertNotIn("the model", out)
 
 
+class ReReview(unittest.TestCase):
+    """The Fable re-review of PR #8: a missing key is never read as an outcome, and nothing is said
+    that the lines do not hold."""
+    SPAN = {"start": "2026-12-02T19:00:00Z", "end": "2026-12-02T19:30:00Z"}
+    replay_rows = SaysOnlyWhatTheLinesHold.replay_rows
+
+    def test_a_call_shown_as_recorded_keeps_its_result(self):
+        rows = [START, ("observed", "m@x", SAW, None),
+                ("called", "m@x", {"call": "send", "target": "T1", "to": ["sender"], "message_id": "<m1@x>"}, None),
+                ("result", "m@x", {"call_seq": 3, "ok": True, "state": "handed_over"}, None), END]
+        code, out = self.replay_rows(rows)
+        self.assertEqual(code, 0, out)
+        self.assertIn("-> handed over [seq 3-4]", out)
+        with mock.patch.object(replay, "_call_words", side_effect=RuntimeError("odd")):
+            code, out = self.replay_rows(rows)
+        self.assertEqual(code, 0, out)
+        in_order(self, out, ["  Called    called line, shown as recorded:", "[seq 3]",
+                             "  Got back  its result, shown as recorded:", "handed_over", "[seq 4]"])
+
+    def test_an_odd_source_never_crashes_the_classed_row(self):
+        code, out = self.replay_rows([START, ("observed", "m@x", SAW, None),
+                                      ("classified", "m@x", {"cls": "other", "ok": False, "source": {"x": 1}}, None), END])
+        self.assertEqual(code, 0, out)
+        self.assertIn("  Classed   no usable answer from the reader.", out)
+
+    def halt_in_flight(self, ledger, **extra):
+        flight = dict({"seq": 3, "call": "send", "target": "T1", "unconfirmed": True, "message_id": "<a@b>"}, **extra)
+        return self.replay_rows([START, ("observed", "m@x", SAW, None),
+                                 ("called", "m@x", {"call": "send", "target": "T1", "to": "sender",
+                                                    "message_id": "<a@b>"}, None),
+                                 ("halted", "", {"cause": "cli", "in_flight": flight,
+                                                 "dropped": [] if ledger == "ok" else None, "ledger": ledger}, HALT)])
+
+    def test_the_ledger_mark_is_claimed_only_when_the_ledger_took_it(self):
+        code, out = self.halt_in_flight("ok")
+        self.assertEqual(code, 0, out)
+        self.assertIn("In flight: send T1 [seq 3], for Message-ID m@x, marked unconfirmed in the ledger.", out)
+        code, out = self.halt_in_flight("unreadable")
+        self.assertEqual(code, 0, out)
+        self.assertIn("In flight: send T1 [seq 3], for Message-ID m@x, not marked in the ledger (it could not be "
+                      "read).", out)
+        self.assertNotIn("marked unconfirmed", out)
+
+    def test_a_stub_run_never_counts_model_calls(self):
+        end = ("summary", "", {"handled": 1, "held": 0, "human_approvals": 0, "model_calls": 9, "cost_usd": 0.0}, None)
+        code, out = self.replay_rows([START, end])
+        self.assertEqual(code, 0, out)
+        self.assertIn("; 9 reads by the stand-in (stub), cost $0.0000;", out)
+        self.assertNotRegex(out, r"\d model call")
+        live = (START[0], START[1], dict(START[2], model_source="live", model="claude-x"), None)
+        code, out = self.replay_rows([live, end])
+        self.assertIn("; 9 model calls, cost $0.0000;", out)
+
+    def test_a_retried_re_read_after_a_write_keeps_its_label(self):
+        got = dict(self.SPAN, ok=True, found=True, status="CONFIRMED", fields_match=True, booking_id="B1")
+        code, out = self.replay_rows([START, ("observed", "m@x", SAW, None),
+                                      ("called", "m@x", {"call": "calendar_create", "target": "B1"}, None),
+                                      ("result", "m@x", {"call_seq": 3, "ok": True, "state": "written"}, None),
+                                      ("called", "m@x", {"call": "calendar_get", "target": "B1"}, None),
+                                      ("result", "m@x", dict(got, call_seq=5), None),
+                                      ("called", "m@x", dict(self.SPAN, call="calendar_query", target="span"), None),
+                                      ("result", "m@x", {"call_seq": 7, "ok": False, "error": "timeout"}, None),
+                                      ("called", "m@x", dict(self.SPAN, call="calendar_query", target="span",
+                                                             attempt=2), None),
+                                      ("result", "m@x", {"call_seq": 9, "ok": True,
+                                                         "events": [dict(self.SPAN, booking_id="B1")]}, None), END])
+        self.assertEqual(code, 0, out)
+        in_order(self, out, ["  Verified  calendar re-read", "after the write -> failed: timeout [seq 7-8]",
+                             "  Verified  calendar re-read", "after the write (attempt 2) -> 1 event: hers (B1) "
+                             "[seq 9-10]"])
+
+    def test_a_re_read_with_no_write_in_the_file_never_names_a_write(self):
+        code, out = self.replay_rows([START, ("observed", "m@x", SAW, None),
+                                      ("called", "m@x", {"call": "calendar_get", "target": "B1"}, None),
+                                      ("result", "m@x", {"call_seq": 3, "ok": True, "found": False,
+                                                         "fields_match": False}, None),
+                                      ("called", "m@x", dict(self.SPAN, call="calendar_query", target="span"), None),
+                                      ("result", "m@x", {"call_seq": 5, "ok": True, "events": []}, None), END])
+        self.assertEqual(code, 0, out)
+        self.assertIn("  Verified  calendar re-read Wed Dec 2, 11:00 AM Pacific to Wed Dec 2, 11:30 AM Pacific after "
+                      "the read-back -> free (no event) [seq 5-6]", out)
+        self.assertNotIn("after the write", out)
+
+    def test_a_missing_key_is_never_read_as_an_outcome(self):
+        bare = {"server_id": "a.eml", "from_addr": "ann@a.example", "received": "2026-12-01T16:00:00Z"}
+        code, out = self.replay_rows([
+            START, ("observed", "m@x", bare, None),
+            ("classified", "m@x", {"cls": "meeting_request", "ok": True, "source": "stub"}, None),
+            ("checked", "m@x", {"action": "send_reply", "checks": {"G1": "pass"}}, BOOK),
+            ("checked", "m@x", {"action": "send_reply", "checks": {"G1": "fail"}, "passed": False}, BOOK),
+            ("called", "m@x", {"call": "calendar_get", "target": "B1"}, None),
+            ("result", "m@x", {"call_seq": 6, "ok": True}, None),
+            ("called", "m@x", {"call": "sent_lookup", "target": "T1", "message_id": "<s@x>"}, None),
+            ("result", "m@x", {"call_seq": 8, "ok": True}, None),
+            ("called", "m@x", {"call": "send", "target": "T1", "to": "sender", "message_id": "<s@x>"}, None),
+            ("result", "m@x", {"call_seq": 10}, None),
+            ("result", "m@x", {"call_seq": 99}, None),
+            ("halted", "", {"cause": "cli", "in_flight": {}, "dropped": [{}], "ledger": "ok"}, HALT),
+            ("summary", "", {}, None)])
+        self.assertEqual(code, 0, out)
+        in_order(self, out, ["links: not recorded, attachments: not recorded, opened: not recorded. [seq 2]",
+                             "  Classed   meeting_request; not recorded whether an instruction was seen. [seq 3]",
+                             "the gate before send_reply: verdict not recorded: G1 pass.",
+                             "the gate before send_reply: BLOCKED (failing check not recorded): G1 fail.",
+                             "read back booking B1 -> not recorded whether found [seq 6-7]",
+                             "looked in Sent for T1 <s@x> -> not recorded whether found [seq 8-9]",
+                             "(Message-ID <s@x>) -> outcome not recorded [seq 10-11]",
+                             "  Got back  a result naming no call: outcome not recorded [seq 12]",
+                             "In flight: call not recorded (seq not recorded).",
+                             "Dropped: 1 queued action(s): an action of no recorded kind for Message-ID not recorded.",
+                             "  Ended     handled: not recorded, held: not recorded, human approvals: not recorded; "
+                             "sent to prospects: not recorded, hold notices: not recorded, bookings: not recorded; "
+                             "reads by the stand-in (stub): not recorded, cost not recorded; quarantined: not recorded, "
+                             "errors: not recorded."])
+        for wrong in (" none", "failed", "BLOCKED at", "no instruction seen", "nothing opened", "-> not found",
+                      "unconfirmed"):
+            self.assertNotIn(wrong, out)
+
+
 class FindingTheRun(unittest.TestCase):
     """A receipts file, a run folder, a trace folder, a run ID, or (none given) the latest sandbox run."""
 
