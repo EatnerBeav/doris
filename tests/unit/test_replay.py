@@ -798,6 +798,27 @@ class ReReview(unittest.TestCase):
             self.assertNotIn(wrong, out)
 
 
+class AfterPR11Review(unittest.TestCase):
+    """The review of PR #11: hashed ledger keys, the live start fields, and the manifest beside a run."""
+    replay_rows = SaysOnlyWhatTheLinesHold.replay_rows
+
+    def test_a_hashed_key_is_never_called_a_message_id(self):
+        hashed, raw = "key-sha256:" + "ab" * 32, "sha256:" + "cd" * 32
+        dropped = [{"kind": "send_reply", "template": "T4", "message": hashed, "thread": "t1", "booking_id": None},
+                   {"kind": "send_reply", "template": "T1", "message": raw, "thread": "t2", "booking_id": None},
+                   {"kind": "message", "message": hashed, "thread": "t1", "template": None, "booking_id": None},
+                   {"kind": "message", "message": raw, "thread": "t2", "template": None, "booking_id": None}]
+        code, out = self.replay_rows([START, ("halted", "", {"cause": "cli", "in_flight": None, "dropped": dropped,
+                                                             "ledger": "ok"}, HALT)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("Dropped: 2 queued action(s): send_reply T4 for key (hashed) %s; send_reply T1 for a mail with "
+                      "no Message-ID (key sha256:%s); 2 message(s) not yet finished, left unprocessed in the ledger: "
+                      "key (hashed) %s, a mail with no Message-ID (key sha256:%s)." % ("ab" * 32, "cd" * 32, "ab" * 32,
+                                                                                       "cd" * 32), out)
+        self.assertNotIn("Message-ID key-sha256", out)
+        self.assertNotIn("Message-ID sha256", out)
+
+
 class FindingTheRun(unittest.TestCase):
     """A receipts file, a run folder, a trace folder, a run ID, or (none given) the latest sandbox run."""
 

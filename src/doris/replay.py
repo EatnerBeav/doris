@@ -848,11 +848,11 @@ def _dropped(dropped, ledger):
         if not isinstance(d, dict):
             actions.append(shown(d))
         elif d.get("kind") == "message":
-            messages.append(shown(d.get("message")))
+            messages.append(_key(d.get("message"), bare=True))
         else:
             what = d.get("template") or d.get("booking_id")
             kind = shown(d.get("kind")) if d.get("kind") is not None else "an action of no recorded kind"
-            actions.append("%s%s for Message-ID %s" % (kind, " " + shown(what) if what else "", shown(d.get("message"))))
+            actions.append("%s%s for %s" % (kind, " " + shown(what) if what else "", _key(d.get("message"))))
     bits = []
     if actions:
         bits.append("%d queued action(s): %s" % (len(actions), "; ".join(actions)))
@@ -860,6 +860,17 @@ def _dropped(dropped, ledger):
         bits.append("%d message(s) not yet finished, left unprocessed in the ledger: %s" % (
             len(messages), ", ".join(messages)))
     return "; ".join(bits) + "."
+
+
+def _key(key, bare=False):
+    """A ledger key as the supervisor's halted line records it (supervisor.shown_key): a Message-ID as
+    written, "key-sha256:<hash>" when the key was shown only by its hash, or "sha256:<hash>", the key
+    of a mail with no Message-ID."""
+    if isinstance(key, str) and re.fullmatch(r"key-sha256:[0-9a-f]{64}", key):
+        return "key (hashed) %s" % (key[len("key-sha256:"):],)
+    if isinstance(key, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", key):
+        return "a mail with no Message-ID (key %s)" % (key,)
+    return shown(key) if bare else "Message-ID %s" % (shown(key),)
 
 
 def _ended(p, source):
