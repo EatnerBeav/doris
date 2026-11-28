@@ -140,6 +140,8 @@ class Reading:
     zone: Optional[str]               # zone id from zones.py, or None
     kept: bool
     rule: str                         # why it was kept or set aside (row id or drop rule)
+    derived: bool = False             # D5 moved this time onto a weekday written apart from it (a cross-pair):
+                                      # never a time the sender wrote (G9), never offered ahead of one
 
 
 @dataclass
@@ -164,6 +166,7 @@ class ParseResult:
 class PickResult:
     kind: str                         # matched_slot | none | ambiguous | near_miss | yes_single
     slot_index: Optional[int] = None  # 0-based index into the open offer's slots
+    by: Optional[str] = None          # how the reply named it: "time", or only by its place ("number", "yes")
 
 
 # ---------------------------------------------------------------------------------------

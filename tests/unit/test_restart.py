@@ -5,6 +5,7 @@ the same state and sandbox, and checks what the prospect and the calendar end up
 twice, nothing booked again, nothing moved that the sender never asked to move.
 """
 
+import datetime
 import email
 import email.policy
 import json
@@ -14,6 +15,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from doris import compose
 from doris import ledger as ledger_mod
 from doris import loop, paths, receipts, supervisor
 from doris.adapters import sandbox as sandbox_mod
@@ -79,6 +81,34 @@ def cover_her_event(root):
             "DTEND:" + end, "SUMMARY:Busy", "STATUS:CONFIRMED", "TRANSP:OPAQUE", "END:VEVENT", "END:VCALENDAR")
     with open(os.path.join(cal, "owner-on-top.ics"), "wb") as fh:
         fh.write(("\r\n".join(body) + "\r\n").encode("ascii"))
+
+
+def owner_busy(root, uid, start, end):
+    """The owner puts an event of his own on the calendar: start and end as 20261203T170000Z."""
+    body = ("BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Team Whizz//Doris sandbox fixtures//EN",
+            "BEGIN:VEVENT", "UID:" + uid, "DTSTAMP:20261127T180000Z", "DTSTART:" + start,
+            "DTEND:" + end, "SUMMARY:Busy", "STATUS:CONFIRMED", "TRANSP:OPAQUE", "END:VEVENT", "END:VCALENDAR")
+    with open(os.path.join(root, "calendar", uid + ".ics"), "wb") as fh:
+        fh.write(("\r\n".join(body) + "\r\n").encode("ascii"))
+
+
+MARCUS = "marcus@brightlane.example"
+MARCUS_KEY = "20261201.0810.intro.marcus@brightlane.example"
+
+
+def from_marcus(mid, date, irt, text):
+    """Marcus answers her message irt on his thread."""
+    return ("From: Marcus Lee <marcus@brightlane.example>\r\n"
+            "To: Doris <doris.htm@fastmail.com>\r\n"
+            "Subject: Re: Intro call\r\n"
+            "Date: %s\r\n"
+            "Message-ID: <%s>\r\n"
+            "In-Reply-To: %s\r\n"
+            "References: <%s> %s\r\n"
+            "MIME-Version: 1.0\r\n"
+            "Content-Type: text/plain; charset=\"utf-8\"\r\n"
+            "Content-Transfer-Encoding: 7bit\r\n\r\n%s\r\n\r\nMarcus\r\n"
+            % (date, mid, irt, MARCUS_KEY, irt, text)).encode("ascii")
 
 
 class Restart(unittest.TestCase):
@@ -241,6 +271,50 @@ class PickedOffer(Restart):
         s2 = self.crash_then_run(loop._Run, "close", lambda self_, e, kind, outcome, *a, **k: outcome == "book")
         self.assert_booked_once(s2)
 
+    def test_the_receipt_calls_a_pick_of_her_slot_no_time_the_sender_wrote(self):
+        # G9 checks it on the grid it was offered on; only a direct booking is "written" (Fable review
+        # of PR #3, finding 7)
+        lines = receipts.read_lines(self.run_once().receipts_path)
+        checked = [l["payload"]["checks"]["G9"] for l in lines
+                   if l["kind"] == "checked" and l["payload"]["action"] == "calendar_create"]
+        self.assertEqual(checked, [{"status": "pass", "checked": 1, "written": False}])
+
+
+def expire_offers(state):
+    """Every offer in the ledger expires while she is down (before the restart's clock)."""
+    led = ledger_mod.Ledger(os.path.join(state, "ledger.sqlite"))
+    try:
+        led._con.execute("UPDATE offers SET expires_utc = '2026-12-01T17:00:00Z'")
+    finally:
+        led.close()
+
+
+class PickedOfferExpiredWhileDown(Restart):
+    """A pick killed before the write, and its offer expires before the restart: no open offer holds
+    the slot now, so she offers fresh times (T4) before any booking is made, the same test the gate
+    makes, never a gate block (Fable review of PR #3, finding 6)."""
+    names = ("02-marcus-request.eml", "07-marcus-pick.eml")
+
+    def test_the_restart_offers_fresh_times_and_books_nothing(self):
+        s2 = self.crash_then_run(sandbox_mod.SandboxCalendar, "create_only", lambda *a, **k: True,
+                                 between=lambda: expire_offers(self.state))
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T4"])
+        self.assertEqual([t for t in self.templates_sent(OWNER) if t == "S1"], [])
+        self.assertEqual(self.closing(s2, "marcus.pick"), ["reoffer"])
+        self.assertEqual(self.events(), [])
+        lines = receipts.read_lines(s2.receipts_path)
+        (close,) = [l for l in lines if l["kind"] == "decided" and l["payload"].get("outcome") == "reoffer"]
+        self.assertEqual(close["why"]["text"],
+                         "The picked slot is no longer bookable or available (not_offered): offer fresh times.")
+        self.assertNotIn("calendar_create", [l["payload"]["action"] for l in lines if l["kind"] == "checked"])
+        (send,) = [l["payload"] for l in lines if l["kind"] == "called" and l["payload"]["call"] == "send"]
+        self.assertEqual(send["slots"]["asked"], "2026-12-03T17:00:00Z")
+        led = ledger_mod.Ledger(os.path.join(self.state, "ledger.sqlite"))
+        try:
+            self.assertEqual([r["state"] for r in led._all("SELECT state FROM bookings")], ["blocked"])
+        finally:
+            led.close()
+
 
 class HoldNotice(Restart):
     """A hold, then a kill before its notice went out or before the closing line: the owner is told
@@ -327,6 +401,271 @@ class SecondOffer(Restart):
         self.assertEqual(self.templates_sent(self.MARCUS), ["T2", "T3"])
         self.assertEqual(self.offers(), 2)
         self.assertEqual(self.closing(s2, "marcus"), ["reoffer"])
+
+    def test_after_the_restart_her_own_offer_is_no_time_the_sender_wrote(self):
+        # The T3 written down before the kill is the send's own offer, not one already open to Marcus: G9
+        # reads its slots as hers, as it did before the kill (Fable review 2 of PR #3, finding E)
+        s2 = self.crash_then_run(sandbox_mod.SandboxMail, "send",
+                                 lambda cal, raw, envelope, mid, template=None: template == "T3")
+        self.assertEqual(self.templates_sent(self.MARCUS), ["T2", "T3"])
+        lines = receipts.read_lines(s2.receipts_path)
+        (g9,) = [l["payload"]["checks"]["G9"] for l in lines
+                 if l["kind"] == "checked" and l["payload"]["template"] == "T3"]
+        self.assertEqual(g9, {"status": "pass", "checked": 3, "written": False})
+
+
+class Superseded(Restart):
+    """A second offer to the sender closes the first (reason "superseded") once it is in Sent, so
+    "the first one" means the newest offer's first; the thread still counts both offers, so a third
+    set of times is a hold (Fable review of PR #3, finding 4)."""
+    names = ("02-marcus-request.eml",)
+    FIRST = "20261201.1030.marcus.first@brightlane.example"
+
+    def answer(self, key, template, text):
+        """Marcus answers the template her reply to message `key` carried; then one run."""
+        add(self.root, "40-marcus-answer.eml",
+            from_marcus(self.FIRST, "Tue, 01 Dec 2026 10:30:00 -0800", compose.new_message_id(DORIS, key, template, 1),
+                        text), {"forwarded": "no"})
+        return self.run_once()
+
+    def booked(self):
+        (event,) = self.events()
+        with open(os.path.join(self.root, "calendar", event), "rb") as fh:
+            return [l for l in fh.read().decode("ascii").split("\r\n") if l.startswith(("DTSTART:", "DTEND:"))]
+
+    def offer_rows(self):
+        led = ledger_mod.Ledger(os.path.join(self.state, "ledger.sqlite"))
+        try:
+            rows = led._all("SELECT used, closed_reason FROM offers ORDER BY id")
+            return [(r["used"], r["closed_reason"]) for r in rows]
+        finally:
+            led.close()
+
+    def superseded_on_closing(self, summary, outcome):
+        return [l["payload"].get("offers_superseded") for l in receipts.read_lines(summary.receipts_path)
+                if l["kind"] == "decided" and l["payload"].get("outcome") == outcome]
+
+
+class SupersededByASecondOffer(Superseded):
+    DECLINE = "20261201.0902.marcus.none-work@brightlane.example"
+
+    def setUp(self):
+        super().setUp()
+        add(self.root, "02b-marcus-decline.eml", SecondOffer.DECLINE, {"forwarded": "no"})
+
+    def assert_books_the_second_offers_first(self, s):
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T3", "T1"])
+        self.assertEqual(self.closing(s, "marcus.first"), ["book"])
+        self.assertEqual(self.booked(), ["DTSTART:20261202T193000Z", "DTEND:20261202T200000Z"])
+        self.assertEqual(self.offer_rows(), [(0, "superseded"), (1, None)])
+
+    def test_the_first_one_books_the_second_offers_first(self):
+        s1 = self.run_once()
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T3"])
+        self.assertEqual(self.superseded_on_closing(s1, "reoffer"), [1])
+        self.assertEqual(self.superseded_on_closing(s1, "offer"), [None])
+        self.assertEqual(self.offer_rows(), [(0, "superseded"), (0, None)])
+        self.assert_books_the_second_offers_first(self.answer(self.DECLINE, "T3", "The first one works."))
+
+    def test_a_time_only_the_first_offer_held_gets_the_second_offer_again(self):
+        # T4 would be a third set of times (a hold): she sends the open offer again (T12)
+        self.run_once()
+        s = self.answer(self.DECLINE, "T3", "Wednesday at 11:00 AM Pacific works for me.")
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T3", "T12"])
+        self.assertEqual(self.closing(s, "marcus.first"), ["offer"])
+        self.assertEqual(self.events(), [])
+        lines = receipts.read_lines(s.receipts_path)
+        (send,) = [l["payload"] for l in lines if l["kind"] == "called" and l["payload"]["call"] == "send"]
+        self.assertEqual(send["slots"]["slots"], ["2026-12-02T19:30:00Z", "2026-12-03T17:30:00Z",
+                                                  "2026-12-04T18:30:00Z"])
+
+    def test_a_second_decline_is_still_a_third_set_of_times(self):
+        self.run_once()
+        s = self.answer(self.DECLINE, "T3", "Sorry, none of those work for me either. Do you have other times?")
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T3"])
+        self.assertEqual(self.closing(s, "marcus.first"), ["hold:third_offer"])
+        self.assertEqual(self.offers(), 2)
+
+    def test_killed_before_the_second_offer_was_sent(self):
+        self.crash_then_run(sandbox_mod.SandboxMail, "send",
+                            lambda cal, raw, envelope, mid, template=None: template == "T3")
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T3"])
+        self.assert_books_the_second_offers_first(self.answer(self.DECLINE, "T3", "The first one works."))
+
+    def test_killed_after_the_second_offer_was_sent_before_it_was_found_in_sent(self):
+        s2 = self.crash_then_run(loop._Run, "look_in_sent", lambda self_, e, mid, template: template == "T3")
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T3"])
+        self.assertEqual(self.superseded_on_closing(s2, "reoffer"), [1])
+        self.assert_books_the_second_offers_first(self.answer(self.DECLINE, "T3", "The first one works."))
+
+
+class APickBeforeTheSecondOfferWentOut(Superseded):
+    """"The first one", written to her first offer, reaches her before her second offer (T3) goes out: it
+    cannot be answering T3, so it gets T3 again (T12, no new offer record), never a booking of T3's first
+    (Fable review 2 of PR #3, finding B). T3 went out when its send went out, a restart's included; the
+    pick came when it reached her. Marcus's next "the first one" books T3's first."""
+    DECLINE = SupersededByASecondOffer.DECLINE
+
+    def setUp(self):
+        super().setUp()
+        add(self.root, "02b-marcus-decline.eml", SecondOffer.DECLINE, {"forwarded": "no"})
+
+    def to_her(self, name, mid, date, key, template, text):
+        add(self.root, name, from_marcus(mid, date, compose.new_message_id(DORIS, key, template, 1), text),
+            {"forwarded": "no"})
+
+    def restart_at(self, clock):
+        """A run that starts at this instant (ISO UTC) and stays there, as a restart after time away does."""
+        with open(os.path.join(self.root, "clock.txt"), "w", encoding="ascii") as fh:
+            fh.write(clock + "\n")
+        self.runs += 1
+        cfg = loop.RunConfig(mode="throwaway", run_name="run-%d" % self.runs, state_dir=self.state,
+                             sandbox_root=self.root, owner_addr=OWNER, doris_addr=DORIS, model_source="stub",
+                             clock_mode="fixed", retry_wait_s=0)
+        return loop.run(cfg)
+
+    def crash_at_the_t3_send(self):
+        real, fired = sandbox_mod.SandboxMail.send, []
+
+        def send(mail, raw, envelope, mid, template=None):
+            if not fired and template == "T3":
+                fired.append(True)
+                raise Crash("send")
+            return real(mail, raw, envelope, mid, template=template)
+
+        with mock.patch.object(sandbox_mod.SandboxMail, "send", send):
+            with self.assertRaises(Crash):
+                self.run_once()
+        self.assertTrue(fired)
+
+    def assert_t3_again(self, s, who, t3_slots):
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T3", "T12"])
+        self.assertEqual(self.closing(s, who), ["offer"])
+        self.assertEqual(self.events(), [])
+        self.assertEqual(self.offers(), 2)
+        self.assertEqual(self.offer_rows(), [(0, "superseded"), (0, None)])
+        lines = receipts.read_lines(s.receipts_path)
+        (plan,) = [l for l in lines if l["kind"] == "decided" and l["payload"].get("step") == "plan"
+                   and who in l["subject"]]
+        self.assertEqual((plan["payload"]["action"], plan["why"]["code"]), ("resend", "policy.pick_before_offer"))
+        (send,) = [l["payload"] for l in lines if l["kind"] == "called" and l["payload"]["call"] == "send"
+                   and l["payload"]["target"] == "T12"]
+        self.assertEqual(send["slots"]["slots"], t3_slots)
+
+    def assert_then_the_first_one_books_t3s_first(self, dtstart):
+        self.to_her("42-marcus-again.eml", "20261201.1050.marcus.again@brightlane.example",
+                    "Tue, 01 Dec 2026 10:50:00 -0800", self.DECLINE, "T3", "The first one works.")
+        s = self.run_once()
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T3", "T12", "T1"])
+        self.assertEqual(self.closing(s, "marcus.again"), ["book"])
+        self.assertEqual(self.booked()[0], "DTSTART:" + dtstart)
+
+    def test_written_before_the_second_offer_went_out_and_read_after_it(self):
+        self.run_once()                                        # T2 at 8:10, T3 at 9:10 AM Pacific
+        self.to_her("41-marcus-first.eml", "20261201.0904.marcus.first@brightlane.example",
+                    "Tue, 01 Dec 2026 09:04:00 -0800", MARCUS_KEY, "T2", "Actually, scratch that. The first one works.")
+        s = self.run_once()
+        self.assert_t3_again(s, "marcus.first", ["2026-12-02T19:30:00Z", "2026-12-03T17:30:00Z",
+                                                 "2026-12-04T18:30:00Z"])
+        self.assert_then_the_first_one_books_t3s_first("20261202T193000Z")
+
+    def test_killed_before_the_second_offer_went_out_a_pick_that_came_meanwhile_gets_it_again(self):
+        # killed at 9:10 before T3 went out; "the first one" (to T2) lands at 10:30; she restarts at 10:45
+        # and sends T3 then: the pick reached her before T3 went out
+        self.crash_at_the_t3_send()
+        self.to_her("41-marcus-first.eml", "20261201.1030.marcus.first@brightlane.example",
+                    "Tue, 01 Dec 2026 10:30:00 -0800", MARCUS_KEY, "T2", "The first one works.")
+        s = self.restart_at("2026-12-01T18:45:00Z")
+        self.assert_t3_again(s, "marcus.first", ["2026-12-02T19:30:00Z", "2026-12-03T17:30:00Z",
+                                                 "2026-12-04T18:30:00Z"])
+        self.assert_then_the_first_one_books_t3s_first("20261202T193000Z")
+
+
+class SupersededByFreshTimes(Superseded):
+    """A pick whose slot went busy gets fresh times (T4: Thu Dec 3 17:30, 20:00 and 20:30 UTC), which
+    close the first offer the same way: "the first one" was its Wed Dec 2 19:00 UTC before."""
+    PICK = "20261201.0940.marcus.thursday@brightlane.example"
+
+    def setUp(self):
+        super().setUp()
+        self.run_once()                                                     # T2: Thu Dec 3 17:00 UTC is its second
+        owner_busy(self.root, "owner-late", "20261203T170000Z", "20261203T173000Z")
+        add(self.root, "30-marcus-pick.eml",
+            from_marcus(self.PICK, "Tue, 01 Dec 2026 09:40:00 -0800",
+                        compose.new_message_id(DORIS, MARCUS_KEY, "T2", 1), "Thursday at noon Eastern works for me."),
+            {"forwarded": "no"})
+
+    def assert_books_the_fresh_times_first(self, s):
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T4", "T1"])
+        self.assertEqual(self.closing(s, "marcus.first"), ["book"])
+        self.assertEqual(self.booked(), ["DTSTART:20261203T173000Z", "DTEND:20261203T180000Z"])
+        self.assertEqual(self.offer_rows(), [(0, "superseded"), (1, None)])
+
+    def test_the_first_one_books_the_fresh_times_first(self):
+        s2 = self.run_once()
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T4"])
+        self.assertEqual(self.closing(s2, "marcus.thursday"), ["reoffer"])
+        self.assertEqual(self.superseded_on_closing(s2, "reoffer"), [1])
+        self.assert_books_the_fresh_times_first(self.answer(self.PICK, "T4", "The first one works."))
+
+    def test_killed_before_the_fresh_times_were_sent(self):
+        self.crash_then_run(sandbox_mod.SandboxMail, "send",
+                            lambda cal, raw, envelope, mid, template=None: template == "T4")
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T4"])
+        self.assert_books_the_fresh_times_first(self.answer(self.PICK, "T4", "The first one works."))
+
+    def test_killed_after_the_fresh_times_were_sent_before_the_first_offer_was_closed(self):
+        s3 = self.crash_then_run(loop._Run, "supersede", lambda self_, e, template: template == "T4")
+        self.assertEqual(self.templates_sent(MARCUS), ["T2", "T4"])
+        self.assertEqual(self.closing(s3, "marcus.thursday"), ["offer"])     # a T4 found in Sent closes as an offer
+        self.assertEqual(self.superseded_on_closing(s3, "offer"), [1])
+        self.assert_books_the_fresh_times_first(self.answer(self.PICK, "T4", "The first one works."))
+
+
+class DirectAtATimeOnceOffered(Restart):
+    """A direct booking at a time a closed offer on the thread once held, killed before the write:
+    the restart books it as the direct booking it was (Fable review of PR #3, finding 2)."""
+    names = ("02-marcus-request.eml",)
+    MARCUS = "marcus@brightlane.example"
+    KEY = "20261201.0810.intro.marcus@brightlane.example"
+    T2 = "<603b929bb52de1bf420bfe2ada43e6ac@fastmail.com>"
+
+    def reply(self, date, mid, text):
+        return ("From: Marcus Lee <marcus@brightlane.example>\r\n"
+                "To: Doris <doris.htm@fastmail.com>\r\n"
+                "Subject: Re: Intro call\r\n"
+                "Date: %s\r\n"
+                "Message-ID: <%s>\r\n"
+                "In-Reply-To: %s\r\n"
+                "References: <%s> %s\r\n"
+                "MIME-Version: 1.0\r\n"
+                "Content-Type: text/plain; charset=\"utf-8\"\r\n"
+                "Content-Transfer-Encoding: 7bit\r\n\r\n%s\r\n\r\nMarcus\r\n"
+                % (date, mid, self.T2, self.KEY, self.T2, text)).encode("ascii")
+
+    def test_killed_before_the_write_it_books_as_direct_after_the_restart(self):
+        self.run_once()
+        led = ledger_mod.Ledger(os.path.join(self.state, "ledger.sqlite"))
+        try:
+            (offer,) = led._all("SELECT id FROM offers")
+            first = led._all("SELECT start_utc FROM offer_slots WHERE offer_id = ? ORDER BY idx", (offer["id"],))[0]
+        finally:
+            led.close()
+        start = datetime.datetime.strptime(first["start_utc"], "%Y-%m-%dT%H:%M:%SZ")
+        local = start - datetime.timedelta(hours=8)                  # Pacific in December
+        when = local.strftime("%A, %B ") + str(local.day) + local.strftime(" at %I:%M %p Pacific").replace(" 0", " ")
+        add(self.root, "30-marcus-no.eml", self.reply("Tue, 01 Dec 2026 09:40:00 -0800",
+                                                      "20261201.0940.marcus.no@brightlane.example", "No thanks."),
+            {"forwarded": "no"})
+        add(self.root, "31-marcus-direct.eml",
+            self.reply("Tue, 01 Dec 2026 10:40:00 -0800", "20261201.1040.marcus.direct@brightlane.example",
+                       "Changed my mind. Could Shane do %s for 30 minutes?" % when), {"forwarded": "no"})
+        s3 = self.crash_then_run(sandbox_mod.SandboxCalendar, "create_only", lambda *a, **k: True)
+        self.assertEqual(self.templates_sent(self.MARCUS)[-1], "T1")
+        self.assertEqual(self.closing(s3, "marcus.direct"), ["book"])
+        (event,) = self.events()
+        with open(os.path.join(self.root, "calendar", event), "rb") as fh:
+            self.assertIn("DTSTART:" + start.strftime("%Y%m%dT%H%M%SZ"), fh.read().decode("ascii"))
 
 
 class CancelAndMove(Restart):
