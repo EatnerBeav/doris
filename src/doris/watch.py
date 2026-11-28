@@ -43,6 +43,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import paths, receipts, supervisor, zones
 from .loop import count_outcomes
 from .shapes import CLASSES
+from .why import FOLLOW_UP_WORDS
 
 HOST = "127.0.0.1"                  # fixed: no option serves the page to another computer
 DEFAULT_PORT = 8765
@@ -220,12 +221,59 @@ def _tally(p):
                _s(_int(p.get("bookings")), "booking"), _s(_int(p.get("model_calls")), "model call")))
 
 
+def _due(value):
+    """A follow-up's date (UTC on its line) on the Pacific clock, to the minute: 'Thu Dec 3, 8:10 AM Pacific'."""
+    text = _time(value)
+    return "a time that can't be read" if text == "?" else re.sub(r":\d\d (AM|PM)$", r" \1", text) + " Pacific"
+
+
+def _follow_up(p):
+    """The follow-up a line names, from its code-written fields: the one nudge and its date, or the
+    check that a booking is still on the calendar."""
+    fu = p.get("follow_up") if isinstance(p.get("follow_up"), dict) else {}
+    if fu.get("kind") == "nudge":
+        return "one nudge, due %s" % _due(fu.get("due"))
+    if fu.get("kind") == "booking_check":
+        return "her check each cycle that booking %s is still on the calendar, until it starts %s" % (
+            _token(fu.get("booking_id")), _due(fu.get("due")))
+    return "an entry of a kind not on the list"
+
+
+def _rule(p):
+    rule = p.get("rule")
+    return FOLLOW_UP_WORDS.get(rule, _token(rule)) if isinstance(rule, str) else _token(rule)
+
+
+def _follow_up_line(p):
+    """A follow-up line that closes no message: filed, closed, the nudge going, or a nudge that waits."""
+    action = p.get("action")
+    if action == "file_follow_up":
+        return "Follow-up %s: %s." % ("filed" if p.get("new") is not False else "already filed", _follow_up(p))
+    if action == "close_follow_up":
+        return "Follow-up closed: %s%s." % (_follow_up(p), " (%s)" % _rule(p) if "rule" in p else "")
+    if action == "nudge":
+        kept = p.get("kept")
+        return "Follow-up due: the one nudge (%s) goes with %s still available." % (
+            _token(p.get("template")),
+            "%d of the offer's times" % len(kept) if isinstance(kept, list) else "the offer's times")
+    if action == "nudge_waits":
+        return "Follow-up due, and the nudge waits (%s). She tries again at her next cycle." % _rule(p)
+    return None
+
+
 def _what(kind, p):
     """What the line says happened, in code words. Email text only in a read line's sender."""
     if kind == "observed":
         if p.get("step") == "start":
             return "Run started: %s, model %s." % (_token(p.get("mode")), _token(p.get("model_source")))
         name, addr = _text(p.get("from_name")), _text(p.get("from_addr"))
+        if p.get("step") == "booking_check":        # ruling 17: her own calendar check, no mail read
+            reads = p.get("reads")
+            how = ("marked gone before a restart" if p.get("recovered") is True else
+                   "missing on %s" % _s(_int(reads), "read") if _int(reads) else "missing")
+            return "Her calendar check, no mail: her booking %s%s is gone from the calendar (%s)." % (
+                _token(p.get("booking_id")), " with %s" % ("%s <%s>" % (name, addr) if name else addr) if addr else "",
+                how)
         if addr:
             text = "Read a message from %s." % ("%s <%s>" % (name, addr) if name else addr)
         else:
@@ -245,14 +293,20 @@ def _what(kind, p):
             text += ", %s" % _token(p.get("template"))
         if p.get("booking_id"):
             text += ", booking %s" % _token(p.get("booking_id"))
+        if isinstance(p.get("follow_up"), dict):
+            text += ". Follow-up filed: %s" % _follow_up(p)
         return text + "."
     if kind == "decided":
         if p.get("step") == "plan":
             template = p.get("template")
             return "Plan: %s%s." % (_token(p.get("action")), ", " + _token(template) if template else "")
-        return "Decided."
+        return _follow_up_line(p) or "Decided."
     if kind == "held":
-        return "Held for the owner: %s." % _token(p.get("outcome"))
+        text = "Held for the owner: %s." % _token(p.get("outcome"))
+        if p.get("step") == "booking_check":
+            text += (" Hold notice sent to the owner; nothing sent to the prospect." if p.get("notice_sent") is True
+                     else " No hold notice went; the digest lists the hold. Nothing sent to the prospect.")
+        return text
     if kind == "checked":
         if p.get("passed") is True:
             return "Gate on %s: passed." % _token(p.get("action"))
@@ -263,6 +317,9 @@ def _what(kind, p):
             text += " to the %s" % _token(p.get("to"))
         if _int(p.get("attempt")) > 1:
             text += ", attempt %d" % p["attempt"]
+        if p.get("call") == "calendar_get" and "booking_check" in p:
+            text += (", her check that the booking is still on the calendar" +
+                     (" (read again after a short wait)" if p.get("booking_check") == 2 else ""))
         return text + "."
     if kind == "result":
         ok = p.get("ok") is True
@@ -331,7 +388,9 @@ def row(line):
         "seq": _int(line.get("seq")),
         "hash": _token(hash_[:8], "") if isinstance(hash_, str) else "",
         "time": _time(line.get("ts")),
-        "step": "start" if kind == "observed" and p.get("step") == "start" else STEPS.get(kind, "?"),
+        "step": ("start" if kind == "observed" and p.get("step") == "start" else
+                 "calendar check" if kind == "observed" and p.get("step") == "booking_check" else
+                 STEPS.get(kind, "?")),
         "message": _text(line.get("subject")),
         "what": _what(kind, p),
         "why": _text(why.get("text"), 400),       # written by code from the fixed list (why.py)

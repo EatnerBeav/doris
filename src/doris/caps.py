@@ -49,7 +49,8 @@ HOLIDAYS = (
 
 # --- Offers (ruling 6) ---------------------------------------------------------------------
 OFFER_EXPIRY = _dt.timedelta(days=7)
-NUDGE_AFTER_BUSINESS_DAYS = 2
+NUDGE_AFTER_BUSINESS_DAYS = 2            # the follow-up: one nudge (T9) this long after an offer nobody answered
+NUDGES_PER_THREAD_EVER = 1               # once per offer and once per thread, never a second (G7)
 
 # --- Calls and retries ("When a call fails") -----------------------------------------------
 CALENDAR_TIMEOUT_S = 10.0

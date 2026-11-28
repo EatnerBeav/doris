@@ -156,6 +156,19 @@ def reply(template="T2", **over):
     return action
 
 
+def nudge(**over):
+    """T9, the follow-up nudge: the open offer's times again, to the address the offer went to."""
+    return reply("T9", **over)
+
+
+def no_message(**over):
+    """Ctx for the nudge: it answers no message, so none is in hand, and no model answer or parse.
+    Her ledger holds one open offer on the thread, to Rae, of the three TIMES."""
+    ctx = dict(message=None, model_answer=None, parse=None, screen_facts={}, offered={SLOT, SLOT2, SLOT3})
+    ctx.update(over)
+    return ctx
+
+
 def confirm(**over):
     """T1 after a clean booking: the booking ID, its span and the .ics ride along."""
     over.setdefault("booking_id", BOOKING)
@@ -225,7 +238,7 @@ class FakeCtx:
         self.spend = 0.25
         self.stopped = set()
         self.count_values = dict(sends_hour=0, sends_run=0, sends_thread_day=0, sends_thread_ever=0,
-                                 offers_thread=0, calendar_writes_run=0, hold_notices_hour=0)
+                                 offers_thread=0, nudges_thread=0, calendar_writes_run=0, hold_notices_hour=0)
         self.events = []
         self.state = "intent"
         self.ledger = None
@@ -234,6 +247,8 @@ class FakeCtx:
         self.model_up = True
         self.offered = set()               # the slots of the open offers to Rae on the thread
         self.offered_to = {}               # the slots of open offers on the thread to anyone else, by address
+        self.offers = None                 # the thread's open offers, as the ledger gives them (None: from the two above)
+        self.held = False                  # the thread is held for the owner
         self.calls = []
         for name, value in over.items():
             setattr(self, name, value)
@@ -280,6 +295,20 @@ class FakeCtx:
         # an offer is one sender's: `offered` went to Rae, `offered_to` to anyone else (same sender, same thread)
         self.calls.append(("open_offer_slots", thread_key, sender))
         return set(self.offered) if sender == RAE else set(self.offered_to.get(sender, ()))
+
+    def open_offers(self, thread_key):
+        self.calls.append(("open_offers", thread_key))
+        if self.offers is not None:
+            return self.offers
+        by_addr = dict(self.offered_to)
+        if self.offered:
+            by_addr[RAE] = self.offered
+        return [{"id": n, "thread_key": thread_key, "sender": addr, "slots": list(slots), "length_min": 30}
+                for n, (addr, slots) in enumerate(sorted(by_addr.items()), 1) if slots]
+
+    def thread_held(self, thread_key):
+        self.calls.append(("thread_held", thread_key))
+        return self.held
 
 
 def raises(exc):
@@ -448,8 +477,8 @@ class G4Test(GateTest):
         self.assertBlocked(self.check(reply("T2"), model_up=False), "G4")
 
     def test_g4_blocks_a_nudge_while_the_model_is_down(self):
-        self.assertBlocked(self.check(reply("T9"), model_up=False, model_answer=None), "G4")
-        self.assertEqual(self.one(self.check(reply("T9"), model_answer=None), "G4").status, "pass")
+        self.assertBlocked(self.check(nudge(), **no_message(model_up=False)), "G4")
+        self.assertEqual(self.one(self.check(nudge(), **no_message()), "G4").status, "pass")
 
     def test_g4_hold_notices_and_the_digest_still_reach_the_owner_while_the_model_is_down(self):
         self.assertPasses(self.check(hold_notice(), model_up=False, model_answer=None))
@@ -632,6 +661,131 @@ class G6Test(GateTest):
         self.assertG6Fails(reply("T2", message_key="other@landscaping.example"), "sender")
 
 
+# --- the nudge (T9): it answers no message, so the ledger says who it goes to and what it lists -----
+class NudgeTest(GateTest):
+    def assertG6Fails(self, action, rule, **ctx_over):
+        result = self.check(action, **no_message(**ctx_over))
+        self.assertBlocked(result, "G6")
+        self.assertEqual(result.why, {"code": "gate.g6_recipient",
+                                      "text": "Blocked by G6: the recipient or the addressing is not allowed (%s)." % rule})
+        return result
+
+    def test_nudge_passes_to_the_address_her_open_offer_went_to(self):
+        result = self.check(nudge(), **no_message())
+        self.assertPasses(result)
+        applied = [r.check for r in result.results if r.status != "n/a"]
+        self.assertEqual(applied, ["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9", "G16", "G17"])
+        self.assertEqual(self.one(result, "G4").detail, {"model": "up", "answer": "not_used"})
+        g6 = self.one(result, "G6").detail
+        self.assertEqual((g6["nudge"], g6["to"], g6["offer"], g6["recipient_source"]), (True, RAE, "open", "sender"))
+        self.assertEqual(self.one(result, "G9").detail, {"checked": 3, "written": True})
+
+    def test_nudge_passes_with_one_or_two_of_the_offers_times(self):
+        for kept in (TIMES[:1], TIMES[1:], [TIMES[0], TIMES[2]]):
+            with self.subTest(kept=kept):
+                self.assertPasses(self.check(nudge(slots={"slots": list(kept)}), **no_message()))
+
+    def test_nudge_asks_the_ledger_for_the_thread_and_the_address_it_goes_to(self):
+        ctx = FakeCtx(**no_message())
+        self.assertTrue(gate.check(nudge(), ctx).passed)
+        for call in (("open_offers", THREAD), ("thread_held", THREAD), ("open_offer_slots", THREAD, RAE),
+                     ("silenced", RAE), ("silenced", OWNER), ("counts", THREAD)):
+            self.assertIn(call, ctx.calls)
+
+    def test_nudge_never_rides_on_a_message(self):
+        # with a message in hand a T9 is refused: no reply to a message is ever worded as a nudge
+        result = self.check(nudge(), offered={SLOT, SLOT2, SLOT3})
+        self.assertBlocked(result, "G6")
+        self.assertEqual(result.why["text"], "Blocked by G6: the recipient or the addressing is not allowed (nudge).")
+        self.assertG6Fails(nudge(recipient_source="owner"), "nudge")
+
+    def test_nudge_blocks_an_address_no_open_offer_on_the_thread_went_to(self):
+        result = self.assertG6Fails(nudge(to=[PAT]), "offer_closed")
+        self.assertEqual(self.one(result, "G16").status, "fail")       # and nobody new: G16 reads the ledger too
+        self.assertEqual(self.one(result, "G9").status, "fail")        # nor a time she never offered them
+
+    def test_nudge_blocks_when_the_offer_is_used_closed_or_expired(self):
+        result = self.assertG6Fails(nudge(), "offer_closed", offered=set())
+        self.assertEqual(self.one(result, "G16").status, "fail")
+        self.assertEqual(self.one(result, "G9").detail["rule"], "not_offered")
+
+    def test_nudge_goes_to_another_senders_offer_only_at_their_address(self):
+        # an offer is one sender's: Pat's open offer on the thread is nothing to nudge Rae with
+        self.assertG6Fails(nudge(), "offer_closed", offered=set(), offered_to={PAT: {SLOT, SLOT2, SLOT3}})
+        self.assertPasses(self.check(nudge(to=[PAT]), **no_message(offered=set(), offered_to={PAT: {SLOT, SLOT2, SLOT3}})))
+
+    def test_nudge_blocks_on_a_held_thread(self):
+        self.assertG6Fails(nudge(), "thread_held", held=True)
+
+    def test_nudge_blocks_a_second_to_address_or_one_that_could_carry_a_header(self):
+        self.assertG6Fails(nudge(to=[RAE, PAT]), "sender")
+        self.assertG6Fails(nudge(to=[]), "sender")
+        forged = RAE + "\r\nbcc: " + PAT
+        self.assertG6Fails(nudge(to=[forged]), "sender", offers=[{"sender": forged, "slots": [SLOT]}])
+
+    def test_nudge_blocks_the_owner_or_her_own_address_as_its_recipient(self):
+        self.assertG6Fails(nudge(to=[OWNER]), "owner", offered=set(), offered_to={OWNER: {SLOT, SLOT2, SLOT3}})
+        self.assertG6Fails(nudge(to=[DORIS]), "self", offered=set(), offered_to={DORIS: {SLOT, SLOT2, SLOT3}})
+
+    def test_nudge_blocks_without_the_owners_blind_copy_or_with_another(self):
+        self.assertG6Fails(nudge(bcc=[]), "owner")
+        self.assertG6Fails(nudge(bcc=[PAT]), "owner")
+        self.assertG6Fails(nudge(bcc=[OWNER, PAT]), "owner")
+
+    def test_nudge_blocks_a_silenced_recipient(self):
+        result = self.check(nudge(), **no_message(stopped={RAE}))
+        self.assertBlocked(result, "G5")
+
+    def test_nudge_never_lists_a_time_the_open_offer_does_not_hold(self):
+        # SLOT4 was never offered; a nudge can only repeat (templates.md: "never a new slot")
+        result = self.check(nudge(slots={"slots": [SLOT.start_utc, SLOT4.start_utc]}), **no_message())
+        self.assertBlocked(result, "G9")
+        self.assertEqual(self.one(result, "G9").detail, {"rule": "not_offered", "start": "2026-12-08T18:00:00Z",
+                                                         "written": False})
+        self.assertEqual(result.why["text"], "Blocked by G9: the interval is not bookable (not_offered).")
+
+    def test_nudge_never_lists_an_offered_time_at_another_length(self):
+        result = self.check(nudge(slots={"duration": 45}), **no_message())
+        self.assertBlocked(result, "G9")
+        self.assertEqual(self.one(result, "G9").detail["rule"], "not_offered")
+
+    def test_nudge_never_lists_a_time_offered_to_someone_else_on_the_thread(self):
+        ctx = no_message(offered={SLOT}, offered_to={PAT: {SLOT2, SLOT3}})
+        self.assertBlocked(self.check(nudge(), **ctx), "G9")
+        self.assertPasses(self.check(nudge(slots={"slots": [SLOT.start_utc]}), **ctx))
+
+    def test_nudge_times_are_still_checked_as_bookable_now(self):
+        # an offered time that is now under 24 hours away is not nudged: the loop drops it first, and G9 holds the line
+        self.fakes["doris.slots"].bookable.return_value = (False, "under_24h")
+        result = self.check(nudge(), **no_message())
+        self.assertBlocked(result, "G9")
+        self.assertEqual(self.one(result, "G9").detail["rule"], "under_24h")
+
+    def test_nudge_with_a_ledger_that_cannot_answer_blocks(self):
+        for name in ("open_offers", "thread_held"):
+            with self.subTest(callable=name):
+                self.assertBlocked(self.check(nudge(), **no_message(**{name: raises(RuntimeError("ledger locked"))})),
+                                   "G6", status="error")
+        for bad in (None, "rae", [RAE], [{"sender": None}], [{"slots": [SLOT]}]):
+            with self.subTest(open_offers=bad):
+                self.assertBlocked(self.check(nudge(), **no_message(open_offers=lambda thread_key, bad=bad: bad)),
+                                   "G6", status="error")
+        self.assertBlocked(self.check(nudge(), **no_message(held="no")), "G6", status="error")
+
+    def test_nudge_with_a_ctx_that_lacks_the_ledger_readers_blocks(self):
+        ctx = FakeCtx(**no_message())
+        ctx.open_offers = None                 # an older loop that hands the gate no such reader
+        self.assertBlocked(gate.check(nudge(), ctx), "G6", status="error")
+
+    def test_any_other_reply_still_needs_its_message(self):
+        # only the nudge may go with no message in hand; every other template errors (blocks) without one
+        for template in ("T1", "T2", "T3", "T4", "T10", "T12", "T13", "T18"):
+            with self.subTest(template=template):
+                result = self.check(reply(template), **no_message(model_answer=answer()))
+                self.assertFalse(result.passed)
+                self.assertEqual(self.one(result, "G6").status, "error")
+
+
 # --- G7: under caps ----------------------------------------------------------------------------------
 class G7Test(GateTest):
     SEND_CAPS = (("sends_hour", caps.SENDS_PER_HOUR), ("sends_run", caps.SENDS_PER_RUN),
@@ -640,7 +794,7 @@ class G7Test(GateTest):
 
     def counts(self, **over):
         values = dict(sends_hour=0, sends_run=0, sends_thread_day=0, sends_thread_ever=0, offers_thread=0,
-                      calendar_writes_run=0, hold_notices_hour=0)
+                      nudges_thread=0, calendar_writes_run=0, hold_notices_hour=0)
         values.update(over)
         return values
 
@@ -666,10 +820,29 @@ class G7Test(GateTest):
                 self.assertEqual(self.one(result, "G7").detail["cap"], "offers_thread")
 
     def test_g7_a_resend_or_nudge_is_not_a_new_offer(self):
-        for template in ("T9", "T12"):
-            with self.subTest(template=template):
-                result = self.check(reply(template), count_values=self.counts(offers_thread=caps.OFFERS_PER_THREAD_EVER))
-                self.assertEqual(self.one(result, "G7").status, "pass")
+        full = self.counts(offers_thread=caps.OFFERS_PER_THREAD_EVER)
+        self.assertEqual(self.one(self.check(reply("T12"), count_values=full), "G7").status, "pass")
+        self.assertEqual(self.one(self.check(nudge(), **no_message(count_values=full)), "G7").status, "pass")
+
+    def test_g7_blocks_a_second_nudge_on_a_thread(self):
+        # once per offer, once per thread, never a second (templates.md, T9)
+        result = self.check(nudge(), **no_message(count_values=self.counts(nudges_thread=caps.NUDGES_PER_THREAD_EVER)))
+        self.assertBlocked(result, "G7")
+        self.assertEqual(self.one(result, "G7").detail["cap"], "nudges_thread")
+        self.assertEqual(result.why["text"], "Blocked by G7: a cap is reached (nudge).")
+
+    def test_g7_a_nudge_is_a_send_under_every_send_cap_too(self):
+        for name, limit in self.SEND_CAPS:
+            with self.subTest(cap=name):
+                result = self.check(nudge(), **no_message(count_values=self.counts(**{name: limit})))
+                self.assertBlocked(result, "G7")
+                self.assertEqual(result.why["text"], "Blocked by G7: a cap is reached (send).")
+
+    def test_g7_a_nudge_with_no_nudge_count_errors(self):
+        values = self.counts()
+        del values["nudges_thread"]
+        self.assertBlocked(self.check(nudge(), **no_message(count_values=values)), "G7", status="error")
+        self.assertEqual(self.one(self.check(reply("T2"), count_values=values), "G7").status, "pass")   # only a nudge reads it
 
     def test_g7_blocks_a_booking_at_the_calendar_write_cap(self):
         result = self.check(booking(), count_values=self.counts(calendar_writes_run=caps.CALENDAR_WRITES_PER_RUN))

@@ -168,9 +168,12 @@ def _all_open_slots(thread):
 
 
 def _after_newest_offer(f):
-    """True when the message reached her after her newest open offer to the sender went out (its send
-    time, set again whenever a restart sends it). Either time unknown is False: fail closed."""
+    """True when the message reached her after her newest open offer to the sender last went out: its
+    send time (set again whenever a restart sends it), or the time of its nudge when one went (a nudge
+    lists the offer's times again, numbered anew once one is dropped). A time unknown is False: fail
+    closed."""
     sent = [o.get("created") for o in f.thread.open_offers]
+    sent += [o["nudged"] for o in f.thread.open_offers if o.get("nudged") is not None]
     if not sent or not all(_aware(s) for s in sent) or not _aware(f.arrived):
         return False
     return f.arrived > max(sent)
@@ -313,8 +316,13 @@ def decide(f):
     if resumed is not None:
         return resumed
 
-    # A held thread stays Shane's: nothing more is sent on it, and no new notice.
+    # A held thread stays Shane's: nothing more is sent on it, and no new notice. One thing is said
+    # by name on the digest (ruling 17): a cancel or a move for a booking she found gone from the
+    # calendar is "a cancel or move for a booking I don't have".
     if t.held:
+        if t.gone_booking and f.answer is not None and f.answer.ok and cls in ("cancel", "move"):
+            return Plan(action="thread_held", outcome="hold:not_in_ledger", why=_why("hold.not_in_ledger"),
+                        hold_code="hold.not_in_ledger")
         return Plan(action="thread_held", outcome="hold:thread_held", why=_why("hold.thread_held"),
                     hold_code="hold.thread_held")
 

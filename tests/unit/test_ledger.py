@@ -84,7 +84,7 @@ class OpenAndSchema(Base):
     def test_a_version_2_ledger_gains_the_direct_column_and_keeps_its_bookings(self):
         self.db.start_run(RUN, "sandbox", T0)
         self.db.record_booking("doris-1", K1, TH, PRIYA, slot(2, 18), T0, direct=True)
-        self.db.close()
+        self.make_version_3()                   # a 2 has nothing a 3 or a 4 added
         cols = [r[1] for r in self.raw("PRAGMA table_info(bookings)") if r[1] != "direct"]
         self.raw("CREATE TABLE b2 AS SELECT %s FROM bookings" % ", ".join(cols))
         self.raw("DROP TABLE bookings")
@@ -97,6 +97,110 @@ class OpenAndSchema(Base):
         self.assertIsNone(b["direct"])          # recorded before the ledger kept it: unknown, never guessed here
         self.db.record_booking("doris-2", K1, TH, PRIYA, slot(3, 18), T0, run_id=RUN, direct=False)
         self.assertIs(self.db.booking("doris-2")["direct"], False)
+
+    # The two tables version 4 changed, exactly as version 3 made them (main at fd9128f).
+    V3_OFFERS = """CREATE TABLE offers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, thread_key TEXT NOT NULL, thread_norm TEXT NOT NULL,
+        sender TEXT NOT NULL, length_min INTEGER NOT NULL, created_utc TEXT NOT NULL, expires_utc TEXT NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0, closed_reason TEXT, mid_norm TEXT)"""
+    V3_OFFER_SLOTS = """CREATE TABLE offer_slots (
+        offer_id INTEGER NOT NULL, idx INTEGER NOT NULL, start_utc TEXT NOT NULL, end_utc TEXT NOT NULL,
+        PRIMARY KEY (offer_id, idx))"""
+
+    def make_version_3(self):
+        """This ledger's file as version 3 wrote it: no followups table, offers with no nudged_utc and
+        offer_slots with no dropped, every row kept."""
+        self.db.close()
+        con = sqlite3.connect(self.path)
+        try:
+            con.executescript("""
+                DROP INDEX followups_by_offer; DROP INDEX followups_by_booking; DROP TABLE followups;
+                ALTER TABLE offers RENAME TO offers4; DROP INDEX offers_by_send; %s;
+                INSERT INTO offers SELECT id, thread_key, thread_norm, sender, length_min, created_utc, expires_utc,
+                    used, closed_reason, mid_norm FROM offers4;
+                DROP TABLE offers4;
+                CREATE UNIQUE INDEX offers_by_send ON offers (mid_norm) WHERE mid_norm IS NOT NULL;
+                ALTER TABLE offer_slots RENAME TO slots4; %s;
+                INSERT INTO offer_slots SELECT offer_id, idx, start_utc, end_utc FROM slots4;
+                DROP TABLE slots4;
+                UPDATE schema_version SET version = 3;
+            """ % (self.V3_OFFERS, self.V3_OFFER_SLOTS))
+            con.commit()
+        finally:
+            con.close()
+
+    def test_a_version_3_ledger_gains_follow_ups_and_keeps_every_row(self):
+        # the live ledger on our server is a 3: it is brought up in place the first time this Doris opens it
+        self.db.start_run(RUN, "sandbox", T0)
+        self.message()
+        used = self.db.create_offer(TH, PRIYA, [slot(2, 18), slot(3, 19)], 30, T0, T0 + dt.timedelta(days=7),
+                                    message_id="<o1@fastmail.com>")
+        self.db.use_offer(used)
+        still = self.db.create_offer("t2@x.example", PRIYA, [slot(7, 18), slot(8, 18), slot(9, 18)], 45, T0,
+                                     T0 + dt.timedelta(days=7), message_id="<o2@fastmail.com>")
+        self.db.record_booking("doris-1", K1, TH, PRIYA, slot(2, 18), T0, direct=False)
+        self.db.set_booking_state("doris-1", "confirmed")
+        self.reply("<o1@fastmail.com>")
+        self.db.record_hold("t3@x.example", K2, "hold.money", None, T0)
+        self.make_version_3()
+        self.assertEqual(self.raw("SELECT name FROM sqlite_master WHERE name LIKE 'followups%'"), [])
+        self.assertNotIn("nudged_utc", [r[1] for r in self.raw("PRAGMA table_info(offers)")])
+        self.assertNotIn("dropped", [r[1] for r in self.raw("PRAGMA table_info(offer_slots)")])
+
+        self.db = Ledger(self.path, create=False)
+        self.assertEqual(self.raw("SELECT version FROM schema_version"), [(4,)])
+        self.assertEqual(self.raw("PRAGMA integrity_check"), [("ok",)])
+        [o] = self.db.open_offers("t2@x.example", T0)
+        self.assertEqual((o["id"], o["slots"], o["length_min"], o["created"], o["nudged"]),
+                         (still, [slot(7, 18), slot(8, 18), slot(9, 18)], 45, T0, None))
+        self.assertEqual(self.db.offer_for_send("<o1@fastmail.com>")["id"], used)
+        self.assertEqual(self.db.offer_holding(TH, slot(3, 19)), used)
+        self.assertEqual([b["booking_id"] for b in self.db.future_bookings(T0)], ["doris-1"])
+        self.assertIs(self.db.booking("doris-1")["direct"], False)
+        self.assertTrue(self.db.thread_held("t3@x.example"))
+        self.assertEqual(self.db.send("<o1@fastmail.com>")["state"], "pending")
+        self.assertEqual(self.db.open_followups(), [])           # an offer made before follow-ups has none
+        # and everything version 4 adds works on it
+        fid, new = self.db.file_followup("nudge", "t2@x.example", PRIYA, K2, T0 + 48 * H, T0, offer_id=still)
+        self.assertTrue(new)
+        self.db.mark_nudged(still, [slot(7, 18), slot(9, 18)], T0 + 48 * H)
+        self.assertEqual(self.db.open_offers("t2@x.example", T0 + 48 * H)[0]["slots"], [slot(7, 18), slot(9, 18)])
+        self.assertEqual(self.db.mark_booking_gone("doris-1", "<n1@fastmail.com>", T0),
+                         self.db.followup_for_booking("doris-1")["id"])
+        # opened again it is a 4 and nothing is brought up twice
+        self.db.close()
+        self.db = Ledger(self.path, create=False)
+        self.assertEqual(self.db.followup(fid)["state"], "open")
+        self.assertEqual(self.db.booking("doris-1")["state"], "gone")
+
+    def test_a_version_3_upgrade_that_fails_part_way_leaves_the_file_a_3(self):
+        # all of it is one transaction: the version is written last, so a file is a whole 3 or a whole 4
+        oid = self.db.create_offer(TH, PRIYA, [slot(2, 18)], 30, T0, T0 + dt.timedelta(days=7))
+        self.make_version_3()
+        self.raw("ALTER TABLE offer_slots ADD COLUMN dropped INTEGER NOT NULL DEFAULT 0")   # the 2nd step will fail
+        with self.assertRaises(LedgerError):
+            Ledger(self.path, create=False)
+        self.assertEqual(self.raw("SELECT version FROM schema_version"), [(3,)])
+        self.assertNotIn("nudged_utc", [r[1] for r in self.raw("PRAGMA table_info(offers)")])
+        self.assertEqual(self.raw("SELECT name FROM sqlite_master WHERE name = 'followups'"), [])
+        self.assertEqual(self.raw("SELECT id FROM offers"), [(oid,)])
+        self.db = Ledger(os.path.join(self._tmp.name, "other.sqlite"))      # for tearDown
+
+    def test_a_version_2_ledger_comes_all_the_way_up(self):
+        self.db.start_run(RUN, "sandbox", T0)
+        oid = self.db.create_offer(TH, PRIYA, [slot(2, 18), slot(3, 19)], 30, T0, T0 + dt.timedelta(days=7))
+        self.db.record_booking("doris-1", K1, TH, PRIYA, slot(2, 18), T0, direct=True)
+        self.make_version_3()
+        cols = [r[1] for r in self.raw("PRAGMA table_info(bookings)") if r[1] != "direct"]
+        self.raw("CREATE TABLE b2 AS SELECT %s FROM bookings" % ", ".join(cols))
+        self.raw("DROP TABLE bookings")
+        self.raw("ALTER TABLE b2 RENAME TO bookings")
+        self.raw("UPDATE schema_version SET version = 2")
+        self.db = Ledger(self.path)
+        self.assertEqual(self.raw("SELECT version FROM schema_version"), [(4,)])
+        self.assertIsNone(self.db.booking("doris-1")["direct"])
+        self.assertEqual(self.db.open_offers(TH, T0)[0]["id"], oid)
+        self.assertEqual(self.db.file_followup("nudge", TH, PRIYA, K1, T0 + H, T0, offer_id=oid), (1, True))
 
     def test_a_version_1_ledger_is_still_refused(self):
         self.raw("UPDATE schema_version SET version = 1")
@@ -646,6 +750,201 @@ class Bookings(Base):
             self.book(bid, thread=bid)
             self.db.set_booking_state(bid, state)
         self.assertEqual([b["booking_id"] for b in self.db.unfinished_bookings()], ["doris-1", "doris-2", "doris-3"])
+
+
+class FollowUps(Base):
+    """The follow-up: one dated entry per offer (the nudge) and per booking (the calendar check)."""
+    DUE = T0 + 48 * H
+
+    def setUp(self):
+        super().setUp()
+        self.db.start_run(RUN, "sandbox", T0)
+        self.oid = self.db.create_offer(TH, PRIYA, [slot(2, 18), slot(3, 19), slot(4, 20)], 30, T0,
+                                        T0 + dt.timedelta(days=7), message_id="<o1@fastmail.com>")
+
+    def nudge(self, **kw):
+        kw.setdefault("offer_id", self.oid)
+        return self.db.file_followup("nudge", TH, PRIYA, K1, kw.pop("due", self.DUE), kw.pop("now", T0), **kw)
+
+    def booked(self, bid="doris-1", state="confirmed", thread=TH):
+        self.db.record_booking(bid, K1, thread, PRIYA, slot(2, 18), T0, direct=False)
+        self.db.set_booking_state(bid, state)
+
+    def test_filed_once_dated_and_open(self):
+        fid, new = self.nudge(detail={"subject": "Intro call", "zone": "Eastern", "references": ["<r1@x.example>"]})
+        self.assertTrue(new)
+        f = self.db.followup(fid)
+        self.assertEqual((f["kind"], f["thread_key"], f["sender"], f["message_key"], f["offer_id"], f["booking_id"]),
+                         ("nudge", TH, PRIYA, K1, self.oid, None))
+        self.assertEqual((f["due"], f["filed"], f["state"], f["outcome"], f["closed"]), (self.DUE, T0, "open", None, None))
+        self.assertEqual(f["detail"], {"subject": "Intro call", "zone": "Eastern", "references": ["<r1@x.example>"]})
+        self.assertEqual(self.db.followup_for_offer(self.oid)["id"], fid)
+        self.assertEqual(self.other().followup(fid)["due"], self.DUE)          # committed before it returned
+        self.assertIsNone(self.db.followup(fid + 1))
+        self.assertIsNone(self.db.followup_for_offer(self.oid + 1))
+
+    def test_filed_again_it_is_the_same_entry_and_follows_the_offer_while_open(self):
+        fid, _ = self.nudge(detail={"subject": "a"})
+        again, new = self.nudge(due=self.DUE + H, detail={"subject": "b"})     # a restart sent the offer later
+        self.assertEqual((again, new), (fid, False))
+        self.assertEqual((self.db.followup(fid)["due"], self.db.followup(fid)["detail"]), (self.DUE + H, {"subject": "b"}))
+        self.assertTrue(self.db.close_followup(fid, "nudged", self.DUE))
+        self.assertEqual(self.nudge(due=self.DUE + 5 * H), (fid, False))       # settled: never opened or moved again
+        f = self.db.followup(fid)
+        self.assertEqual((f["state"], f["outcome"], f["due"], f["closed"]), ("done", "nudged", self.DUE + H, self.DUE))
+        self.assertEqual(self.raw("SELECT COUNT(*) FROM followups"), [(1,)])
+
+    def test_a_booking_check_is_one_per_booking(self):
+        self.booked()
+        fid, new = self.db.file_followup("booking_check", TH, PRIYA, K1, slot(2, 18).start_utc, T0,
+                                         booking_id="doris-1", detail={"name": "Priya Raman"})
+        self.assertTrue(new)
+        self.assertEqual(self.db.followup_for_booking("doris-1")["id"], fid)
+        self.assertEqual(self.db.file_followup("booking_check", TH, PRIYA, K1, slot(2, 18).start_utc, T0,
+                                               booking_id="doris-1"), (fid, False))
+        self.assertIsNone(self.db.followup_for_booking("doris-2"))
+
+    def test_each_kind_names_its_own_thing_and_nothing_else(self):
+        for kind, kw in (("nudge", {}), ("nudge", {"booking_id": "doris-1"}), ("booking_check", {}),
+                         ("booking_check", {"offer_id": self.oid}), ("call", {"offer_id": self.oid}),
+                         ("nudge", {"offer_id": self.oid, "booking_id": "doris-1"}), ("nudge", {"offer_id": "1"}),
+                         ("nudge", {"offer_id": True}), ("nudge", {"offer_id": self.oid, "detail": ["x"]})):
+            with self.subTest(kind=kind, **kw), self.assertRaises(ValueError):
+                self.db.file_followup(kind, TH, PRIYA, K1, self.DUE, T0, **kw)
+        with self.assertRaises(ValueError):
+            self.db.file_followup("nudge", TH, PRIYA, K1, self.DUE.replace(tzinfo=None), T0, offer_id=self.oid)
+        self.assertEqual(self.raw("SELECT COUNT(*) FROM followups"), [(0,)])
+
+    def test_open_ones_come_soonest_due_first_and_by_kind_and_date(self):
+        second = self.db.create_offer("t2@x.example", PRIYA, [slot(7, 18)], 30, T0, T0 + dt.timedelta(days=7))
+        late, _ = self.nudge(due=self.DUE + H)
+        soon, _ = self.db.file_followup("nudge", "t2@x.example", PRIYA, K2, self.DUE, T0, offer_id=second)
+        self.booked()
+        check, _ = self.db.file_followup("booking_check", TH, PRIYA, K1, self.DUE - H, T0, booking_id="doris-1")
+        self.assertEqual([f["id"] for f in self.db.open_followups()], [check, soon, late])
+        self.assertEqual([f["id"] for f in self.db.open_followups(kind="nudge")], [soon, late])
+        self.assertEqual([f["id"] for f in self.db.open_followups(kind="nudge", due_by=self.DUE)], [soon])
+        self.assertEqual(self.db.open_followups(kind="nudge", due_by=self.DUE - dt.timedelta(seconds=1)), [])
+        self.db.close_followup(soon, "no_reply_needed", self.DUE)
+        self.assertEqual([f["id"] for f in self.db.open_followups(kind="nudge")], [late])
+        with self.assertRaises(ValueError):
+            self.db.open_followups(kind="call")
+
+    def test_settled_once(self):
+        fid, _ = self.nudge()
+        self.assertTrue(self.db.close_followup(fid, "nudged", self.DUE))
+        self.assertFalse(self.db.close_followup(fid, "expired", self.DUE + H))
+        self.assertEqual(self.db.followup(fid)["outcome"], "nudged")
+        with self.assertRaises(KeyError):
+            self.db.close_followup(fid + 9, "nudged", self.DUE)
+
+    # --- the nudge's own mark on the offer -----------------------------------------------------
+    def test_a_nudge_drops_slots_keeps_the_rest_and_moves_neither_date(self):
+        self.db.mark_nudged(self.oid, [slot(4, 20), slot(2, 18)], self.DUE)
+        [o] = self.db.open_offers(TH, self.DUE)
+        self.assertEqual(o["slots"], [slot(2, 18), slot(4, 20)])          # in offered order, the dropped one closed
+        self.assertEqual((o["created"], o["expires"], o["nudged"]), (T0, T0 + dt.timedelta(days=7), self.DUE))
+        self.assertEqual(self.db.offer_count(TH), 1)                      # not a new offer
+        # a dropped time was still offered once: it never comes back, and a booking made from it is still found
+        self.assertEqual(self.db.offered_starts(TH), {slot(2, 18).start_utc, slot(3, 19).start_utc, slot(4, 20).start_utc})
+        self.assertEqual(self.db.offer_holding(TH, slot(3, 19)), self.oid)
+
+    def test_a_nudge_never_adds_a_time_or_brings_a_dropped_one_back(self):
+        for keep in ([slot(7, 18)], [slot(2, 18), slot(7, 18)], [slot(2, 18, length=45)], []):
+            with self.subTest(keep=len(keep)), self.assertRaises(ValueError):
+                self.db.mark_nudged(self.oid, keep, self.DUE)
+        self.assertEqual(self.db.open_offers(TH, T0)[0]["slots"], [slot(2, 18), slot(3, 19), slot(4, 20)])
+        self.assertIsNone(self.db.open_offers(TH, T0)[0]["nudged"])
+        self.db.mark_nudged(self.oid, [slot(2, 18)], self.DUE)
+        with self.assertRaises(ValueError):
+            self.db.mark_nudged(self.oid, [slot(2, 18), slot(3, 19)], self.DUE + H)
+        self.db.mark_nudged(self.oid, [slot(2, 18)], self.DUE + H)        # the same nudge again after a restart
+        self.assertEqual(self.db.open_offers(TH, T0)[0]["nudged"], self.DUE + H)
+        with self.assertRaises(KeyError):
+            self.db.mark_nudged(self.oid + 9, [slot(2, 18)], self.DUE)
+
+    def test_one_offer_in_any_state(self):
+        o = self.db.offer(self.oid)
+        self.assertEqual((o["id"], o["used"], o["closed_reason"], o["nudged"]), (self.oid, False, None, None))
+        self.db.close_offers(TH, "no_thanks")
+        self.assertEqual(self.db.offer(self.oid)["closed_reason"], "no_thanks")
+        self.assertIsNone(self.db.offer(self.oid + 9))
+
+    def test_nudges_are_counted_per_thread_in_any_state(self):
+        self.assertEqual(self.db.count_nudges(TH), 0)
+        self.db.record_send("<n1@fastmail.com>", "send_reply", "T9", TH, PRIYA, sha("b"), T0, RUN)
+        self.db.record_send("<o9@fastmail.com>", "send_reply", "T2", TH, PRIYA, sha("b"), T0, RUN)
+        self.db.record_send("<n2@fastmail.com>", "send_reply", "T9", "t2@x.example", PRIYA, sha("b"), T0, RUN)
+        self.assertEqual(self.db.count_nudges("<" + TH + ">"), 1)         # pending counts: fail closed
+        self.assertEqual(self.db.count_nudges("t3@x.example"), 0)
+
+    def test_has_the_sender_written_since(self):
+        self.db.record_message(K1, TH, PRIYA, T0, "done")
+        self.assertFalse(self.db.wrote_since(PRIYA, T0))                  # at the offer's own second: not since
+        self.assertTrue(self.db.wrote_since(" Priya@Northwind.example ", T0 - H))
+        self.db.record_message(K2, "t9@x.example", "sam@contoso.example", T0 + H, "held")
+        self.assertFalse(self.db.wrote_since(PRIYA, T0))                  # someone else's mail is not theirs
+        self.db.record_sensitive_skip("s1@bank.example", PRIYA, sha("raw"), "one-time-code", T0 + 2 * H)
+        self.assertTrue(self.db.wrote_since(PRIYA, T0))                   # sensitive mail skipped unread still counts
+        self.assertFalse(self.db.wrote_since(PRIYA, T0 + 2 * H))
+
+    def test_the_message_her_offer_answered_is_never_mail_since_it(self):
+        # a sandbox clock can stand still while its mail is dated later: the request is still not a reply
+        self.db.record_message(K1, TH, PRIYA, T0 + H, "done")
+        self.assertTrue(self.db.wrote_since(PRIYA, T0))
+        self.assertFalse(self.db.wrote_since(PRIYA, T0, but=K1))
+        self.assertFalse(self.db.wrote_since(PRIYA, T0, but="<" + K1 + ">"))
+        self.db.record_message(K2, TH, PRIYA, T0 + 2 * H, "done")         # their next mail is one
+        self.assertTrue(self.db.wrote_since(PRIYA, T0, but=K1))
+
+    # --- ruling 17's mark ------------------------------------------------------------------------
+    def test_a_booking_found_gone_is_marked_held_and_kept_open_in_one_step(self):
+        self.booked()
+        check, _ = self.db.file_followup("booking_check", TH, PRIYA, K1, slot(2, 18).start_utc, T0, booking_id="doris-1")
+        self.assertEqual(self.db.gone_unfinished(), [])
+        self.assertEqual(self.db.mark_booking_gone("doris-1", "<n1@fastmail.com>", T0 + H), check)
+        seen = self.other()                                               # all of it was committed together
+        self.assertEqual(seen.booking("doris-1")["state"], "gone")
+        self.assertTrue(seen.thread_held(TH))
+        h = seen.hold_for_message("booking:doris-1")
+        self.assertEqual((h["reason_code"], h["notice_message_id"], h["thread_key"], h["created"]),
+                         ("hold.owner_removed", "<n1@fastmail.com>", TH, T0 + H))
+        [left] = seen.gone_unfinished()
+        self.assertEqual((left["booking"]["booking_id"], left["followup"]["id"], left["notice_message_id"]),
+                         ("doris-1", check, "<n1@fastmail.com>"))
+        self.assertEqual(seen.future_bookings(T0), [])                    # never read again
+        self.db.close_followup(check, "gone", T0 + H)
+        self.assertEqual(self.db.gone_unfinished(), [])
+
+    def test_a_booking_from_before_follow_ups_gets_one_when_it_is_found_gone(self):
+        self.booked()
+        fid = self.db.mark_booking_gone("doris-1", None, T0 + H)          # None: past the hourly notice cap
+        f = self.db.followup(fid)
+        self.assertEqual((f["kind"], f["booking_id"], f["thread_key"], f["sender"], f["message_key"], f["due"],
+                          f["filed"], f["state"], f["detail"]),
+                         ("booking_check", "doris-1", TH, PRIYA, K1, slot(2, 18).start_utc, T0 + H, "open", {}))
+        self.assertEqual([g["notice_message_id"] for g in self.db.gone_unfinished()], [None])
+
+    def test_only_a_booking_on_the_calendar_can_be_found_gone(self):
+        for state in ("intent", "cancelled", "gone", "removed", "blocked", "unconfirmed", "collision_unresolved"):
+            bid = "doris-" + state
+            self.booked(bid, state, thread=bid)
+            with self.subTest(state=state), self.assertRaises(ValueError):
+                self.db.mark_booking_gone(bid, None, T0)
+            self.assertEqual(self.db.booking(bid)["state"], state)
+            self.assertFalse(self.db.thread_held(bid))
+        with self.assertRaises(KeyError):
+            self.db.mark_booking_gone("doris-none", None, T0)
+        self.assertEqual(self.raw("SELECT COUNT(*) FROM holds"), [(0,)])
+
+    def test_a_gone_booking_held_through_its_own_message_is_not_unfinished(self):
+        # read again after a restart, her booking is found gone and held on that message (loop.resume_booking):
+        # that hold is the message's own, so ruling 17 has nothing left to finish
+        self.booked()
+        check, _ = self.db.file_followup("booking_check", TH, PRIYA, K1, slot(2, 18).start_utc, T0, booking_id="doris-1")
+        self.db.set_booking_state("doris-1", "gone")
+        self.db.record_hold(TH, K1, "hold.owner_removed", "<n1@fastmail.com>", T0)
+        self.assertEqual(self.db.gone_unfinished(), [])
 
 
 class Holds(Base):

@@ -585,7 +585,7 @@ def _s1(s):
     return lines
 
 
-S2_KEYS = ("date", "handled", "held", "approvals", "holds", "offered_to", "suspicious", "quarantined",
+S2_KEYS = ("date", "handled", "held", "approvals", "holds", "offered_to", "follow_ups", "suspicious", "quarantined",
            "also_asked", "opted_out", "not_addressed", "sensitive", "read_failures", "model_calls", "cost_usd",
            "verified")
 
@@ -593,7 +593,8 @@ S2_KEYS = ("date", "handled", "held", "approvals", "holds", "offered_to", "suspi
 def empty_digest(now):
     """S2 slots with every count at zero (digest.build fills them from receipts)."""
     return {"date": now, "handled": 0, "held": 0, "approvals": 0, "holds": [], "offered_to": [],
-            "suspicious": [], "quarantined": 0, "also_asked": [], "opted_out": [], "not_addressed": 0,
+            "follow_ups": (0, 0, 0), "suspicious": [], "quarantined": 0, "also_asked": [], "opted_out": [],
+            "not_addressed": 0,
             "sensitive": [], "read_failures": 0, "model_calls": 0, "cost_usd": 0.0, "verified": False}
 
 
@@ -626,6 +627,17 @@ def _s2(s):
     offered = _names(s["offered_to"], "offered_to")
     if offered:
         lines.append("Offered times to: " + ", ".join(offered))
+    # The follow-up (brief 6.2, decision 111): what she filed in her ledger in the period, and the nudges
+    # that went. Each part is left out at zero, and the whole line when all three are.
+    if not isinstance(s["follow_ups"], (list, tuple)) or len(s["follow_ups"]) != 3:
+        raise TemplateError("follow_ups holds three counts: nudges filed, booking checks filed, nudges sent")
+    nudges, checks, nudged = [_int(v, 0, 10 ** 6, "follow_ups") for v in s["follow_ups"]]
+    filed = ["%d %s%s" % (k, word, "" if k == 1 else "s")
+             for k, word in ((nudges, "nudge"), (checks, "booking check")) if k]
+    follow = (["Follow-ups filed: %s." % ", ".join(filed)] if filed else []) + (
+        ["Nudges sent: %d." % nudged] if nudged else [])
+    if follow:
+        lines.append(" ".join(follow))
     opted = []
     for pair in s["opted_out"]:
         if not isinstance(pair, (list, tuple)) or len(pair) != 2:
