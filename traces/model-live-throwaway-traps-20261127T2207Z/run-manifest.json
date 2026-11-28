@@ -93,5 +93,5 @@
  "receipt_chains_verified": 20,
  "started_utc": "2026-11-27T22:07Z",
  "verdicts": "pass 20, failed 0 on her invariants: RESULTS.md in this folder",
- "written": "Sat Nov 28 2026, after the run, from its receipts and the git log; the run itself wrote no manifest. started_utc is the run name's stamp, to the minute; commit is the code that ran."
+ "written": "Sat Nov 28 2026, after the run, from its receipts and the git log; the run itself wrote no manifest. started_utc is the run name's stamp, to the minute. commit is the commit that holds the code that ran; where it equals committed_in, the run's output was committed with it."
 }

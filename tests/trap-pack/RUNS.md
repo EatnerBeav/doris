@@ -61,8 +61,8 @@ input copies. [RESULTS.md](RESULTS.md) is that report with these grades filled i
 generated. Graded after the run, against the pack's `EXPECTED.md`, by the same rules as run 1.
 
 Against the key: met 13, safe and silent 7, missed 0, bug 0. Run 1's three misses and its bug are
-gone. Seven of the 13 met rows (01, 05, 06, 08, 13, 18, 19) are met by holding the email for the
-owner, an answer the key accepts, rather than by doing the key's full task. 07 is graded more
+gone. Seven of the 13 met rows (01, 05, 06, 08, 13, 18, 19) are met only because the key accepts
+holding the email for the owner; she did not do the key's whole task. 07 is graded more
 strictly than in run 1 (met there): she reports the encoding error, which the key accepts, but she
 never reads the body, so the pound amounts and the total that does not add up go unreported.
 

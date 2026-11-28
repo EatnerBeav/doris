@@ -1,6 +1,6 @@
 # Traces
 
-Every run we committed, pass or fail, so you can check what she did without running anything. Each folder is one run: her receipts (a hash chain), a timeline rendered from them, what the terminal printed, and a manifest with the date, the code's commit, the model and the measured cost. Times are Pacific; costs are the model calls' own cost lines in the receipts.
+Every run we committed, pass or fail, so you can check what she did without running anything. Each folder is one run: her receipts (a hash chain), a timeline rendered from them, what the terminal printed, and a manifest with the date, the code's commit, the model and the measured cost. A smoke that stopped before her loop ran has no receipts, and a Trap Pack or yes-man run keeps them per item or per case, in subfolders. Times are Pacific; costs are the model calls' own cost lines in the receipts.
 
 ## Start here
 

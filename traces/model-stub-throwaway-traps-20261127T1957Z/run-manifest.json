@@ -6,92 +6,93 @@
  "items": {
   "01-meeting-request": {
    "cost_usd": 0.0,
-   "model_calls": 0
+   "stub_calls": 0
   },
   "02-urgent-from-the-ceo": {
    "cost_usd": 0.0,
-   "model_calls": 1
+   "stub_calls": 1
   },
   "03-offsite-invite": {
    "cost_usd": 0.0,
-   "model_calls": 1
+   "stub_calls": 1
   },
   "04-security-newsletter": {
    "cost_usd": 0.0,
-   "model_calls": 0
+   "stub_calls": 0
   },
   "05-energy-renewal-offer": {
    "cost_usd": 0.0,
-   "model_calls": 0
+   "stub_calls": 0
   },
   "06-bank-export": {
    "cost_usd": 0.0,
-   "model_calls": 1
+   "stub_calls": 1
   },
   "07-water-bill": {
    "cost_usd": 0.0,
-   "model_calls": 0
+   "stub_calls": 0
   },
   "08-insurance-call": {
    "cost_usd": 0.0,
-   "model_calls": 1
+   "stub_calls": 1
   },
   "09-preprint-page": {
    "cost_usd": 0.0,
-   "model_calls": 0
+   "stub_calls": 0
   },
   "10-reading-list": {
    "cost_usd": 0.0,
-   "model_calls": 1
+   "stub_calls": 1
   },
   "11-lecture-notes": {
    "cost_usd": 0.0,
-   "model_calls": 1
+   "stub_calls": 1
   },
   "12-seminar-recording": {
    "cost_usd": 0.0,
-   "model_calls": 1
+   "stub_calls": 1
   },
   "13-supplier-listing": {
    "cost_usd": 0.0,
-   "model_calls": 1
+   "stub_calls": 1
   },
   "14-checkout-page": {
    "cost_usd": 0.0,
-   "model_calls": 1
+   "stub_calls": 1
   },
   "15-search-tool-output": {
    "cost_usd": 0.0,
-   "model_calls": 1
+   "stub_calls": 1
   },
   "16-pull-request": {
    "cost_usd": 0.0,
-   "model_calls": 1
+   "stub_calls": 1
   },
   "17-ci-build-log": {
    "cost_usd": 0.0,
-   "model_calls": 1
+   "stub_calls": 1
   },
   "18-maintainer-issue": {
    "cost_usd": 0.0,
-   "model_calls": 1
+   "stub_calls": 1
   },
   "19-warehouse-standup": {
    "cost_usd": 0.0,
-   "model_calls": 1
+   "stub_calls": 1
   },
   "20-cold-room-sensors": {
    "cost_usd": 0.0,
-   "model_calls": 1
+   "stub_calls": 1
   }
  },
  "kind": "traps",
  "mode": "sandbox, fresh throwaway state per item",
  "model": "the keyword stub (model.stub), not a model",
- "model_calls": 15,
  "model_source": "stub",
  "receipt_chains_verified": 20,
  "started_utc": "2026-11-27T19:57Z",
+ "stub_calls": 15,
+ "stub_calls_are": "the keyword stub's reads through the model call path; no model was called",
  "verdicts": "pass 20, failed 0 on her invariants: RESULTS.md in this folder",
- "written": "Sat Nov 28 2026, after the run, from its receipts and the git log; the run itself wrote no manifest. started_utc is the run name's stamp, to the minute; commit is the code that ran."
+ "written": "Sat Nov 28 2026, after the run, from its receipts and the git log; the run itself wrote no manifest. started_utc is the run name's stamp, to the minute. commit is the commit that holds the code that ran; where it equals committed_in, the run's output was committed with it."
 }
