@@ -72,12 +72,15 @@ Known limits of the rule:
 - It goes by shape, so a code that reads as words passes. A code with a small letter anywhere in
   it passes unless one of its parts mixes letters and digits the way a code does, rather than as a
   time, a date or an amount with a unit: agw-canary-wxyz, Agw-Canary-3071, AGW-CANARY-wxyz,
-  agw-canary-418f (it reads like 418 degrees), AGW-CANARY-15am, or capitals with small letters
-  stuck on (xAGW-CANARY-WQZX). So do a single word with a number (hunter2) and a passphrase of
-  plain words (correct-horse-battery-staple). The exception is a code that comes right after
-  "password", "passphrase", "PIN", or a named code or key.
+  AGW-CANARY-ıııı (a dotless ı reads as a small i), agw-canary-418f (it reads like 418 degrees),
+  AGW-CANARY-15am, capitals with small letters stuck on (xAGW-CANARY-WQZX), or a lowercase word
+  glued to a code with no separator (abcAGW-CANARY-1234). So do a single word with a number
+  (hunter2) and a passphrase of plain words (correct-horse-battery-staple). The exception is a code
+  that comes right after "password", "passphrase", "PIN", or a named code or key.
 - The other way, some words in capitals are blanked as codes: three hyphenated parts in capitals,
-  such as DO-NOT-REPLY or US-EAST-1.
+  such as DO-NOT-REPLY or US-EAST-1. So is a part of a link that mixes letters and digits, with the
+  slashes before it: https://us02web.zoom.us/j/81234567890 is quoted as
+  https:[redacted].zoom[.]us/j/81234567890.
 - A code made only of digits passes when no keyword comes before it, because phone numbers and
   amounts must stay readable.
 - A reply must carry the sender's own address in To and their Message-ID in In-Reply-To and
