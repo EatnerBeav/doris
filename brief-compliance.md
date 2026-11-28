@@ -2,8 +2,8 @@
 
 Every line of the organizers' pages that asks for something, or says how judges score, mapped to what we can show today.
 
-- **Read:** Fri Nov 27, 2026, 11:00 PM Pacific, from the live site: the brief with all 59 answered questions (https://agentwarehack.com/brief/ and its text copy https://agentwarehack.com/brief/agentware-brief.md), the Trap Pack page (https://agentwarehack.com/trap-pack/), the event page (https://agentwarehack.com/, for the Track 1 text and the named loopholes), the submission form (https://tally.so/r/WJzRbk) and the kickoff email. Sat Nov 28, 7:35 AM: the brief's text copy fetched again (54,173 characters, sha256 `d757889c78c794eb5ee99610bcb42130f5a60243f708f6f434342530f80b7f00`), its "What to submit", Track 1, "Scoring rubric" and "Safety bonus" sections read again, and its answered questions counted: still 59, in the same eight groups. The Trap Pack page, the event page and the form were not opened again.
-- **Checked against:** `main` at `5be0658`, Sat Nov 28, 2026, 7:25 to 8:10 AM Pacific, on a fresh clone, Linux, Python 3.13, no key. This is the second pass; the first was Fri 11:00 PM against `a13cadd`. Every command was run at `5086c7e`. Two merges landed during the pass and changed no code: PR #32 (the first live run's trace) and PR #33 (README, SAFETY.md, AGENT.md). Their files were read and checked after each merged, and the rows below are graded on the result. Every "met" below is something I ran or opened myself in this pass. Nothing is marked met on a plan, a memory note or another thread's report.
+- **Read:** Fri Nov 27, 2026, 11:00 PM Pacific, from the live site: the brief with all 59 answered questions (https://agentwarehack.com/brief/ and its text copy https://agentwarehack.com/brief/agentware-brief.md), the Trap Pack page (https://agentwarehack.com/trap-pack/), the event page (https://agentwarehack.com/, for the Track 1 text and the named loopholes), the submission form (https://tally.so/r/WJzRbk) and the kickoff email. Sat Nov 28, 7:33 AM: the brief's text copy fetched again (54,173 characters, sha256 `d757889c78c794eb5ee99610bcb42130f5a60243f708f6f434342530f80b7f00`), its "What to submit", Track 1, "Scoring rubric" and "Safety bonus" sections read again, and its answered questions counted: still 59, in the same eight groups. The Trap Pack page, the event page and the form were not opened again.
+- **Checked against:** `main` at `5be0658`, Sat Nov 28, 2026, 7:21 to 7:45 AM Pacific, on a fresh clone, Linux, Python 3.13, no key. This is the second pass; the first was Fri 11:00 PM against `a13cadd`. Every command was run at `5086c7e`. Two merges landed during the pass and changed no code: PR #32 (the first live run's trace) and PR #33 (README, SAFETY.md, AGENT.md). Their files were read and checked after each merged, and the rows below are graded on the result. Every "met" below is something I ran or opened myself in this pass. Nothing is marked met on a plan, a memory note or another thread's report.
 - **Wording:** each row states the ask in our own words and points to the place on the page that says it, so anyone can check a row against the source in seconds. The organizers' text is not reprinted here.
 - **Status words:** **met** (on main, verified) · **partly** (some of it verified, the rest absent or only on a branch) · **missing** (nothing on main yet) · **wrong** (what main does contradicts the line).
 
@@ -209,7 +209,7 @@ Seen on the way, not brief lines:
 
 ## The 59 answered questions
 
-Each answer is covered by a row above, or asks nothing of the build. Numbered in the page's order. Counted again Sat 7:35 AM: 59, in the same groups.
+Each answer is covered by a row above, or asks nothing of the build. Numbered in the page's order. Counted again Sat 7:33 AM: 59, in the same groups.
 
 | Q | Section | About | Row |
 |---|---|---|---|
@@ -254,7 +254,7 @@ Each answer is covered by a row above, or asks nothing of the build. Numbered in
 - The scopes of the keys at Fastmail, and the forwarding rule's skips (AGENT.md says the same).
 - The grades in `RUNS.md` against the pack's answer file. I read our grading, not the key.
 - The tier's name and limits in the README against Anthropic's own page.
-- Windows and macOS by hand. CI covers both: all 16 checks passed on `5086c7e`, the last commit that changed code (https://github.com/EatnerBeav/doris/commit/5086c7e). On `fd9128f`, 14 had passed and two unit legs were still running at 8:05 AM; `5be0658` changed docs only and its 7 checks passed.
+- Windows and macOS by hand. CI covers both: all 16 checks passed on `5086c7e`, the last commit that changed code (https://github.com/EatnerBeav/doris/commit/5086c7e). On `fd9128f`, 14 had passed and two unit legs were still running at 7:40 AM; `5be0658` changed docs only and its 7 checks passed.
 
 ## How to check this page again
 
