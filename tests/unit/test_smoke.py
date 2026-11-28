@@ -16,6 +16,7 @@ import email
 import email.policy
 import http.client
 import imaplib
+import itertools
 import json
 import os
 import re
@@ -30,7 +31,7 @@ from doris.adapters import jmap, live
 from doris.shapes import MailError, Slot
 from tests.unit import fake_jmap
 from tests.unit.fake_jmap import TOKEN, FakeJMAP
-from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, eml, u
+from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, eml, timed, u, vcal
 
 ENV_TEXT = ("# a test env file: every host is the fakes' 127.0.0.1\n"
             "DORIS_MAIL_ADDRESS=" + DORIS + "\n"
@@ -238,30 +239,79 @@ class SmokeTest(SmokeFixture):
         self.assertEqual({uid: msg["flags"] for uid, msg in self.inbox.messages.items()},
                          {1: set(), 2: {"doris-smoke"}})       # \Seen untouched: the fetch only peeks
 
-    def test_the_test_event_is_far_ahead_under_one_fixed_booking_id_and_gone_after(self):
-        """One fixed ID, so a run that leaves its event behind is cleaned up by the next one."""
+    def own_booking_id(self):
+        """The run's test event ID: the smoke's prefix and its UTC stamp, its trace folder's own."""
+        return smoke.SMOKE_BOOKING_PREFIX + os.path.basename(self.trace())[len("live-smoke-"):]
+
+    def test_the_test_event_is_far_ahead_under_an_id_of_its_own_and_gone_after(self):
         before = dt.datetime.now(dt.timezone.utc)
-        for _ in range(2):
-            self.lines.clear()
-            self.assertEqual(self.run_smoke(), 0)
-            self.assertEqual(self.result("caldav test event left by an earlier run"), "ok (none)")
-        self.assertTrue(ics.is_booking_id(smoke.SMOKE_BOOKING_ID))
-        # display name, query, leftover check (a 404, confirmed by a UID query), create, read back, delete,
-        # read again
-        self.assertEqual(self.dav.methods(), ["PROPFIND", "REPORT", "GET", "REPORT", "PUT", "GET", "GET", "DELETE",
-                                              "GET", "REPORT"] * 2)
-        puts = [r for r in self.dav.requests if r[0] == "PUT"]
-        for _, path, _, body in puts:
-            self.assertEqual(path, COLLECTION + smoke.SMOKE_BOOKING_ID + ".ics")
-            self.assertTrue(ics.fields_ok(body, booking_id=smoke.SMOKE_BOOKING_ID))
-            self.assertGreater(ics.read_event(body).start_utc, before + dt.timedelta(days=300))
+        self.assertEqual(self.run_smoke(), 0)
+        self.assertEqual(self.result("caldav test event left by an earlier run"), "ok (none)")
+        booking_id = self.own_booking_id()
+        self.assertRegex(booking_id, r"^doris-smoke-\d{8}T\d{6}Z\Z")
+        self.assertTrue(ics.is_booking_id(booking_id))
+        # display name, query, the leftover search (one REPORT on the prefix), create, read back, delete (its
+        # read, then the DELETE), read again (a 404, confirmed by a UID query)
+        self.assertEqual(self.dav.methods(), ["PROPFIND", "REPORT", "REPORT", "PUT", "GET", "GET", "DELETE", "GET",
+                                              "REPORT"])
+        ((_, path, _, body),) = [r for r in self.dav.requests if r[0] == "PUT"]
+        self.assertEqual(path, COLLECTION + booking_id + ".ics")
+        self.assertTrue(ics.fields_ok(body, booking_id=booking_id))
+        self.assertGreater(ics.read_event(body).start_utc, before + dt.timedelta(days=300))
         self.assertEqual(self.dav.resources, {})
 
-    def leftover(self):
+    def names_kept_after_delete(self):
+        """The calendar as Fastmail answered smoke run 2: a resource name once deleted takes no PUT again
+        (412, AlreadyExists), while a GET and a UID query find nothing under it."""
+        kept = set()
+
+        def on_request(method, name):
+            if method == "DELETE" and name in self.dav.resources:
+                kept.add(name)
+            if method == "PUT":
+                if name in kept:
+                    self.dav.status["PUT"] = 412
+                else:
+                    self.dav.status.pop("PUT", None)
+        self.dav.on_request = on_request
+        return kept
+
+    def test_each_run_writes_its_test_event_under_an_id_no_earlier_run_used(self):
+        """Smoke run 2: create 412 AlreadyExists, read back not found, and the leftover check found none.
+        Run 1 had created and deleted the one fixed ID 45 minutes before, and Fastmail keeps a deleted
+        name: a PUT under it is refused while a GET and a UID query find nothing there."""
+        kept = self.names_kept_after_delete()
+        start = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        ticks = itertools.count()
+        with mock.patch.object(livetrace, "now", lambda: start + dt.timedelta(seconds=next(ticks))):
+            for _ in range(2):
+                self.lines.clear()
+                self.assertEqual(self.run_smoke(), 0, self.lines)
+                self.assertEqual(self.result("caldav create test event"), "ok")
+                self.assertEqual(self.result("caldav read test event back, times match"), "ok")
+        puts = [r[1] for r in self.dav.requests if r[0] == "PUT"]
+        self.assertEqual((len(puts), len(set(puts)), len(kept)), (2, 2, 2))
+        self.assertEqual(self.dav.resources, {})
+
+    def leftover(self, booking_id="doris-smoke-20261127T042934Z"):
+        """A test event an earlier smoke left: under its own ID (that run's stamp) by default."""
         start = u(2027, 12, 1, 11)
-        self.dav.put(smoke.SMOKE_BOOKING_ID + ".ics", ics.build_event(
-            smoke.SMOKE_BOOKING_ID, Slot(start, start + dt.timedelta(minutes=30)), templates.PLACEHOLDER_MEETING_LINK,
+        self.dav.put(booking_id + ".ics", ics.build_event(
+            booking_id, Slot(start, start + dt.timedelta(minutes=30)), templates.PLACEHOLDER_MEETING_LINK,
             "CONFIRMED", 0, u(2026, 11, 27), None))
+
+    def test_every_test_event_earlier_runs_left_is_removed_first_and_nothing_else(self):
+        """Found by the prefix (the one fixed ID of the first runs included) and deleted; an event whose
+        UID only holds the prefix, not at its start, stays."""
+        for booking_id in ("doris-smoke-20261127T042934Z", "doris-smoke-test", "doris-cafe-doris-smoke-1"):
+            self.leftover(booking_id)
+        self.dav.put("notes.ics", vcal(timed("notes-doris-smoke-1@elsewhere.example", u(2027, 12, 2, 11),
+                                             u(2027, 12, 2, 12))))
+        self.assertEqual(self.run_smoke(), 0)
+        self.assertEqual(self.result("caldav test event left by an earlier run"), "ok (removed 2)")
+        self.assertEqual(self.result("caldav create test event"), "ok")
+        self.assertEqual(sorted(self.dav.resources), ["doris-cafe-doris-smoke-1.ics", "notes.ics"])
+        self.assert_no_value()
 
     def test_a_test_event_left_by_an_earlier_run_is_removed_first(self):
         self.leftover()
@@ -293,7 +343,8 @@ class SmokeTest(SmokeFixture):
         self.assertEqual(self.result("caldav delete test event"),
                          "CalendarError (caldav delete: 503), on each of %d tries" % smoke.CLEANUP_TRIES)
         self.assertEqual(self.result("caldav read after delete, gone"), "FAILED (still there)")
-        self.assertIn(smoke.SMOKE_BOOKING_ID, self.result("caldav test event may remain"))
+        self.assertEqual(self.result("caldav test event may remain"),
+                         "booking ID %s (the next smoke deletes it first)" % self.own_booking_id())
         self.assertEqual(self.result("smoke"), "FAILED; not run: " + NO_SEND_TO)
         del self.dav.status["DELETE"]
         self.lines.clear()
@@ -807,7 +858,8 @@ class EndToEndTest(SmokeFixture):
         observed = [l for l in lines if l["kind"] == "observed" and l["payload"].get("step") != "start"]
         self.assertEqual(len(observed), 1)                                       # that one message alone
         self.assertEqual([r[1] for r in self.dav.requests if r[0] in ("PUT", "DELETE")],
-                         [COLLECTION + smoke.SMOKE_BOOKING_ID + ".ics"] * 2)     # the round trip's own event only
+                         [COLLECTION + smoke.SMOKE_BOOKING_PREFIX + os.path.basename(self.trace())[len("live-smoke-"):]
+                          + ".ics"] * 2)                                         # the round trip's own event only
         self.assertEqual({r[3]["authorization"] for r in self.jmap.requests}, {"Bearer " + TOKEN})
         self.assertEqual({r[3]["authorization"] for r in self.wolf.requests}, {"Bearer " + WOLF_TOKEN})
         fetches = [args for verb, args in self.imap.commands if verb == "UID SEARCH" and "HEADER" in args]

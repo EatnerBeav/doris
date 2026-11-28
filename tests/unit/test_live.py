@@ -1748,6 +1748,43 @@ class GetTest(CalFixture):
             self.fails(CalendarError, self.cal.get, BID)
 
 
+class BookingIdsTest(CalFixture):
+    """booking_ids(prefix): the smoke's search for the test events earlier smokes left, by UID."""
+    PREFIX = "doris-smoke-"
+
+    def test_one_report_matches_uids_holding_the_prefix_and_keeps_her_ids_that_start_with_it(self):
+        for bid in ("doris-smoke-20261127T042934Z", "doris-smoke-test", "doris-cafe-doris-smoke-1", BID):
+            self.dav.put(bid + ".ics", her_event(bid))
+        self.dav.put("notes.ics", vcal(timed("notes-doris-smoke-1@elsewhere.example", S, E)))
+        self.assertEqual(self.cal.booking_ids(self.PREFIX), ["doris-smoke-20261127T042934Z", "doris-smoke-test"])
+        (method, path, headers, body), = self.dav.requests
+        self.assertEqual((method, path, headers["depth"]), ("REPORT", COLLECTION, "1"))
+        self.assertEqual(report_uid(body), self.PREFIX)                # RFC 4791 9.7.5: a substring match
+        self.assertIsNone(ET.fromstring(body).find(".//" + C_NS + "time-range"))
+        self.assertIsNotNone(ET.fromstring(body).find(D_NS + "prop/" + C_NS + "calendar-data"))
+
+    def test_none_on_the_calendar_is_an_empty_list(self):
+        self.dav.put(BID + ".ics", her_event())
+        self.assertEqual(self.cal.booking_ids(self.PREFIX), [])
+
+    def test_an_answer_it_cannot_read_is_a_failure_never_an_empty_list(self):
+        for code in (403, 404, 500):
+            self.dav.status["REPORT"] = code
+            self.assertIn(str(code), str(self.fails(CalendarError, self.cal.booking_ids, self.PREFIX)))
+        del self.dav.status["REPORT"]
+        for answer in ([item("doris-smoke-1.ics")], [item("doris-smoke-1.ics", "garbage")],
+                       [item("doris-smoke-1.ics", status="404 Not Found")]):
+            self.dav.report = answer
+            self.fails(CalendarError, self.cal.booking_ids, self.PREFIX)
+        self.dav.fault["REPORT"] = "drop"
+        self.fails(CalendarTimeout, self.cal.booking_ids, self.PREFIX)
+
+    def test_a_prefix_none_of_her_ids_can_start_with_is_refused_before_any_call(self):
+        for bad in ("", "smoke-", "doris-smoke-<x>", None, "doris-smoke-\n"):
+            self.fails(NotHers, self.cal.booking_ids, bad)
+        self.assertEqual(self.dav.requests, [])
+
+
 class DeleteTest(CalFixture):
 
     def test_reads_then_removes_exactly_her_resource_if_unchanged(self):

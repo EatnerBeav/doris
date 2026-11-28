@@ -892,6 +892,32 @@ class LiveCalendar(CalendarAdapter):
             raise _failure(CalendarError, step, detail="an event with her booking ID's UID is on the calendar; not gone")
 
     # -- what the smoke checks -------------------------------------------------------------------
+    def booking_ids(self, prefix):
+        """Her booking IDs on the calendar that start with prefix, sorted: the smoke's search for the
+        test events earlier smokes left. One calendar-query REPORT for the events whose UID holds
+        prefix (RFC 4791 9.7.5: a substring match), each answer's UIDs read from its calendar data;
+        a UID counts only when it starts with prefix and is one of her IDs. A prefix none of her IDs
+        can start with is refused before any call; an answer that cannot be read (no calendar data,
+        data that is no calendar, an error status) is a CalendarError, never an empty list."""
+        if not isinstance(prefix, str) or not prefix or not ics.is_booking_id(prefix + "0"):
+            raise NotHers("caldav find: not the start of her booking IDs")
+        step = "caldav find"
+        text = prefix.replace("&", "&amp;").replace("<", "&lt;")     # her IDs carry neither; kept safe anyway
+        status, _, body = self._request(step, "REPORT", self.path, (_FIND_QUERY % {"uid": text}).encode("utf-8"),
+                                        {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"}, read=True)
+        if status != 207:
+            raise _failure(CalendarError, step, status=status)
+        found = set()
+        for _, data in self._multistatus(body, step):
+            if data is None:
+                raise _failure(CalendarError, step, detail="an event came back without its calendar data")
+            try:
+                uids = [v.uid for v in ics.read_events(data.encode("utf-8"))]
+            except _UNREADABLE:
+                raise _failure(CalendarError, step, detail="an event it found cannot be read") from None
+            found.update(uid for uid in uids if uid.startswith(prefix) and ics.is_booking_id(uid))
+        return sorted(found)
+
     def display_name(self):
         """The calendar's display name (DAV:displayname) exactly as the server reports it, read
         with one PROPFIND, Depth 0, on the collection: so a person can see which calendar the URL
@@ -1096,6 +1122,25 @@ _UID_QUERY = """<?xml version="1.0" encoding="utf-8"?>
 
 
 # RFC 4918 9.1: one property of the collection itself; nothing about any event.
+# The smoke's search for its own test events: the whole calendar data of every event whose UID holds
+# the prefix (a substring match), so their UIDs can be read and kept only when they start with it.
+_FIND_QUERY = """<?xml version="1.0" encoding="utf-8"?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VEVENT">
+        <C:prop-filter name="UID">
+          <C:text-match collation="i;octet">%(uid)s</C:text-match>
+        </C:prop-filter>
+      </C:comp-filter>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>
+"""
+
 _NAME_QUERY = """<?xml version="1.0" encoding="utf-8"?>
 <D:propfind xmlns:D="DAV:">
   <D:prop>

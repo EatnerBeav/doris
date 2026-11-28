@@ -12,9 +12,9 @@ Each step prints one plain line: its name, then ok (with a count where it counts
 the failure's class name with the adapter's own text, which carries a step, a status code or an
 exception's class name and never a value. No line names an address, a password, a folder, a
 calendar or an event, with one exception: when the test event may still be on the calendar, a
-line names its booking ID (a fixed one, SMOKE_BOOKING_ID) so a person can find it. The calendar's
-display name is read and never shown (it can be the owner's full name, and every line goes to a
-trace kept in a public repo): its line says only "ok (name read)".
+line names its booking ID (SMOKE_BOOKING_PREFIX and the run's UTC stamp) so a person can find it.
+The calendar's display name is read and never shown (it can be the owner's full name, and every
+line goes to a trace kept in a public repo): its line says only "ok (name read)".
 
 Steps, in order; each runs whatever the one before it did:
   imap login and inbox count                 LiveMail.inbox_count (read-only)
@@ -29,11 +29,15 @@ Steps, in order; each runs whatever the one before it did:
                                              its scopes, her account), mailboxes and identity
   caldav calendar display name               LiveCalendar.display_name: the calendar has one; never shown
   caldav query, next 7 days                  LiveCalendar.query, counted
-  caldav test event left by an earlier run   a test event an earlier smoke left (cut short, or its
-                                             delete failed) is deleted first
+  caldav test event left by an earlier run   every test event earlier smokes left (cut short, or
+                                             a delete failed), found by its booking ID's prefix
+                                             (LiveCalendar.booking_ids), is deleted first; nothing
+                                             else is touched
   caldav create test event                   30 minutes about 400 days ahead, at 11:00 UTC (the
-                                             small hours in Pacific time), always under the one
-                                             fixed booking ID SMOKE_BOOKING_ID
+                                             small hours in Pacific time), under a booking ID of
+                                             its own: SMOKE_BOOKING_PREFIX and the run's UTC stamp,
+                                             its trace folder's (a calendar can keep the name of
+                                             an event deleted under it and refuse it a new one)
   caldav read test event back, times match   LiveCalendar.get, start and end compared
   caldav delete test event                   LiveCalendar.delete, up to CLEANUP_TRIES times; it runs
                                              in a finally, so a failed step or Ctrl-C still deletes
@@ -128,9 +132,13 @@ FILE_STEP = "imap file newest INBOX message with the smoke keyword"
 TEST_EVENT_AHEAD = _dt.timedelta(days=400)       # far past any booking horizon (caps.MAX_HORIZON)
 TEST_EVENT_UTC_HOUR = 11
 TEST_EVENT_LENGTH = _dt.timedelta(minutes=30)
-# One fixed booking ID (it passes ics.is_booking_id; no real booking's "doris-" + 24 hex can be it):
-# a run that leaves its test event behind is cleaned up by the next run, which deletes it first.
-SMOKE_BOOKING_ID = "doris-smoke-test"
+# Each run's test event has a booking ID of its own, this prefix and the run's UTC stamp (it passes
+# ics.is_booking_id; no real booking's "doris-" + 24 hex can start with it). One fixed ID did not do:
+# smoke run 2's create was refused 412 AlreadyExists under the ID run 1 had created and deleted 45
+# minutes before, while a read and a UID query found nothing there. A run that leaves its test event
+# behind is cleaned up by the next run, which finds every event under the prefix and deletes it first
+# (the first runs' one fixed ID, "doris-smoke-test", starts with it too).
+SMOKE_BOOKING_PREFIX = "doris-smoke-"
 CLEANUP_TRIES = 3                                # the test event's delete, a short wait apart
 CLEANUP_WAIT_S = caps.CALENDAR_RETRY_WAIT_S
 SENT_LOOK_WAIT_S = caps.SENT_LOOK_WAIT_S         # between the two looks in Sent, as a live run waits
@@ -273,23 +281,29 @@ def _query(calendar, now):
     return note
 
 
+def smoke_booking_id(started):
+    """The booking ID of the test event of a smoke started then: SMOKE_BOOKING_PREFIX and the UTC
+    stamp, its trace folder's (livetrace.STAMP)."""
+    return SMOKE_BOOKING_PREFIX + started.astimezone(UTC).strftime(livetrace.STAMP)
+
+
 def _calendar_round_trip(calendar, out, now):
-    """Delete any test event an earlier run left, create one far ahead, read it back; then, in a
-    finally (a failed step or Ctrl-C included), delete it with retries and read again to see it
+    """Delete every test event earlier runs left, create this run's far ahead, read it back; then, in
+    a finally (a failed step or Ctrl-C included), delete it with retries and read again to see it
     gone. Unless it was seen gone, one more line names its booking ID."""
-    booking_id = SMOKE_BOOKING_ID
+    booking_id = smoke_booking_id(now)
     day = (now + TEST_EVENT_AHEAD).date()
     start = _dt.datetime(day.year, day.month, day.day, TEST_EVENT_UTC_HOUR, tzinfo=UTC)
     slot = Slot(start, start + TEST_EVENT_LENGTH)
     event = ics.build_event(booking_id, slot, templates.PLACEHOLDER_MEETING_LINK, "CONFIRMED", 0, now, None)
 
     def leftover():
-        if calendar.get(booking_id) is None:
-            return "none"
-        calendar.delete(booking_id)
-        if calendar.get(booking_id) is not None:
+        left = calendar.booking_ids(SMOKE_BOOKING_PREFIX)
+        for earlier in left:
+            calendar.delete(earlier)
+        if any(calendar.get(earlier) is not None for earlier in left):
             raise _Failed("still there")
-        return "removed one"
+        return "none" if not left else "removed one" if len(left) == 1 else "removed %d" % len(left)
 
     def read_back():
         ev = calendar.get(booking_id)
@@ -652,7 +666,8 @@ def main(argv, out=None) -> int:
         guard = netguard.install(hosts)
         try:
             contacted = True
-            ok, not_run = check(mail, calendar, out, send_to=send_to, record=record, e2e=e2e, e2e_off=e2e_off)
+            ok, not_run = check(mail, calendar, out, send_to=send_to, now=started, record=record, e2e=e2e,
+                                e2e_off=e2e_off)
         finally:
             guard.uninstall()
         finished = True
