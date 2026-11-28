@@ -1,0 +1,27 @@
+imap login and inbox count: ok (0 messages in INBOX)
+sent folder found by its special-use flag: ok (1 folder)
+imap fetch, last 7 days, read-only: ok (0 messages)
+imap file newest INBOX message with the smoke keyword: not run (no INBOX message in the last 7 days)
+jmap session, nothing sent: ok
+caldav calendar display name: ok (name read)
+caldav query, next 7 days: ok (6 events)
+caldav test event left by an earlier run: ok (none)
+caldav create test event: AlreadyExists (caldav create: 412)
+caldav read test event back, times match: FAILED (not found)
+caldav delete test event: ok
+caldav read after delete, gone: ok
+jmap send one test message: ok
+sent copy, look 1 (at once): ok (found)
+sent copy, look 2 (after a short wait): ok (found)
+sent copy found: ok (look 1, 1.0 s after the send)
+sent copy record for a live run: ok (written)
+wolf sends one meeting request to the owner: ok (no exact time asked)
+test request in her INBOX, look 1 (after a wait): ok (found, 30.8 s after wolf's send)
+test request in her INBOX, look 2 (after another wait): not needed (found on look 1)
+test request marked as the smoke's own: ok
+her loop on the test request: ok (1 handled, 0 held, 1 reply sent, 0 error lines, model cost $0.0038)
+her reply confirmed in her Sent: ok
+her reply in wolf's mailbox, look 1 (at once): ok (found in inbox, 0.5 s after her loop ended)
+her reply in wolf's mailbox, look 2 (after a wait): not needed (found on look 1)
+smoke: FAILED; not run: imap file newest INBOX message with the smoke keyword (no INBOX message in the last 7 days)
+Live trace kept in traces/live-smoke-20261128T051500Z: outcome fail (first failing step: caldav create test event).

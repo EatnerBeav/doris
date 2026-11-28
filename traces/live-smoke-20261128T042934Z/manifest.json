@@ -1,0 +1,31 @@
+{
+ "commit": "3cfac9835b546ae433a006ac67e9193afd46272a",
+ "cost_usd": 0.0,
+ "counts": {
+  "errors": 0,
+  "handled": 0,
+  "held": 0,
+  "human_approvals": 0,
+  "messages": 0,
+  "model_calls": 0,
+  "sends": 0
+ },
+ "ended_utc": "2026-11-28T04:29:46Z",
+ "files": [
+  "manifest.json",
+  "terminal.log",
+  "timeline.txt"
+ ],
+ "first_failing_step": "jmap session, nothing sent",
+ "kind": "smoke",
+ "mode": "live",
+ "model": "claude-sonnet-5-5",
+ "outcome": "fail",
+ "receipt_chain": {
+  "lines": 0,
+  "ok": null,
+  "reason": "no loop ran"
+ },
+ "run_name": null,
+ "started_utc": "2026-11-28T04:29:34Z"
+}

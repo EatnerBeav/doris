@@ -1,0 +1,36 @@
+2026-11-28T05:15:00Z  imap login and inbox count: ok (0 messages in INBOX)
+2026-11-28T05:15:01Z  sent folder found by its special-use flag: ok (1 folder)
+2026-11-28T05:15:03Z  imap fetch, last 7 days, read-only: ok (0 messages)
+2026-11-28T05:15:03Z  imap file newest INBOX message with the smoke keyword: not run (no INBOX message in the last 7 days)
+2026-11-28T05:15:04Z  jmap session, nothing sent: ok
+2026-11-28T05:15:04Z  caldav calendar display name: ok (name read)
+2026-11-28T05:15:05Z  caldav query, next 7 days: ok (6 events)
+2026-11-28T05:15:05Z  caldav test event left by an earlier run: ok (none)
+2026-11-28T05:15:05Z  caldav create test event: AlreadyExists (caldav create: 412)
+2026-11-28T05:15:06Z  caldav read test event back, times match: FAILED (not found)
+2026-11-28T05:15:06Z  caldav delete test event: ok
+2026-11-28T05:15:07Z  caldav read after delete, gone: ok
+2026-11-28T05:15:08Z  jmap send one test message: ok
+2026-11-28T05:15:09Z  sent copy, look 1 (at once): ok (found)
+2026-11-28T05:15:15Z  sent copy, look 2 (after a short wait): ok (found)
+2026-11-28T05:15:15Z  sent copy found: ok (look 1, 1.0 s after the send)
+2026-11-28T05:15:15Z  sent copy record for a live run: ok (written)
+2026-11-28T05:15:16Z  wolf sends one meeting request to the owner: ok (no exact time asked)
+2026-11-28T05:15:47Z  test request in her INBOX, look 1 (after a wait): ok (found, 30.8 s after wolf's send)
+2026-11-28T05:15:47Z  test request in her INBOX, look 2 (after another wait): not needed (found on look 1)
+2026-11-28T05:15:48Z  test request marked as the smoke's own: ok
+2026-11-28T05:15:57Z  her loop on the test request: ok (1 handled, 0 held, 1 reply sent, 0 error lines, model cost $0.0038)
+2026-11-28T05:15:57Z  her reply confirmed in her Sent: ok
+2026-11-28T05:15:57Z  her reply in wolf's mailbox, look 1 (at once): ok (found in inbox, 0.5 s after her loop ended)
+2026-11-28T05:15:57Z  her reply in wolf's mailbox, look 2 (after a wait): not needed (found on look 1)
+2026-11-28T05:15:57Z  smoke: FAILED; not run: imap file newest INBOX message with the smoke keyword (no INBOX message in the last 7 days)
+her loop's receipts (run model-live-live-smoke-20261128T051500Z):
+2026-11-28T05:15:48Z  seq 1  run started: mode live, model claude-sonnet-5-5
+2026-11-28T05:15:49Z  seq 4  message read
+2026-11-28T05:15:52Z  seq 7  classified meeting_request
+2026-11-28T05:15:52Z  seq 8  decided plan
+2026-11-28T05:15:52Z  seq 11  gate passed
+2026-11-28T05:15:53Z  seq 13  send T2 to the sender: handed_over
+2026-11-28T05:15:54Z  seq 15  her copy in Sent: found
+2026-11-28T05:15:56Z  seq 18  decided offer
+2026-11-28T05:15:57Z  seq 21  summary: 1 handled, 0 held, 1 sent

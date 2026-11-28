@@ -1,0 +1,32 @@
+{
+ "commit": "cba484e6a860cab539040b0b4fc6d1e60503db5a",
+ "cost_usd": 0.00379,
+ "counts": {
+  "errors": 0,
+  "handled": 1,
+  "held": 0,
+  "human_approvals": 0,
+  "messages": 1,
+  "model_calls": 1,
+  "sends": 1
+ },
+ "ended_utc": "2026-11-28T05:50:57Z",
+ "files": [
+  "manifest.json",
+  "receipts.jsonl",
+  "terminal.log",
+  "timeline.txt"
+ ],
+ "first_failing_step": null,
+ "kind": "smoke",
+ "mode": "live",
+ "model": "claude-sonnet-5-5",
+ "outcome": "pass",
+ "receipt_chain": {
+  "lines": 21,
+  "ok": true,
+  "reason": "ok"
+ },
+ "run_name": "model-live-live-smoke-20261128T055002Z",
+ "started_utc": "2026-11-28T05:50:02Z"
+}
