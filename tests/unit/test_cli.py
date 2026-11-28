@@ -231,6 +231,56 @@ class Demo(Isolated):
         self.assertFalse(os.path.exists(os.path.join(self.state, "sandbox", "runs")))
 
 
+class PrintedPaths(unittest.TestCase):
+    """A judge runs from src/, so a printed path is one they can paste from where they stand."""
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="doris-cli-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.repo = os.path.join(self.tmp, "doris")
+        os.makedirs(os.path.join(self.repo, "src"))
+        patcher = mock.patch.object(paths, "REPO", self.repo)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.receipts = os.path.join(self.repo, "state", "sandbox", "runs", "r1", "receipts.jsonl")
+
+    def from_folder(self, folder, path):
+        with mock.patch.object(os, "getcwd", lambda: folder):
+            return cli._display(path)
+
+    def test_a_path_in_the_repository_is_shown_from_the_working_folder(self):
+        self.assertEqual(self.from_folder(os.path.join(self.repo, "src"), self.receipts),
+                         os.path.join("..", "state", "sandbox", "runs", "r1", "receipts.jsonl"))
+        self.assertEqual(self.from_folder(self.repo, self.receipts),
+                         os.path.join("state", "sandbox", "runs", "r1", "receipts.jsonl"))
+
+    def test_her_worker_runs_in_src_and_still_shows_paths_from_the_folder_the_command_was_run_in(self):
+        seen = {}
+        run_dir = os.path.join(self.repo, "state", "sandbox", "runs", "r1")
+        os.makedirs(run_dir)
+
+        def started(*args, **kwargs):
+            seen["from"] = os.environ.get(cli.SHOWN_FROM)
+            with mock.patch.object(os, "getcwd", lambda: os.path.join(self.repo, "src")):   # the worker's own
+                seen["shown"] = cli._display(self.receipts)
+            return 0
+
+        with mock.patch.object(supervisor, "run_supervised", started), \
+                mock.patch.object(os, "getcwd", lambda: self.repo):
+            cli.supervise("sandbox", os.path.dirname(os.path.dirname(run_dir)), "r1", run_dir, {})
+        self.assertEqual(seen["from"], self.repo)
+        self.assertEqual(seen["shown"], os.path.join("state", "sandbox", "runs", "r1", "receipts.jsonl"))
+        self.assertNotIn(cli.SHOWN_FROM, os.environ)
+
+    def test_a_path_outside_the_repository_is_shown_whole(self):
+        outside = os.path.join(self.tmp, "elsewhere", "receipts.jsonl")
+        self.assertEqual(self.from_folder(os.path.join(self.repo, "src"), outside), outside)
+
+    def test_a_path_on_another_drive_is_shown_whole(self):
+        with mock.patch.object(os.path, "relpath", side_effect=ValueError("path is on mount 'D:'")):
+            self.assertEqual(cli._display(self.receipts), self.receipts)
+
+
 class StopAndResume(Isolated):
     def test_stop_halts_sandbox_and_live_and_resume_clears_both(self):
         code, out = run_cli(["stop"])

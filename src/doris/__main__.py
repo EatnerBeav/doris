@@ -34,6 +34,7 @@ SANDBOX_OWNER = loop.SANDBOX_OWNER
 SANDBOX_DORIS = loop.SANDBOX_DORIS
 STOP_MODES = ("sandbox", "live")
 WORKER = "_worker"
+SHOWN_FROM = "DORIS_SHOWN_FROM"    # set for her worker only: the folder the command was run in (_display)
 RUN_CYCLE_S = loop.CYCLE.total_seconds()   # `run`: the wall-clock wait from one pass to her next cycle
 
 
@@ -300,10 +301,18 @@ def supervise(mode, state, name, run_dir, config, say=None):
     with open(config_path, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(config, fh, indent=1, sort_keys=True)
         fh.write("\n")
-    return supervisor.run_supervised(
-        mode, name, [sys.executable, "-m", "doris", WORKER, config_path],
-        os.path.join(run_dir, "receipts.jsonl"), os.path.join(state, "ledger.sqlite"), say=say, cwd=paths.SRC,
-        run_id=name)
+    before = os.environ.get(SHOWN_FROM)
+    os.environ[SHOWN_FROM] = os.getcwd()     # her worker runs in src/; its printed paths are from here
+    try:
+        return supervisor.run_supervised(
+            mode, name, [sys.executable, "-m", "doris", WORKER, config_path],
+            os.path.join(run_dir, "receipts.jsonl"), os.path.join(state, "ledger.sqlite"), say=say, cwd=paths.SRC,
+            run_id=name)
+    finally:
+        if before is None:
+            os.environ.pop(SHOWN_FROM, None)
+        else:
+            os.environ[SHOWN_FROM] = before
 
 
 def worker(argv):
@@ -432,12 +441,15 @@ def _say(text):
 
 
 def _display(path):
-    """Inside the repository, the path from its root; anywhere else, the whole path."""
+    """Inside the repository, the path from the working folder (a judge runs from src/, so a printed
+    path can be pasted from there); anywhere else, or when no relative path exists (Windows, another
+    drive), the whole path."""
     try:
-        rel = os.path.relpath(path, paths.REPO)
-    except ValueError:
+        if os.path.relpath(path, paths.REPO).startswith(".."):
+            return path
+        return os.path.relpath(path, os.environ.get(SHOWN_FROM) or os.getcwd())
+    except (ValueError, OSError):
         return path
-    return path if rel.startswith("..") else rel
 
 
 def smoke_cmd(argv):
