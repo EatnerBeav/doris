@@ -700,10 +700,15 @@ class Lifeline:
     here returns nothing: then nothing can kill her mid-call any more, and nobody will write her
     halted line. So `gone` turns true and HALT is written at once (cause supervisor_gone); the run
     reads `gone` at every halt check and at G1, so she stops even when HALT cannot be written,
-    and writes her own halted line and summary (loop.run)."""
+    and writes her own halted line and summary (loop.run). The folder HALT goes to is fixed when
+    the lifeline is made: the one she was started with, whatever the paths say by the time it fires."""
 
     def __init__(self, fd, mode, state_dir=None):
-        self.fd, self.mode, self.state_dir = fd, mode, state_dir
+        self.fd, self.mode = fd, mode
+        try:
+            self.folder = _folder(mode, state_dir)
+        except ValueError:
+            self.folder = None          # no folder to write HALT in: `gone` stops her all the same
         self.gone = False
         self.thread = None
 
@@ -719,8 +724,10 @@ class Lifeline:
         except OSError:
             pass                        # a lifeline that cannot be read holds nothing: gone (fail closed)
         self.gone = True
+        if self.folder is None:
+            return
         try:
-            request_stop(self.mode, "supervisor_gone", self.state_dir)
+            request_stop(self.mode, "supervisor_gone", self.folder)
         except Exception:
             pass                        # `gone` stops her all the same, and loop.run tries HALT again
 

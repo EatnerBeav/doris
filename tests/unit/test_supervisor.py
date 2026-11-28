@@ -878,16 +878,30 @@ class LifelineTest(StateDirTest):
     """The worker's tie to its supervisor: a pipe whose write end only the supervisor holds and
     never writes to. However the supervisor ends, the OS closes that end and the worker reads EOF."""
 
+    def setUp(self):
+        super().setUp()
+        self.ends, self.lines = {}, []
+        self.addCleanup(self.end_lines)           # after the path patches, so it runs before they are undone
+
     def pipe(self):
-        self.ends = dict(zip(("r", "w"), os.pipe()))
-        self.addCleanup(self.close_ends)
+        self.ends.update(zip(("r", "w"), os.pipe()))
         return self.ends["r"]
 
-    def close_ends(self):
-        for key in ("w", "r"):                    # the write end first: it wakes a reader still waiting
-            fd = self.ends.pop(key, None)
-            if fd is not None:
-                os.close(fd)
+    def started(self, line):
+        self.lines.append(line)
+        return line
+
+    def end_lines(self):
+        """No lifeline outlives its test: close the supervisor's end (it wakes a reader still
+        waiting), wait for every lifeline thread to finish, and only then close the reader's end."""
+        if "w" in self.ends:
+            os.close(self.ends.pop("w"))
+        for line in self.lines:
+            if line.thread is not None:
+                line.thread.join(5)
+                self.assertFalse(line.thread.is_alive(), "a lifeline thread outlived its test")
+        if "r" in self.ends:
+            os.close(self.ends.pop("r"))
 
     def supervisor_dies(self):
         os.close(self.ends.pop("w"))
@@ -898,36 +912,47 @@ class LifelineTest(StateDirTest):
         return line
 
     def test_while_the_supervisor_holds_its_end_nothing_happens(self):
-        line = supervisor.Lifeline(self.pipe(), self.mode).start()
+        line = self.started(supervisor.Lifeline(self.pipe(), self.mode).start())
         line.thread.join(0.2)
         self.assertTrue(line.thread.is_alive())
         self.assertFalse(line.gone)
         self.assertIsNone(supervisor.halt_cause(self.mode))
 
     def test_when_the_supervisor_is_gone_she_writes_halt(self):
-        line = supervisor.Lifeline(self.pipe(), self.mode).start()
+        line = self.started(supervisor.Lifeline(self.pipe(), self.mode).start())
         self.supervisor_dies()
         self.assertTrue(self.watched(line).gone)
         self.assertEqual(supervisor.halt_cause(self.mode), "supervisor_gone")
 
     def test_a_halt_already_in_force_keeps_its_cause(self):
         supervisor.request_stop(self.mode, "watch_button")
-        line = supervisor.Lifeline(self.pipe(), self.mode).start()
+        line = self.started(supervisor.Lifeline(self.pipe(), self.mode).start())
         self.supervisor_dies()
         self.assertTrue(self.watched(line).gone)
         self.assertEqual(supervisor.halt_cause(self.mode), "watch_button")
 
     def test_a_halt_that_cannot_be_written_still_leaves_her_knowing(self):
         with mock.patch.object(supervisor, "request_stop", side_effect=OSError(28, "No space left on device")):
-            line = supervisor.Lifeline(self.pipe(), self.mode).start()
+            line = self.started(supervisor.Lifeline(self.pipe(), self.mode).start())
             self.supervisor_dies()
             self.watched(line)
         self.assertTrue(line.gone)                  # the run reads it too (G1 and every halt check)
         self.assertIsNone(supervisor.halt_cause(self.mode))
 
+    def test_halt_goes_to_the_folder_she_was_started_with_whatever_the_paths_say_later(self):
+        # A lifeline once outlived its test: by the time it fired, paths.STATE was the repository's
+        # again, and HALT landed in the real state/sandbox. Her folder is fixed when she starts.
+        line = self.started(supervisor.Lifeline(self.pipe(), self.mode).start())
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        with mock.patch.object(paths, "STATE", elsewhere):
+            self.supervisor_dies()
+            self.watched(line)
+        self.assertFalse(os.path.exists(elsewhere))
+        self.assertEqual(supervisor.halt_cause(self.mode), "supervisor_gone")
+
     def test_a_state_folder_of_her_own(self):
         own = os.path.join(self.tmp, "own")
-        line = supervisor.Lifeline(self.pipe(), "throwaway", own).start()
+        line = self.started(supervisor.Lifeline(self.pipe(), "throwaway", own).start())
         self.supervisor_dies()
         self.watched(line)
         self.assertEqual(supervisor.halt_cause("throwaway", state_dir=own), "supervisor_gone")
@@ -936,8 +961,8 @@ class LifelineTest(StateDirTest):
     def test_only_a_worker_its_supervisor_gave_one_watches_its_stdin(self):
         self.assertIsNone(supervisor.lifeline(self.mode, environ={}))
         self.assertIsNone(supervisor.lifeline(self.mode, environ={supervisor.LIFELINE_ENV: "1"}))
-        line = supervisor.lifeline(self.mode, environ={supervisor.LIFELINE_ENV: supervisor.LIFELINE_STDIN},
-                                   fd=self.pipe())
+        line = self.started(supervisor.lifeline(self.mode, environ={supervisor.LIFELINE_ENV: supervisor.LIFELINE_STDIN},
+                                                fd=self.pipe()))
         self.assertIsInstance(line, supervisor.Lifeline)
         self.supervisor_dies()
         self.watched(line)

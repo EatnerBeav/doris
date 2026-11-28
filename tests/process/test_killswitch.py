@@ -105,7 +105,16 @@ class Base(unittest.TestCase):
                                                     say=box["said"].append, **self.modules())
         box["thread"] = threading.Thread(target=target, daemon=True)
         box["thread"].start()
+        self.addCleanup(self.stop_left_running, box)    # runs before the paths go back to the defaults
         return box
+
+    def stop_left_running(self, box):
+        """A test that failed before finish() leaves her running: stop her here, in this test's own
+        state folder, so no supervisor (or worker) outlives its test."""
+        if box["thread"].is_alive():
+            supervisor.request_stop(self.mode, "cli")
+            box["thread"].join(WAIT_S)
+        self.assertFalse(box["thread"].is_alive(), "the supervisor outlived its test")
 
     def finish(self, box):
         box["thread"].join(WAIT_S)
@@ -499,6 +508,7 @@ class SupervisorGoneTest(unittest.TestCase):
                 os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
             except OSError:
                 pass
+            self.wait_until(lambda: not self.worker_alive(), "the worker to die")   # a grandchild: no wait() for it
 
     def test_a_killed_supervisor_leaves_a_worker_that_halts_itself_and_writes_its_own_halted_line(self):
         sup = self.doris_run()

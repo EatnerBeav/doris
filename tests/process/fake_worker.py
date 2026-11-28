@@ -2,7 +2,8 @@
 ledger.py, for the kill switch's process tests.
 
 Run as a script it is the worker (or a second supervisor, or a bare lock holder). Like the real
-worker, it takes the ledger lock for its own life and exits 3 when another holds it:
+worker, it takes the ledger lock for its own life and exits 3 when another holds it, and it does
+not outlive the supervisor that started it (its stdin is its lifeline):
 
     fake_worker.py work --scenario midcall|quick|budget|torn|g1|lostrace --receipts P --ledger P --run NAME
                         --mode MODE --state DIR --repo DIR --life P --marker P [--backend fake|real]
@@ -21,6 +22,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -259,8 +261,26 @@ def _patch_paths(args):
     paths.REPO = args.repo
 
 
+def _die_with_the_supervisor():
+    """The real worker's lifeline, short: when the supervisor that started it is gone (killed by a
+    test, its stdin pipe closed), this fake worker exits at once instead of sleeping on alone."""
+    from doris import supervisor
+    if os.environ.get(supervisor.LIFELINE_ENV) != supervisor.LIFELINE_STDIN:
+        return
+
+    def watch():
+        try:
+            while os.read(0, 1):
+                pass
+        except OSError:
+            pass
+        os._exit(1)
+    threading.Thread(target=watch, name="fake-lifeline", daemon=True).start()
+
+
 def work(args):
     from doris import supervisor
+    _die_with_the_supervisor()
     _patch_paths(args)
     life = supervisor.acquire_lock(args.life)       # the OS lets go of it the instant this process dies
     if life is None:
