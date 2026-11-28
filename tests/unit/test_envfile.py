@@ -126,6 +126,11 @@ class ExampleTest(unittest.TestCase):
         self.assertLessEqual(set(live.ENV_NAMES) | set(loop.ENV_NAMES), set(values))
         self.assertEqual(set(values.values()), {""})
 
+    def test_names_nothing_doris_does_not_read(self):
+        """No stale name: SMTP is gone (the law: live mail goes via Fastmail JMAP over HTTPS)."""
+        values = envfile.load(self.path)
+        self.assertLessEqual(set(values), set(live.ENV_NAMES) | set(loop.ENV_NAMES))
+
     def test_each_name_has_exactly_one_comment_line_above_it(self):
         with open(self.path, encoding="utf-8") as fh:
             lines = fh.read().splitlines()

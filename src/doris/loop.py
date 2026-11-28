@@ -190,7 +190,7 @@ def _live_link(env, error):
 def smoke_refusal(state_dir, now):
     """None when the live state folder holds the smoke's sent record (sentrecord) exactly as
     `smoke --send-to` writes it once it finds its copy in Sent, and fresh at now (no more than
-    caps.SMOKE_RECORD_MAX_AGE old): the proof that her SMTP mail reaches her Sent folder. Else the
+    caps.SMOKE_RECORD_MAX_AGE old): the proof that the mail she sends reaches her Sent folder. Else the
     one line a live run is refused with, saying what is wrong."""
     why = sentrecord.problem(state_dir, now)
     return None if why is None else "Not started: %s. %s" % (why, SMOKE_FIRST)
@@ -1608,7 +1608,7 @@ class _Run:
         """Recorded before it is sent; sent once; found in Sent after (one more look); never resent blind.
         It is marked sending right before the transport is called: from there it may have gone, and a
         kill or a crash before the transport's answer is written down leaves it so (review 2, finding
-        1). The answer is read the same for any transport: accepted (SMTP's 250) is handed_over,
+        1). The answer is read the same for any transport: accepted (a JMAP submission created) is handed_over,
         written down before the Sent look (decision 76); SendUnknown is unknown, also before any look;
         MailError (it surely did not go) puts it back to pending. From sending on, it never goes
         again, whatever Sent shows. A send an earlier run recorded and never confirmed is looked up in

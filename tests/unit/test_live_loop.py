@@ -1,9 +1,9 @@
 """Live mode in the loop: her settings from the env file alone, the live ledger's fresh start, the
 live adapters under the network guard, and the meeting link and the model key from the env file.
 
-The real LiveMail and LiveCalendar talk to test_live's fake IMAP, SMTP and CalDAV servers on
-127.0.0.1 (the adapters' default transports swapped for plain connections to them), as in
-test_smoke. No test reads a real env file or reaches a real server.
+The real LiveMail and LiveCalendar talk to test_live's fake IMAP and CalDAV servers and
+fake_jmap's JMAP server on 127.0.0.1 (the adapters' default transports swapped for plain
+connections to them), as in test_smoke. No test reads a real env file or reaches a real server.
 """
 import base64
 import contextlib
@@ -18,7 +18,6 @@ import json
 import os
 import re
 import shutil
-import smtplib
 import sys
 import tempfile
 import traceback
@@ -28,17 +27,18 @@ from unittest import mock
 from doris import __main__ as cli
 from doris import caps, compose, ledger as ledger_mod
 from doris import loop, model as model_mod, netguard, paths, receipts, sentrecord, smoke, supervisor, templates
-from doris.adapters import live
+from doris.adapters import jmap, live
 from doris.shapes import MailError, SendUnknown
-from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, FakeSMTP, u
+from tests.unit.fake_jmap import TOKEN, FakeJMAP
+from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, u
 
 LINK = "https://meet.example/" + "live-loop-room"
 API_KEY = "dummy-anthropic-key-for-live-loop-tests"
 SETTINGS = (("DORIS_MAIL_ADDRESS", DORIS), ("DORIS_APP_PASSWORD", PASSWORD), ("DORIS_OWNER_ADDRESS", OWNER),
-            ("DORIS_IMAP_HOST", "127.0.0.1"), ("DORIS_SMTP_HOST", "127.0.0.1"),
+            ("DORIS_IMAP_HOST", "127.0.0.1"), ("DORIS_JMAP_TOKEN", TOKEN),
             ("DORIS_CALDAV_URL", "https://127.0.0.1" + COLLECTION), ("DORIS_MEETING_LINK", LINK),
             ("ANTHROPIC_API_KEY", API_KEY), ("DORIS_MODEL", ""))
-VALUES = (PASSWORD, LINK, API_KEY, DORIS, OWNER)          # none of these is ever printed
+VALUES = (PASSWORD, TOKEN, LINK, API_KEY, DORIS, OWNER)   # none of these is ever printed
 
 
 def env_text(**overrides):
@@ -77,7 +77,7 @@ class LiveSettingsTest(EnvFolder):
         with mock.patch.dict(os.environ, elsewhere):
             s = loop.live_settings(self.env_path, "live")
         self.assertEqual((s.owner_addr, s.doris_addr, s.meeting_link), (OWNER, DORIS, LINK))
-        self.assertEqual(s.hosts, ("127.0.0.1",))
+        self.assertEqual(s.hosts, ("127.0.0.1", "api.fastmail.com"))
         self.assertEqual(s.model_id, model_mod.DEFAULT_MODEL)
         self.assertEqual(s.env["ANTHROPIC_API_KEY"], API_KEY)
 
@@ -151,12 +151,12 @@ def model_answer(cls="meeting_request"):
 class LiveFixture(EnvFolder):
     def setUp(self):
         super().setUp()
-        self.imap, self.smtp, self.dav = FakeIMAP(), FakeSMTP(), FakeCalDAV()
-        for server in (self.imap, self.smtp, self.dav):
+        self.imap, self.jmap, self.dav = FakeIMAP(), FakeJMAP().as_fastmail(), FakeCalDAV()
+        for server in (self.imap, self.jmap, self.dav):
             self.addCleanup(server.stop)
         self.inbox = self.imap.boxes["INBOX"]
         self.sent = self.imap.boxes["Sent Items"] = Box(1700000002, special=("\\Sent",))
-        self.smtp.on_deliver = lambda sender, rcpts, message: self.sent.add(message, self.clock)
+        self.jmap.on_deliver = lambda sender, rcpts, message: self.sent.add(message, self.clock)
         self.state = os.path.join(self.dir, "state", "live")
         self.prove_smoke(self.smoke_record())
         self.clock = u(2026, 12, 1, 16, 0)
@@ -164,8 +164,8 @@ class LiveFixture(EnvFolder):
         for patch in (
                 mock.patch.object(live, "_imap_tls", lambda host, port, timeout: imaplib.IMAP4(
                     "127.0.0.1", self.imap.port, timeout=timeout)),
-                mock.patch.object(live, "_smtp_tls", lambda host, port, timeout: smtplib.SMTP(
-                    "127.0.0.1", self.smtp.port, local_hostname="[127.0.0.1]", timeout=timeout)),
+                mock.patch.object(jmap, "_https", lambda host, port, timeout: http.client.HTTPConnection(
+                    "127.0.0.1", self.jmap.port, timeout=timeout)),
                 mock.patch.object(live, "_https", lambda host, port, timeout: http.client.HTTPConnection(
                     "127.0.0.1", self.dav.port, timeout=timeout)),
                 mock.patch.object(model_mod, "_urllib_post", self.post),
@@ -210,7 +210,7 @@ class LiveFixture(EnvFolder):
         return line["payload"]
 
     def nothing_contacted(self):
-        self.assertEqual((self.imap.commands, self.smtp.sessions, self.dav.requests), ([], [], []))
+        self.assertEqual((self.imap.commands, self.jmap.requests, self.dav.requests), ([], [], []))
 
     def started_fresh_then_asked(self, **kw):
         """A fresh start at 4:00 PM UTC with an empty inbox; Priya's request lands at 4:02; her 4:10 cycle."""
@@ -249,7 +249,7 @@ class LiveStartTest(LiveFixture):
             self.assertTrue(s.verify_ok)
             with open(s.receipts_path, encoding="utf-8") as fh:
                 self.assertNotIn("live-1@northwind.example", fh.read())
-        self.assertEqual([rcpts[0] for _, rcpts, _ in self.smtp.delivered], [PROSPECT])
+        self.assertEqual([rcpts[0] for _, rcpts, _ in self.jmap.delivered], [PROSPECT])
 
     def test_fresh_with_a_live_ledger_already_there_refuses_and_keeps_its_start(self):
         self.go(fresh=True)
@@ -350,7 +350,7 @@ class LiveRunTest(LiveFixture):
         self.assertEqual((s.handled, s.held, s.sends, s.bookings), (1, 0, 1, 1))
         (put,) = [r for r in self.dav.requests if r[0] == "PUT"]
         self.assertIn(b"LOCATION:" + LINK.encode("ascii"), put[3])
-        (_, rcpts, data), = self.smtp.delivered
+        (_, rcpts, data), = self.jmap.delivered
         self.assertEqual(rcpts[0], PROSPECT)
         msg = email.message_from_bytes(data, policy=email.policy.default)
         texts = "\n".join(p.get_content() for p in msg.walk() if p.get_content_maintype() == "text")
@@ -376,7 +376,7 @@ class LiveRunTest(LiveFixture):
             for name in names:
                 with open(os.path.join(folder, name), "rb") as fh:
                     data = fh.read()
-                found += [(name, v) for v in (PASSWORD, API_KEY, LINK, SHELL["ANTHROPIC_API_KEY"])
+                found += [(name, v) for v in (PASSWORD, TOKEN, API_KEY, LINK, SHELL["ANTHROPIC_API_KEY"])
                           if v.encode("utf-8") in data]
         self.assertEqual(found, [])
         self.assert_no_value("\n".join(self.said))
@@ -392,7 +392,8 @@ class LiveRunTest(LiveFixture):
         with mock.patch.object(netguard, "install", spy):
             self.started_fresh_then_asked()
             self.go(model_source="live")
-        self.assertEqual(installed, [("127.0.0.1",)] * 2 + [("127.0.0.1", "api.anthropic.com")])
+        self.assertEqual(installed, [("127.0.0.1", "api.fastmail.com")] * 2
+                         + [("127.0.0.1", "api.fastmail.com", "api.anthropic.com")])
         self.assertIsNone(netguard.active())
 
 
@@ -450,7 +451,7 @@ class MeetingLinkTest(LiveFixture):
         answers = os.path.join(self.state, "recorded-answers.jsonl")
         s = self.go(model_source="live", record_path=answers)
         self.assertEqual((s.handled, s.held, s.sends, s.bookings, s.verify_ok), (1, 0, 1, 1, True))
-        (_, rcpts, data), = self.smtp.delivered
+        (_, rcpts, data), = self.jmap.delivered
         self.assertIn(b"Join: " + LINK.encode("ascii"), data)               # the link still goes where it belongs
         self.assertEqual([name for name, data in self.files() if room_in(data)], [])
         self.assertNotIn("live-loop-room", "\n".join(self.said))
@@ -520,7 +521,7 @@ class SentLookTest(LiveFixture):
     def setUp(self):
         super().setUp()
         self.waits, self.held, self.file_late = [], [], False
-        self.smtp.on_deliver = lambda sender, rcpts, message: self.held.append(message)
+        self.jmap.on_deliver = lambda sender, rcpts, message: self.held.append(message)
         patch = mock.patch.object(loop, "_sleep", self.wait)
         patch.start()
         self.addCleanup(patch.stop)
@@ -548,12 +549,12 @@ class SentLookTest(LiveFixture):
         # the T1 and then the hold notice (S1) it leads to: each looked for twice, a wait between
         self.assertEqual(self.waits, [caps.SENT_LOOK_WAIT_S] * 2)
         self.assertEqual(sent_lookups(s), [(None, False), (caps.SENT_LOOK_WAIT_S, False)] * 2)
-        self.assertEqual(send_states(self.state), ["handed_over", "handed_over"])     # decision 76: SMTP took both
+        self.assertEqual(send_states(self.state), ["handed_over", "handed_over"])     # decision 76: the server took both
         (held,) = [l["payload"] for l in receipts.read_lines(s.receipts_path) if l["kind"] == "held"]
         self.assertEqual(held["outcome"], "hold:send_unconfirmed")
 
     def test_a_copy_found_at_once_needs_no_wait(self):
-        self.smtp.on_deliver = lambda sender, rcpts, message: self.sent.add(message, self.clock)
+        self.jmap.on_deliver = lambda sender, rcpts, message: self.sent.add(message, self.clock)
         s = self.started_fresh_then_asked()
         self.assertEqual(self.waits, [])
         self.assertEqual(sent_lookups(s), [(None, True)])
@@ -567,7 +568,7 @@ class ReadBackTest(LiveFixture):
         real_put = self.dav.put
         self.dav.put = lambda name, data: real_put(name, change(data))
         s = self.started_fresh_then_asked()
-        self.assertEqual([rcpts for _, rcpts, _ in self.smtp.delivered if rcpts[0] == PROSPECT], [])
+        self.assertEqual([rcpts for _, rcpts, _ in self.jmap.delivered if rcpts[0] == PROSPECT], [])
         lines = receipts.read_lines(s.receipts_path)
         (got,) = [l["payload"] for l in lines if l["kind"] == "result" and "fields_match" in l["payload"]]
         self.assertFalse(got["fields_match"])
@@ -595,21 +596,21 @@ class Crash(BaseException):
 
 
 class HandedOverTest(LiveFixture):
-    """Decision 76: SMTP's 250 is written down as handed_over before the Sent look, and nothing in
-    that state is ever sent again, whatever the Sent look or a restart finds. Here, as Fastmail may,
-    the server never files her SMTP mail in Sent."""
+    """Decision 76: the server taking it (a JMAP submission created) is written down as handed_over
+    before the Sent look, and nothing in that state is ever sent again, whatever the Sent look or a
+    restart finds. Here, as Fastmail may, the server never files her mail in Sent."""
 
     def setUp(self):
         super().setUp()
-        self.smtp.on_deliver = None
+        self.jmap.on_deliver = None
         patch = mock.patch.object(loop, "_sleep", lambda seconds: None)
         patch.start()
         self.addCleanup(patch.stop)
 
     def to(self, address):
-        return [data for _, rcpts, data in self.smtp.delivered if rcpts[0] == address]
+        return [data for _, rcpts, data in self.jmap.delivered if rcpts[0] == address]
 
-    def test_a_restart_right_after_the_250_never_sends_the_reply_again(self):
+    def test_a_restart_right_after_the_handover_never_sends_the_reply_again(self):
         self.go(fresh=True)
         self.inbox.add(request(1), u(2026, 12, 1, 16, 2))
         self.clock = u(2026, 12, 1, 16, 10)
@@ -619,7 +620,7 @@ class HandedOverTest(LiveFixture):
         def killed_at_the_first_look(mail, message_id):
             if not fired:
                 fired.append(message_id)
-                raise Crash("killed right after the 250, before the Sent look")
+                raise Crash("killed right after the handover, before the Sent look")
             return real(mail, message_id)
 
         with mock.patch.object(live.LiveMail, "find_in_sent", killed_at_the_first_look):
@@ -648,7 +649,7 @@ def held_outcomes(summary):
 
 class SendingTest(LiveFixture):
     """Review 2, finding 1: a send is marked sending in the ledger right before the transport is
-    called, so a kill between SMTP's 250 and its handed_over record can no longer leave it pending
+    called, so a kill between the server taking it and its handed_over record can no longer leave it pending
     and send it twice. Cut off there, it may have gone: the next run looks for it in Sent twice (the
     wait between, live); found, it is done; not found, it is never sent again and the message is held
     for the owner. The transport's answer is read the same for any transport: MailError means it
@@ -662,10 +663,10 @@ class SendingTest(LiveFixture):
         self.addCleanup(patch.stop)
 
     def to(self, address):
-        return [data for _, rcpts, data in self.smtp.delivered if rcpts[0] == address]
+        return [data for _, rcpts, data in self.jmap.delivered if rcpts[0] == address]
 
-    def killed_after_the_250(self):
-        """Her 4:10 cycle dies right after SMTP's 250 for T1, before handed_over is written down;
+    def killed_after_the_handover(self):
+        """Her 4:10 cycle dies right after the server took T1, before handed_over is written down;
         the next run at 4:20."""
         self.go(fresh=True)
         self.inbox.add(request(1), u(2026, 12, 1, 16, 2))
@@ -674,7 +675,7 @@ class SendingTest(LiveFixture):
 
         def dies_before_the_record(db, message_id, state):
             if state == "handed_over":
-                raise Crash("killed after the 250, before it was written down")
+                raise Crash("killed after the handover, before it was written down")
             return real(db, message_id, state)
 
         with mock.patch.object(ledger_mod.Ledger, "set_send_state", dies_before_the_record):
@@ -686,9 +687,9 @@ class SendingTest(LiveFixture):
         self.clock = u(2026, 12, 1, 16, 20)
         return self.go()
 
-    def test_cut_off_after_the_250_with_no_copy_in_sent_it_is_never_sent_again_and_held(self):
-        self.smtp.on_deliver = None                                     # as Fastmail may: nothing filed in Sent
-        s = self.killed_after_the_250()
+    def test_cut_off_after_the_handover_with_no_copy_in_sent_it_is_never_sent_again_and_held(self):
+        self.jmap.on_deliver = None                                     # as Fastmail may: nothing filed in Sent
+        s = self.killed_after_the_handover()
         self.assertEqual(len(self.to(PROSPECT)), 1)                     # one T1, never a second
         lookups = sent_lookups(s)
         self.assertEqual(lookups[:2], [(None, False), (caps.SENT_LOOK_WAIT_S, False)])   # reconcile: two looks
@@ -704,16 +705,16 @@ class SendingTest(LiveFixture):
         self.assertEqual(sent_lookups(again), [(None, False)])          # unknown: one look, no wait, nothing sent
         self.assertTrue(again.verify_ok)
 
-    def test_cut_off_after_the_250_her_copy_in_sent_settles_it_at_the_restart(self):
-        s = self.killed_after_the_250()
+    def test_cut_off_after_the_handover_her_copy_in_sent_settles_it_at_the_restart(self):
+        s = self.killed_after_the_handover()
         self.assertEqual(len(self.to(PROSPECT)), 1)
         self.assertEqual(sent_lookups(s)[0], (None, True))
         self.assertEqual(send_states(self.state), ["confirmed"])
         self.assertEqual((s.handled, s.held, len(self.to(OWNER))), (1, 0, 0))
 
-    def test_cut_off_after_the_250_a_copy_filed_during_the_wait_is_found_on_the_second_look(self):
+    def test_cut_off_after_the_handover_a_copy_filed_during_the_wait_is_found_on_the_second_look(self):
         delivered = []
-        self.smtp.on_deliver = lambda sender, rcpts, message: delivered.append(message)
+        self.jmap.on_deliver = lambda sender, rcpts, message: delivered.append(message)
 
         def files_late(seconds):
             self.waits.append(seconds)
@@ -722,7 +723,7 @@ class SendingTest(LiveFixture):
             del delivered[:]
 
         with mock.patch.object(loop, "_sleep", files_late):
-            s = self.killed_after_the_250()
+            s = self.killed_after_the_handover()
         self.assertEqual(sent_lookups(s)[:2], [(None, False), (caps.SENT_LOOK_WAIT_S, True)])
         self.assertEqual(send_states(self.state), ["confirmed"])
         self.assertEqual((len(self.to(PROSPECT)), held_outcomes(s)), (1, []))
@@ -732,7 +733,7 @@ class SendingTest(LiveFixture):
 
         def refuses_t1(mail, raw, envelope, message_id, template=None):
             if template == "T1":
-                raise MailError("554 refused")
+                raise MailError("jmap send: 400")
             return real(mail, raw, envelope, message_id, template=template)
 
         with mock.patch.object(live.LiveMail, "send", refuses_t1):
@@ -746,21 +747,21 @@ class SendingTest(LiveFixture):
         self.assertEqual(held_outcomes(s), ["hold:send_unconfirmed"])
 
     def test_a_send_that_may_have_gone_is_unknown_before_any_look_and_never_sent_again(self):
-        self.smtp.on_deliver = None
+        self.jmap.on_deliver = None
         real = live.LiveMail.send
         states_at_look = []
         real_look = live.LiveMail.find_in_sent
 
-        def times_out_after_data(mail, raw, envelope, message_id, template=None):
+        def times_out_after_the_submission(mail, raw, envelope, message_id, template=None):
             real(mail, raw, envelope, message_id, template=template)
             if template == "T1":
-                raise SendUnknown("timed out after DATA")
+                raise SendUnknown("jmap send: timeout")
 
         def look(mail, message_id):
             states_at_look.append(send_states(self.state)[0])
             return real_look(mail, message_id)
 
-        with mock.patch.object(live.LiveMail, "send", times_out_after_data), \
+        with mock.patch.object(live.LiveMail, "send", times_out_after_the_submission), \
                 mock.patch.object(live.LiveMail, "find_in_sent", look):
             s = self.started_fresh_then_asked()
         self.assertEqual(states_at_look[0], "unknown")
@@ -825,13 +826,13 @@ class KillAtEveryStepTest(LiveFixture):
     def setUp(self):
         super().setUp()
         if not self.FILE_SENT:
-            self.smtp.on_deliver = None
+            self.jmap.on_deliver = None
         patch = mock.patch.object(loop, "_sleep", lambda seconds: None)
         patch.start()
         self.addCleanup(patch.stop)
 
     def to(self, address):
-        return [data for _, rcpts, data in self.smtp.delivered if rcpts[0] == address]
+        return [data for _, rcpts, data in self.jmap.delivered if rcpts[0] == address]
 
     def fresh_world(self):
         """A live ledger started fresh at 4:00 PM (the first one's copy, after the first), nothing in
@@ -840,7 +841,7 @@ class KillAtEveryStepTest(LiveFixture):
         shutil.rmtree(state, True)
         for box in (self.inbox, self.sent):
             box.messages.clear()
-        del self.smtp.delivered[:]
+        del self.jmap.delivered[:]
         del self.dav.requests[:]
         self.dav.resources.clear()
         if os.path.isdir(fresh):
@@ -899,7 +900,7 @@ class DigestKillTest(LiveFixture):
     def setUp(self):
         super().setUp()
         if not self.FILE_SENT:
-            self.smtp.on_deliver = None
+            self.jmap.on_deliver = None
         patch = mock.patch.object(loop, "_sleep", lambda seconds: None)
         patch.start()
         self.addCleanup(patch.stop)
@@ -911,7 +912,7 @@ class DigestKillTest(LiveFixture):
             k += 1
             shutil.rmtree(state, True)
             self.sent.messages.clear()
-            del self.smtp.delivered[:]
+            del self.jmap.delivered[:]
             if os.path.isdir(fresh):
                 shutil.copytree(fresh, state)
             else:
@@ -931,7 +932,7 @@ class DigestKillTest(LiveFixture):
             for minute in (20, 30):
                 self.clock = u(2026, 12, 2, 1, minute)
                 after.append(self.go(digest=True))
-            digests = len(self.smtp.delivered)
+            digests = len(self.jmap.delivered)
             with self.subTest(k=k, where=steps.where):
                 self.assertLessEqual(digests, 1)
                 self.assertTrue(all(s.verify_ok for s in after))
@@ -1026,7 +1027,7 @@ class LongRunTest(LiveFixture):
         self.inbox.add(request(1), u(2026, 12, 1, 16, 2))
         self.clock = u(2026, 12, 1, 16, 10)
         calls = self.fetches_failing({1})
-        fake = FakeTime(1000.0, lambda: self.smtp.delivered and supervisor.request_stop("live", "cli",
+        fake = FakeTime(1000.0, lambda: self.jmap.delivered and supervisor.request_stop("live", "cli",
                                                                                          state_dir=self.state))
         self.use(fake)
         s = self.go(cycles=None, cycle_s=600.0)
@@ -1098,7 +1099,7 @@ class LongRunTest(LiveFixture):
 
     def owner_mail(self):
         return [email.message_from_bytes(data, policy=email.policy.default)
-                for _, rcpts, data in self.smtp.delivered if rcpts == [OWNER]]
+                for _, rcpts, data in self.jmap.delivered if rcpts == [OWNER]]
 
     def test_the_days_digest_goes_at_her_first_cycle_from_five_pacific_on_the_wall_clock(self):
         from doris import supervisor
@@ -1238,7 +1239,7 @@ class RunCommandTest(LiveFixture):
         code, out = self.cli("run", "--live", "--fresh", "--env", self.env_path)
         self.assertEqual(code, 0, out)
         self.assertEqual(len(self.started), 1)
-        self.smtp.on_deliver = lambda sender, rcpts, message: None          # no copy reaches Sent now
+        self.jmap.on_deliver = lambda sender, rcpts, message: None          # no copy reaches Sent now
         code, out = self.cli("smoke", "--env", self.env_path, "--send-to", "whizz@fastmail.com")
         self.assertEqual(code, 1, out)
         code, out = self.cli("run", "--live", "--fresh", "--env", self.env_path)
@@ -1311,7 +1312,7 @@ class RunCommandTest(LiveFixture):
             if not arrived:
                 arrived.append(self.inbox.add(request(1), u(2026, 12, 1, 16, 2)))
                 self.clock = u(2026, 12, 1, 16, 10)
-            elif self.smtp.delivered and not stopped:
+            elif self.jmap.delivered and not stopped:
                 stopped.append(supervisor.request_stop("live", "cli"))
 
         fake = FakeTime(1199.0, tick)
@@ -1321,7 +1322,7 @@ class RunCommandTest(LiveFixture):
         code, out = self.cli(cli.WORKER, started["argv"][4])
         self.assertEqual(code, supervisor.WORKER_EXIT_HALTED, out)
         self.assertEqual(len(stopped), 1)
-        self.assertEqual([rcpts[0] for _, rcpts, _ in self.smtp.delivered], [PROSPECT])
+        self.assertEqual([rcpts[0] for _, rcpts, _ in self.jmap.delivered], [PROSPECT])
         (url, headers, body), = self.posts
         self.assertEqual((headers["x-api-key"], body["model"]), (API_KEY, model_mod.DEFAULT_MODEL))
         self.assertEqual(self.ledger_start(), u(2026, 12, 1, 16, 0))

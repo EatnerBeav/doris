@@ -1,7 +1,7 @@
 """state/live/smoke-sent.json: the smoke's sent record. No live run starts without it (decision 76).
 
 `python -m doris smoke --send-to` writes it, and only when it found its own test message in her
-Sent folder: proof that mail she hands to SMTP gets its copy in Sent, which is how a live run
+Sent folder: proof that mail she hands to JMAP gets its copy in Sent, which is how a live run
 confirms each send. `python -m doris run --live` reads it before anything connects, on the
 command line and again in the worker under the live lock. Both sides use this module, so they
 agree on one file and one format: one line of ASCII JSON, keys sorted,

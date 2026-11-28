@@ -39,7 +39,7 @@ SEND_KINDS = ("send_reply", "send_hold_notice", "send_digest")
 #   sending      marked right before the transport is called: cut off there by a kill or a crash,
 #                it may have gone (review 2, finding 1)
 #   unknown      it may have gone: SendUnknown, or cut off sending and absent from Sent after two looks
-#   handed_over  the transport took it (SMTP's 250), written down before the Sent look (decision 76)
+#   handed_over  the transport took it (a JMAP submission created), written down before the Sent look (decision 76)
 #   confirmed    her copy is in Sent
 # From sending on, a send never goes again; the transport's refusal is the one way back to pending.
 SEND_STATES = ("pending", "sending", "unknown", "handed_over", "confirmed")

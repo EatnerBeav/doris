@@ -1,8 +1,9 @@
 """smoke.main: one pass over every live adapter call, one plain line per step, never a value.
 
-The real adapters talk to test_live's fake IMAP, SMTP and CalDAV servers on 127.0.0.1 (the
-adapters' default transports are swapped for plain connections to them), under the network
-guard the smoke installs itself: the env file names 127.0.0.1 as every host. Every test has
+The real adapters talk to test_live's fake IMAP and CalDAV servers and fake_jmap's JMAP server
+on 127.0.0.1 (the adapters' default transports are swapped for plain connections to them), under
+the network guard the smoke installs itself: the env file names 127.0.0.1 as every host it can
+(her sends go to api.fastmail.com, whose connections the fake factory dials). Every test has
 its own state/ and repo/ folders (paths.STATE and paths.REPO patched), so the live halt, STOP
 and lock files it reads and takes are never the real ones.
 """
@@ -16,40 +17,40 @@ import json
 import os
 import re
 import shutil
-import smtplib
 import tempfile
 import unittest
 from unittest import mock
 
 from doris import caps, ics, loop, netguard, paths, sentrecord, smoke, supervisor, templates
-from doris.adapters import live
+from doris.adapters import jmap, live
 from doris.shapes import MailError, Slot
-from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, FakeSMTP, eml, u
+from tests.unit.fake_jmap import TOKEN, FakeJMAP
+from tests.unit.test_live import COLLECTION, DORIS, OWNER, PASSWORD, Box, FakeCalDAV, FakeIMAP, eml, u
 
 ENV_TEXT = ("# a test env file: every host is the fakes' 127.0.0.1\n"
             "DORIS_MAIL_ADDRESS=" + DORIS + "\n"
             "DORIS_APP_PASSWORD='" + PASSWORD + "'\n"
             "DORIS_IMAP_HOST=127.0.0.1\n"
-            "DORIS_SMTP_HOST=127.0.0.1\n"
+            "DORIS_JMAP_TOKEN=" + TOKEN + "\n"
             "DORIS_CALDAV_URL=https://127.0.0.1" + COLLECTION + "\n")
 
 FETCH, FILE = "imap fetch, last 7 days, read-only", "imap file newest INBOX message with the smoke keyword"
 NAME = "caldav calendar display name"
 STEPS = ["imap login and inbox count", "sent folder found by its special-use flag", FETCH, FILE,
-         "smtp login, nothing sent", NAME, "caldav query, next 7 days", "caldav test event left by an earlier run",
+         "jmap session, nothing sent", NAME, "caldav query, next 7 days", "caldav test event left by an earlier run",
          "caldav create test event", "caldav read test event back, times match", "caldav delete test event",
          "caldav read after delete, gone"]
-SEND_STEPS = ["smtp send one test message", "sent copy, look 1 (at once)", "sent copy, look 2 (after a short wait)",
+SEND_STEPS = ["jmap send one test message", "sent copy, look 1 (at once)", "sent copy, look 2 (after a short wait)",
               "sent copy found", "sent copy record for a live run"]
-SEND_NOT_RUN = "smtp send one test message, then its copy in Sent"     # the line in their place without --send-to
+SEND_NOT_RUN = "jmap send one test message, then its copy in Sent"     # the line in their place without --send-to
 READ_ONLY_IMAP = {"CAPABILITY", "LOGIN", "LOGOUT", "EXAMINE", "LIST", "UID SEARCH", "UID FETCH"}
 
 
 class SmokeFixture(unittest.TestCase):
 
     def setUp(self):
-        self.imap, self.smtp, self.dav = FakeIMAP(), FakeSMTP(), FakeCalDAV()
-        for server in (self.imap, self.smtp, self.dav):
+        self.imap, self.jmap, self.dav = FakeIMAP(), FakeJMAP().as_fastmail(), FakeCalDAV()
+        for server in (self.imap, self.jmap, self.dav):
             self.addCleanup(server.stop)
         # INBOX: two messages received in the last hours (the fetch step reads the last 7 days)
         self.now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
@@ -68,8 +69,8 @@ class SmokeFixture(unittest.TestCase):
                 mock.patch.object(paths, "REPO", self.repo),
                 mock.patch.object(live, "_imap_tls", lambda host, port, timeout: imaplib.IMAP4(
                     "127.0.0.1", self.imap.port, timeout=timeout)),
-                mock.patch.object(live, "_smtp_tls", lambda host, port, timeout: smtplib.SMTP(
-                    "127.0.0.1", self.smtp.port, local_hostname="[127.0.0.1]", timeout=timeout)),
+                mock.patch.object(jmap, "_https", lambda host, port, timeout: http.client.HTTPConnection(
+                    "127.0.0.1", self.jmap.port, timeout=timeout)),
                 mock.patch.object(live, "_https", lambda host, port, timeout: http.client.HTTPConnection(
                     "127.0.0.1", self.dav.port, timeout=timeout)),
                 mock.patch.object(smoke, "SENT_LOOK_WAIT_S", 0.0),
@@ -84,7 +85,7 @@ class SmokeFixture(unittest.TestCase):
         """The copy reaches Sent only during the wait between the looks, which takes wait_s on a
         clock the smoke reads (smoke._clock)."""
         held, clock = [], [1000.0]
-        self.smtp.on_deliver = lambda sender, recipients, message: held.append(message)
+        self.jmap.on_deliver = lambda sender, recipients, message: held.append(message)
 
         def wait(seconds):
             clock[0] += wait_s
@@ -110,15 +111,15 @@ class SmokeFixture(unittest.TestCase):
         """No line carries an address, the password, a folder name, the calendar or an event."""
         text = "\n".join(self.lines)
         basic = base64.b64encode(("%s:%s" % (DORIS, PASSWORD)).encode()).decode()
-        for value in (PASSWORD, basic, DORIS, "doris.htm", "whizz", "Sent Items", COLLECTION, "owner-shared-cal",
-                      "127.0.0.1", "doris-"):
+        for value in (PASSWORD, basic, TOKEN, DORIS, "doris.htm", "whizz", "Sent Items", COLLECTION,
+                      "owner-shared-cal", "127.0.0.1", "doris-"):
             self.assertNotIn(value, text)
 
 
 class SmokeTest(SmokeFixture):
 
     def test_every_step_passes_against_working_servers_with_one_plain_line_each(self):
-        self.smtp.on_deliver = self.deliver_to_sent
+        self.jmap.on_deliver = self.deliver_to_sent
         self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 0)
         self.assertEqual([line.split(": ", 1)[0] for line in self.lines], STEPS + SEND_STEPS + ["smoke"])
         self.assertEqual(self.result("imap login and inbox count"), "ok (2 messages in INBOX)")
@@ -145,8 +146,9 @@ class SmokeTest(SmokeFixture):
 
     def test_without_send_to_nothing_is_sent_and_imap_writes_only_the_smoke_keyword(self):
         self.run_smoke()
-        self.assertEqual(self.smtp.sessions[0]["auth"], DORIS)
-        self.assertFalse({"MAIL", "RCPT", "DATA"} & set(self.smtp.verbs()))
+        self.assertEqual(self.jmap.kinds(), ["session", "setup"])          # her session, mailboxes, identity
+        self.assertEqual(self.jmap.delivered, [])
+        self.assertEqual({r[3]["authorization"] for r in self.jmap.requests}, {"Bearer " + TOKEN})
         writes = [(verb, args) for verb, args in self.imap.commands if verb not in READ_ONLY_IMAP]
         self.assertEqual(writes, [("SELECT", '"INBOX"'), ("UID STORE", "2 +FLAGS (doris-smoke)")])
         self.assertEqual({uid: msg["flags"] for uid, msg in self.inbox.messages.items()},
@@ -234,7 +236,7 @@ class SmokeTest(SmokeFixture):
         self.assertEqual(self.run_smoke(), 1)
         self.assertEqual(self.result("caldav create test event"), "CalendarError (caldav create: 403)")
         self.assertEqual(self.result("caldav read test event back, times match"), "FAILED (not found)")
-        self.assertTrue(self.result("smtp login, nothing sent").startswith("ok"))
+        self.assertTrue(self.result("jmap session, nothing sent").startswith("ok"))
         self.assertTrue(self.result("caldav read after delete, gone").startswith("ok"))
         self.assertEqual(self.result("smoke"), "FAILED; not run: %s (no --send-to)" % SEND_NOT_RUN)
         self.assert_no_value()
@@ -246,10 +248,11 @@ class SmokeTest(SmokeFixture):
         self.assertEqual(self.result("caldav read test event back, times match"), "FAILED (times differ)")
 
     def test_a_refused_login_fails_every_mail_step_without_a_secret(self):
-        self.imap.password = self.smtp.password = "dummy-other-pass"
+        self.imap.password = "dummy-other-pass"
+        self.jmap.token = "dummy-another-jmap-token-that-is-long-enough"
         self.assertEqual(self.run_smoke(), 1)
         self.assertTrue(self.result("imap login and inbox count").startswith("MailError (imap inbox count login"))
-        self.assertTrue(self.result("smtp login, nothing sent").startswith("MailError (smtp login check login"))
+        self.assertEqual(self.result("jmap session, nothing sent"), "MailError (jmap session: 401)")
         self.assert_no_value()
 
     def test_the_default_env_file_is_the_one_a_live_run_reads_too(self):
@@ -267,7 +270,7 @@ class HaltAndLockTest(SmokeFixture):
         return os.path.join(paths.state_dir("live"), supervisor.LOCK_NAME)
 
     def nothing_contacted(self):
-        self.assertEqual((self.imap.commands, self.smtp.sessions, self.dav.requests), ([], [], []))
+        self.assertEqual((self.imap.commands, self.jmap.requests, self.dav.requests), ([], [], []))
 
     def touch(self, path, data=b""):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -321,11 +324,11 @@ class HaltAndLockTest(SmokeFixture):
             free.append(handle is not None)
             if handle is not None:
                 handle.release()
-        real_imap, real_smtp = live._imap_tls, live._smtp_tls
-        self.smtp.on_deliver = lambda sender, recipients, message: self.sent.add(message, u(2026, 11, 27, 12))
+        real_imap, real_jmap = live._imap_tls, jmap._https
+        self.jmap.on_deliver = lambda sender, recipients, message: self.sent.add(message, u(2026, 11, 27, 12))
         self.dav.on_request = probe
         with mock.patch.object(live, "_imap_tls", lambda *a: (probe(), real_imap(*a))[1]), \
-                mock.patch.object(live, "_smtp_tls", lambda *a: (probe(), real_smtp(*a))[1]):
+                mock.patch.object(jmap, "_https", lambda *a: (probe(), real_jmap(*a))[1]):
             self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 0)
         self.assertGreater(len(free), 10)
         self.assertFalse(any(free), "the lock was free during the smoke")
@@ -413,17 +416,17 @@ class FetchAndFileTest(SmokeFixture):
 class SendToTest(SmokeFixture):
 
     def test_sends_one_plain_signed_test_message_then_finds_it_in_sent(self):
-        self.smtp.on_deliver = self.deliver_to_sent
+        self.jmap.on_deliver = self.deliver_to_sent
         self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 0)
         self.assertEqual([line.split(": ", 1)[0] for line in self.lines], STEPS + SEND_STEPS + ["smoke"])
-        (sender, recipients, data), = self.smtp.delivered
+        (sender, recipients, data), = self.jmap.delivered
         self.assertEqual((sender, recipients), (DORIS, ["whizz@fastmail.com"]))
         msg = email.message_from_bytes(data, policy=email.policy.default)
         self.assertEqual((msg["From"], msg["To"], msg["Bcc"]), (DORIS, "whizz@fastmail.com", None))
         self.assertEqual(msg["Auto-Submitted"], "auto-generated")
         self.assertEqual(msg.get_content_type(), "text/plain")
         self.assertIn("I'm an AI, not a person.", msg.get_content())
-        self.assertEqual(self.result("smtp send one test message"), "ok")
+        self.assertEqual(self.result("jmap send one test message"), "ok")
         self.assertEqual(self.result("sent copy, look 1 (at once)"), "ok (found)")
         self.assertEqual(self.result("sent copy, look 2 (after a short wait)"), "ok (found)")
         self.assertRegex(self.result("sent copy found"), r"^ok \(look 1, \d+\.\d s after the send\)\Z")
@@ -439,7 +442,7 @@ class SendToTest(SmokeFixture):
 
     def test_a_copy_never_found_in_sent_fails_the_smoke(self):
         self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 1)
-        self.assertEqual(len(self.smtp.delivered), 1)
+        self.assertEqual(len(self.jmap.delivered), 1)
         self.assertEqual(self.result("sent copy, look 1 (at once)"), "not found yet")
         self.assertEqual(self.result("sent copy, look 2 (after a short wait)"), "not found")
         self.assertEqual(self.result("sent copy found"), "FAILED (not found on either look)")
@@ -447,7 +450,7 @@ class SendToTest(SmokeFixture):
         self.assertEqual(self.result("smoke"), "FAILED")
 
     def test_a_look_that_cannot_tell_is_named_and_the_other_look_still_counts(self):
-        self.smtp.on_deliver = self.deliver_to_sent
+        self.jmap.on_deliver = self.deliver_to_sent
         cannot_tell = MailError("imap sent lookup: a message the search named could not be read; cannot tell")
         for answers, found in (([cannot_tell, True], "ok (look 2, "), ([True, cannot_tell], "ok (look 1, "),
                                ([cannot_tell, False], "FAILED (not found; a look could not tell)")):
@@ -460,9 +463,9 @@ class SendToTest(SmokeFixture):
             self.assertTrue(self.result("sent copy found").startswith(found), self.lines)
 
     def test_either_test_address_in_any_case_is_sent_to_in_its_own_spelling(self):
-        self.smtp.on_deliver = self.deliver_to_sent
+        self.jmap.on_deliver = self.deliver_to_sent
         self.assertEqual(self.run_smoke("--send-to", " Wolf.Whizz@FastMail.com "), 0)
-        self.assertEqual(self.smtp.delivered[0][1], ["wolf.whizz@fastmail.com"])
+        self.assertEqual(self.jmap.delivered[0][1], ["wolf.whizz@fastmail.com"])
 
     def test_any_other_address_is_refused_before_any_connection(self):
         for bad in ("someone@example.com", "whizz@fastmail.com.example.net", "whizz@fastmail.com, x@example.com",
@@ -471,7 +474,7 @@ class SendToTest(SmokeFixture):
             self.assertEqual(self.run_smoke("--send-to", bad), 2, bad)
             self.assertEqual(len(self.lines), 1)
             self.assertTrue(self.lines[0].startswith("smoke: refused --send-to"), self.lines)
-        self.assertEqual((self.imap.commands, self.smtp.sessions, self.dav.requests), ([], [], []))
+        self.assertEqual((self.imap.commands, self.jmap.requests, self.dav.requests), ([], [], []))
 
 
 class SentRecordTest(SmokeFixture):
@@ -499,14 +502,14 @@ class SentRecordTest(SmokeFixture):
         return loop.live_preflight(paths.state_dir("live"), env, True)
 
     def test_the_record_this_smoke_writes_is_one_a_live_run_takes(self):
-        self.smtp.on_deliver = self.deliver_to_sent
+        self.jmap.on_deliver = self.deliver_to_sent
         self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 0)
         now = dt.datetime.now(dt.timezone.utc)
         self.assertIsNone(loop.smoke_refusal(paths.state_dir("live"), now))
         self.assertEqual(self.preflight().doris_addr, DORIS)      # not refused
 
     def test_the_record_this_smoke_writes_goes_stale_for_a_live_run_a_day_later(self):
-        self.smtp.on_deliver = self.deliver_to_sent
+        self.jmap.on_deliver = self.deliver_to_sent
         self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 0)
         later = dt.datetime.now(dt.timezone.utc).replace(microsecond=0) + caps.SMOKE_RECORD_MAX_AGE
         with mock.patch.object(loop, "_wall_now", lambda: later + dt.timedelta(seconds=1)):
@@ -535,7 +538,7 @@ class SentRecordTest(SmokeFixture):
         return sorted(os.listdir(paths.state_dir("live")))
 
     def test_a_copy_found_writes_when_which_look_and_the_wait_and_nothing_else(self):
-        self.smtp.on_deliver = self.deliver_to_sent
+        self.jmap.on_deliver = self.deliver_to_sent
         before = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
         self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 0)
         record = self.record()
@@ -591,10 +594,10 @@ class SentRecordTest(SmokeFixture):
         self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 1)
         self.assertEqual(len(self.lines), 1, self.lines)
         self.assertRegex(self.lines[0], r"^smoke: FAILED: the old sent-copy record cannot be removed \(\w+\)\Z")
-        self.assertEqual((self.imap.commands, self.smtp.sessions, self.dav.requests), ([], [], []))
+        self.assertEqual((self.imap.commands, self.jmap.requests, self.dav.requests), ([], [], []))
 
     def test_a_record_it_cannot_write_fails_the_smoke_and_leaves_nothing_behind(self):
-        self.smtp.on_deliver = self.deliver_to_sent
+        self.jmap.on_deliver = self.deliver_to_sent
         with mock.patch.object(smoke.os, "replace", side_effect=PermissionError(13, "denied")):
             self.assertEqual(self.run_smoke("--send-to", "whizz@fastmail.com"), 1)
         self.assertEqual(self.result("sent copy found")[:2], "ok")
@@ -614,7 +617,7 @@ class SetupTest(SmokeFixture):
         self.write_env(ENV_TEXT.replace("DORIS_CALDAV_URL=", "# DORIS_CALDAV_URL="))
         self.assertEqual(self.run_smoke(), 2)
         self.assertEqual(self.lines, ["config: ConfigError (DORIS_CALDAV_URL is not set)"])
-        self.assertEqual((self.imap.commands, self.smtp.sessions, self.dav.requests), ([], [], []))
+        self.assertEqual((self.imap.commands, self.jmap.requests, self.dav.requests), ([], [], []))
 
     def test_every_connection_goes_through_the_guard_allowing_only_the_adapters_hosts(self):
         installed = []
@@ -627,7 +630,7 @@ class SetupTest(SmokeFixture):
         with mock.patch.object(netguard, "install", spy):
             self.assertEqual(self.run_smoke(), 0)
         (hosts, guard), = installed
-        self.assertEqual(hosts, ["127.0.0.1"])
+        self.assertEqual(hosts, ["127.0.0.1", "api.fastmail.com"])
         self.assertGreaterEqual(len(guard.attempts), 3)
         self.assertEqual(guard.refused(), [])
         self.assertIsNone(netguard.active())

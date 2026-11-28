@@ -23,8 +23,8 @@ A send is four requests, each on a connection of its own with the timeout given:
    for the imported email with her identity and an explicit envelope (her address; exactly the
    recipients given), whose onSuccessUpdateEmail moves her copy to Sent and clears $draft.
 
-The rules of live.py's SMTP send hold here:
-- Refused before any connection, as LiveMail._checked: bytes only (line ends made CRLF), no Bcc
+The rules every send of hers keeps:
+- Refused before any connection (_checked): bytes only (line ends made CRLF), no Bcc
   or Resent-Bcc header, exactly one From and it is hers alone, exactly one Message-ID and it is
   the one given, the envelope a non-empty list of bare addresses.
 - MailError: it surely did not go. Any failure in steps 1 to 3; a step-4 request that never fully
@@ -35,8 +35,8 @@ The rules of live.py's SMTP send hold here:
   it again. No step is ever retried here.
 - A created submission is a send, even when moving her copy to Sent failed. last_copy_in_sent is
   then False: her copy may sit in Drafts, where a lookup in Sent will not find it.
-- Every part of the message is inline text/plain or her own .ics, as live.py's SMTP send required
-  (review 14): checked before any connection with the rest.
+- Every part of the message is inline text/plain or her own .ics (review 14): checked before any
+  connection with the rest.
 - Errors carry the step and an HTTP status, a JMAP error type or an exception class name: never a
   header, a body, the token or server text.
 

@@ -1,8 +1,10 @@
-"""adapters/live.py: IMAP and SMTP for her mail, CalDAV for the owner's shared calendar.
+"""adapters/live.py: IMAP for her mail, her sends over JMAP (adapters/jmap.py), CalDAV for the
+owner's shared calendar.
 
-No network: the real imaplib, smtplib and http.client talk to small fake servers on 127.0.0.1
-(plain TCP in place of TLS, through the adapters' factory hooks). The fakes record what they
-were sent, so a test can prove what Doris never does (no expunge, no Bcc, no retry, no title).
+No network: the real imaplib and http.client talk to small fake servers on 127.0.0.1 (plain TCP
+in place of TLS, through the adapters' factory hooks; the JMAP one is fake_jmap's). The fakes
+record what they were sent, so a test can prove what Doris never does (no expunge, no Bcc, no
+retry, no title).
 """
 import base64
 import datetime as dt
@@ -11,7 +13,6 @@ import http.server
 import imaplib
 import io
 import re
-import smtplib
 import socket
 import socketserver
 import ssl
@@ -30,6 +31,7 @@ from doris.adapters import live
 from doris.adapters.base import CalendarAdapter, MailAdapter
 from doris.shapes import (AlreadyExists, CalendarError, CalendarTimeout, Event, InboundItem, MailError, NotHers,
                           SendUnknown, Slot)
+from tests.unit.fake_jmap import TOKEN, FakeJMAP
 
 UTC = dt.timezone.utc
 DORIS = "doris.htm@fastmail.com"
@@ -44,7 +46,8 @@ def u(*args):
 
 
 def env(**overrides):
-    values = {"DORIS_MAIL_ADDRESS": DORIS, "DORIS_APP_PASSWORD": PASSWORD, "DORIS_CALDAV_URL": CALDAV_URL}
+    values = {"DORIS_MAIL_ADDRESS": DORIS, "DORIS_APP_PASSWORD": PASSWORD, "DORIS_JMAP_TOKEN": TOKEN,
+              "DORIS_CALDAV_URL": CALDAV_URL}
     values.update(overrides)
     return {k: v for k, v in values.items() if v is not None}
 
@@ -65,16 +68,25 @@ def secret_free(test, exc):
 class HostsTest(unittest.TestCase):
 
     def test_defaults_are_fastmails_documented_servers_plus_the_calendar_url_host(self):
-        self.assertEqual(live.hosts(env()), ["imap.fastmail.com", "smtp.fastmail.com", "caldav.fastmail.com"])
+        self.assertEqual(live.hosts(env()), ["imap.fastmail.com", "api.fastmail.com", "caldav.fastmail.com"])
 
     def test_overrides_are_followed_lowercased_and_listed_once(self):
-        e = env(DORIS_IMAP_HOST="Mail.Example.COM", DORIS_SMTP_HOST="mail.example.com",
-                DORIS_CALDAV_URL="https://DAV.example.com:8443/cal/")
-        self.assertEqual(live.hosts(e), ["mail.example.com", "dav.example.com"])
+        e = env(DORIS_IMAP_HOST="Mail.Example.COM", DORIS_CALDAV_URL="https://MAIL.example.com:8443/cal/")
+        self.assertEqual(live.hosts(e), ["mail.example.com", "api.fastmail.com"])
 
     def test_empty_values_mean_the_default(self):
-        e = env(DORIS_IMAP_HOST="", DORIS_IMAP_PORT="", DORIS_SMTP_HOST=" ", DORIS_SMTP_PORT="")
-        self.assertEqual(live.hosts(e), ["imap.fastmail.com", "smtp.fastmail.com", "caldav.fastmail.com"])
+        e = env(DORIS_IMAP_HOST="", DORIS_IMAP_PORT=" ")
+        self.assertEqual(live.hosts(e), ["imap.fastmail.com", "api.fastmail.com", "caldav.fastmail.com"])
+
+    def test_her_sends_go_to_the_jmap_host_alone_and_no_smtp_setting_is_read(self):
+        """The law: live mail goes via Fastmail JMAP over HTTPS (DigitalOcean blocks SMTP)."""
+        e = env(DORIS_SMTP_HOST="smtp.example.com", DORIS_SMTP_PORT="not a port")
+        self.assertEqual(live.hosts(e), ["imap.fastmail.com", "api.fastmail.com", "caldav.fastmail.com"])
+        live.LiveMail(e, DORIS)
+        self.assertNotIn("DORIS_SMTP_HOST", live.ENV_NAMES)
+        for gone in ("check_smtp_login", "_smtp"):
+            self.assertFalse(hasattr(live.LiveMail, gone), gone)
+        self.assertFalse(hasattr(live, "smtplib"))
 
     def test_the_calendar_url_is_required(self):
         with self.assertRaises(live.ConfigError) as cm:
@@ -102,7 +114,7 @@ class HostsTest(unittest.TestCase):
     def test_a_port_out_of_range_is_refused(self):
         for bad in ("0", "65536", "imap", "-1", "99.5", "\u00b2", "\uff19\uff19\uff13"):
             with self.assertRaises(live.ConfigError, msg=bad):
-                live.LiveMail(env(DORIS_SMTP_PORT=bad), DORIS)
+                live.LiveMail(env(DORIS_IMAP_PORT=bad), DORIS)
 
     def test_config_error_is_a_value_error(self):
         self.assertTrue(issubclass(live.ConfigError, ValueError))
@@ -114,11 +126,21 @@ class ConstructTest(unittest.TestCase):
         self.assertIsInstance(live.LiveMail(env(), DORIS), MailAdapter)
         self.assertIsInstance(live.LiveCalendar(env()), CalendarAdapter)
 
-    def test_mail_needs_her_address_and_her_app_password(self):
-        for missing in ("DORIS_MAIL_ADDRESS", "DORIS_APP_PASSWORD"):
+    def test_mail_needs_her_address_her_app_password_and_her_jmap_token(self):
+        for missing in ("DORIS_MAIL_ADDRESS", "DORIS_APP_PASSWORD", "DORIS_JMAP_TOKEN"):
             with self.assertRaises(live.ConfigError) as cm:
                 live.LiveMail(env(**{missing: None}), DORIS)
             self.assertIn(missing, str(cm.exception))
+
+    def test_a_jmap_token_that_is_malformed_is_refused_naming_it_and_never_showing_it(self):
+        for bad in ("short-token", TOKEN + " x", TOKEN + "\u00e9"):
+            with self.assertRaises(live.ConfigError) as cm:
+                live.LiveMail(env(DORIS_JMAP_TOKEN=bad), DORIS)
+            self.assertIn("DORIS_JMAP_TOKEN", str(cm.exception))
+            self.assertNotIn(bad, str(cm.exception))
+
+    def test_the_calendar_needs_no_jmap_token(self):
+        live.LiveCalendar(env(DORIS_JMAP_TOKEN=None))
 
     def test_calendar_needs_her_login_and_the_calendar_url(self):
         for missing in ("DORIS_MAIL_ADDRESS", "DORIS_APP_PASSWORD", "DORIS_CALDAV_URL"):
@@ -148,14 +170,14 @@ class ConstructTest(unittest.TestCase):
 
     def test_the_password_never_shows_in_repr_str_or_vars(self):
         for adapter in (live.LiveMail(env(), DORIS), live.LiveCalendar(env())):
-            for text in (repr(adapter), str(adapter), repr(vars(adapter))):
+            for text in (repr(adapter), str(adapter), repr(vars(adapter)), repr(vars(adapter).get("_sender"))):
                 self.assertNotIn(PASSWORD, text)
+                self.assertNotIn(TOKEN, text)
                 self.assertNotIn(base64.b64encode(("%s:%s" % (DORIS, PASSWORD)).encode()).decode(), text)
 
     def test_env_names_lists_every_name_the_module_reads(self):
         self.assertEqual(set(live.ENV_NAMES), {"DORIS_MAIL_ADDRESS", "DORIS_APP_PASSWORD", "DORIS_IMAP_HOST",
-                                               "DORIS_IMAP_PORT", "DORIS_SMTP_HOST", "DORIS_SMTP_PORT",
-                                               "DORIS_CALDAV_URL"})
+                                               "DORIS_IMAP_PORT", "DORIS_JMAP_TOKEN", "DORIS_CALDAV_URL"})
 
 
 # ===========================================================================================
@@ -405,24 +427,36 @@ class IMAPHandler(socketserver.StreamRequestHandler):
         if box is None:
             return
         uids = sorted(box.messages)
-        found, toks, i = set(uids), imap_tokens(args), 0
-        while i < len(toks):
+        toks = imap_tokens(args)
+
+        def one(i):
+            """(the uids one search key matches, the index after it)."""
             key = toks[i][1].upper()
             if key == "ALL":
-                i += 1
-            elif key == "SINCE":
+                return set(uids), i + 1
+            if key == "NOT":
+                inner, j = one(i + 1)
+                return set(uids) - inner, j
+            if key == "KEYWORD":
+                flag = toks[i + 1][1].lower()
+                return {x for x in uids if flag in {f.lower() for f in box.messages[x]["flags"]}}, i + 2
+            if key == "SINCE":
                 d, mon, y = toks[i + 1][1].split("-")
                 since = dt.date(int(y), MONTHS.index(mon) + 1, int(d))
-                found &= {x for x in uids if box.day_of(x) >= since}
-                i += 2
-            elif key == "HEADER":
+                return {x for x in uids if box.day_of(x) >= since}, i + 2
+            if key == "HEADER":
                 field, needle = toks[i + 1][1], toks[i + 2][1].lower()
-                found &= {x for x in uids
-                          if needle in header_field(box.messages[x]["raw"], field).decode("utf-8", "replace").lower()}
-                i += 3
-            else:
-                self.out("%s BAD unknown search key" % tag)
-                return
+                return {x for x in uids
+                        if needle in header_field(box.messages[x]["raw"], field).decode("utf-8", "replace").lower()}, i + 3
+            raise ValueError(key)
+        found, i = set(uids), 0
+        try:
+            while i < len(toks):
+                matched, i = one(i)
+                found &= matched
+        except (ValueError, IndexError):
+            self.out("%s BAD unknown search key" % tag)
+            return
         self.out("* SEARCH" + "".join(" %d" % x for x in sorted(found)))
         self.out("%s OK SEARCH completed" % tag)
 
@@ -561,7 +595,7 @@ class FetchTest(ImapFixture):
         items = mail.fetch_new()
         self.assertEqual([i.server_id for i in items], ["INBOX:1700000001:%d" % uid3, "INBOX:1700000001:%d" % uid4])
         searches = [a for v, a in self.imap.commands if v == "UID SEARCH"]
-        self.assertEqual(searches, ["SINCE 26-Nov-2026"])
+        self.assertEqual(searches, ["SINCE 26-Nov-2026 NOT KEYWORD " + live.SMOKE_TEST_KEYWORD])
 
     def test_the_start_time_can_be_set_after_construction(self):
         self.inbox.add(eml(1), u(2026, 11, 20, 9, 0))
@@ -588,6 +622,26 @@ class FetchTest(ImapFixture):
         self.assertEqual([i.server_id for i in self.make_mail().fetch_new()], first)
         self.inbox.uidvalidity = 1800000002
         self.assertEqual([i.server_id for i in self.mail.fetch_new()], ["INBOX:1800000002:1"])
+
+    def test_a_message_the_smoke_marked_as_its_own_is_never_handed_over(self):
+        """The smoke's test request, answered on its own throwaway ledger, carries her keyword
+        SMOKE_TEST_KEYWORD; a live run never reads it, whatever its ledger (only her login can set it)."""
+        for n in range(3):
+            self.inbox.add(eml(n), u(2026, 11, 27, 9, n))
+        self.inbox.messages[2]["flags"].add(live.SMOKE_TEST_KEYWORD)
+        got = self.mail.fetch_new()
+        self.assertEqual([item.server_id for item in got], ["INBOX:1700000001:1", "INBOX:1700000001:3"])
+        (search,) = [args for verb, args in self.imap.commands if verb == "UID SEARCH"]
+        self.assertTrue(search.endswith("NOT KEYWORD " + live.SMOKE_TEST_KEYWORD), search)
+        self.mail.since_utc = u(2026, 11, 27)
+        self.assertEqual(len(self.mail.fetch_new()), 2)
+
+    def test_the_smokes_own_run_reads_its_marked_message(self):
+        for n in range(2):
+            self.inbox.add(eml(n), u(2026, 11, 27, 9, n))
+        self.inbox.messages[2]["flags"].add(live.SMOKE_TEST_KEYWORD)
+        mail = self.make_mail(read_smoke_mail=True)
+        self.assertEqual(len(mail.fetch_new()), 2)
 
     def test_many_messages_are_fetched_in_batches(self):
         for n in range(1, 131):
@@ -837,6 +891,41 @@ class SentTest(ImapFixture):
         self.assertEqual(self.imap.commands, [])
 
 
+class InboxLookupTest(ImapFixture):
+    """find_in_inbox: the smoke's look for its own test request in her INBOX, by Message-ID."""
+
+    def test_finds_every_inbox_copy_by_message_id_with_or_without_brackets(self):
+        self.inbox.add(eml(1), u(2026, 11, 27, 9))
+        self.inbox.add(eml(2, mid="smoke-1@fastmail.com"), u(2026, 11, 27, 10))
+        self.assertEqual(self.mail.find_in_inbox("<smoke-1@fastmail.com>"), ["INBOX:1700000001:2"])
+        self.assertEqual(self.mail.find_in_inbox("smoke-1@fastmail.com"), ["INBOX:1700000001:2"])
+        self.inbox.add(eml(3, mid="smoke-1@fastmail.com"), u(2026, 11, 27, 11))
+        self.assertEqual(self.mail.find_in_inbox("<smoke-1@fastmail.com>"), ["INBOX:1700000001:2",
+                                                                             "INBOX:1700000001:3"])
+
+    def test_none_there_is_an_empty_list_and_a_message_id_that_only_contains_it_is_not_a_match(self):
+        self.inbox.add(eml(1, mid="xsmoke-1@fastmail.com"), u(2026, 11, 27, 9))
+        self.assertEqual(self.mail.find_in_inbox("<smoke-1@fastmail.com>"), [])
+
+    def test_reads_read_only_and_never_writes(self):
+        self.inbox.add(eml(2, mid="smoke-1@fastmail.com"), u(2026, 11, 27, 10))
+        self.mail.find_in_inbox("<smoke-1@fastmail.com>")
+        self.assertIn("EXAMINE", self.imap.verbs())
+        self.assertFalse({"SELECT", "UID STORE"} & set(self.imap.verbs()))
+
+    def test_a_match_it_cannot_read_is_a_mail_error_never_a_miss(self):
+        uid = self.inbox.add(eml(2, mid="smoke-1@fastmail.com"), u(2026, 11, 27, 10))
+        self.imap.omit.add(uid)
+        with self.assertRaises(MailError):
+            self.mail.find_in_inbox("<smoke-1@fastmail.com>")
+
+    def test_a_message_id_it_cannot_search_for_is_refused_before_any_call(self):
+        for bad in ("", None, "no-at-sign", '<a"b@c>'):
+            with self.assertRaises(MailError):
+                self.mail.find_in_inbox(bad)
+        self.assertEqual(self.imap.commands, [])
+
+
 class ProbeTest(ImapFixture):
     """What the smoke checks: login with the INBOX count, and the Sent folder by special-use."""
 
@@ -888,138 +977,25 @@ class DefaultTransportTest(unittest.TestCase):
         self.assertEqual(seen["ctx"].verify_mode, ssl.CERT_REQUIRED)
         self.assertTrue(seen["ctx"].check_hostname)
 
-    def test_smtp_is_implicit_tls_with_a_verified_certificate_and_the_timeout(self):
+    def test_her_send_is_jmap_over_verified_https_to_fastmail_with_the_timeout(self):
         seen = {}
 
-        def fake(host="", port=0, local_hostname=None, **kw):
-            seen.update(host=host, port=port, name=local_hostname, **kw)
+        def fake(host, port=None, timeout=None, context=None, **kw):
+            seen.update(host=host, port=port, timeout=timeout, context=context)
             raise ConnectionRefusedError("stop here")
-        with mock.patch.object(smtplib, "SMTP_SSL", fake):
+        with mock.patch.object(http.client, "HTTPSConnection", fake):
             with self.assertRaises(MailError) as cm:
-                live.LiveMail(env(), DORIS, timeout_s=7).check_smtp_login()
+                live.LiveMail(env(), DORIS, timeout_s=7).send(reply_bytes(), [PROSPECT], MID)
         self.assertNotIsInstance(cm.exception, SendUnknown)
-        self.assertEqual((seen["host"], seen["port"], seen["timeout"]), ("smtp.fastmail.com", 465, 7.0))
+        self.assertEqual((seen["host"], seen["port"], seen["timeout"]), ("api.fastmail.com", 443, 7.0))
         self.assertEqual(seen["context"].verify_mode, ssl.CERT_REQUIRED)
         self.assertTrue(seen["context"].check_hostname)
-        self.assertEqual(seen["name"], "[127.0.0.1]")     # EHLO names no machine of ours
+        self.assertEqual(seen["context"].minimum_version, ssl.TLSVersion.TLSv1_2)
 
 
 # ===========================================================================================
-# A fake SMTP submission server for the real smtplib
+# Mail: send, over JMAP (adapters/jmap.py) against fake_jmap's server
 # ===========================================================================================
-class FakeSMTP(socketserver.ThreadingTCPServer):
-    daemon_threads = True
-    block_on_close = False
-    allow_reuse_address = True
-
-    def __init__(self):
-        socketserver.ThreadingTCPServer.__init__(self, ("127.0.0.1", 0), SMTPHandler)
-        self.user, self.password = DORIS, PASSWORD
-        self.sessions = []            # per connection: {"ehlo", "auth", "verbs"}; never the AUTH payload
-        self.delivered = []           # (envelope sender, [recipients], message bytes) for each accepted message
-        self.mail_code = 250
-        self.refuse_rcpt = {}         # address -> refusal code
-        self.data_cmd_code = 354
-        self.final_code = 250
-        self.on_data_cmd = None       # "drop": close on the DATA command, before 354
-        self.after_body = None        # "drop" | "hang" | "garbage": what follows the final dot
-        self.hang_s = 1.5
-        self.on_deliver = None        # called (sender, recipients, message) for each accepted message
-        self.thread = threading.Thread(target=self.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
-        self.thread.start()
-
-    @property
-    def port(self):
-        return self.server_address[1]
-
-    def stop(self):
-        self.shutdown()
-        self.server_close()
-
-    def verbs(self):
-        return [verb for s in self.sessions for verb in s["verbs"]]
-
-
-class SMTPHandler(socketserver.StreamRequestHandler):
-    disable_nagle_algorithm = True
-
-    def out(self, text):
-        self.wfile.write(text.encode("utf-8") + b"\r\n")
-
-    def handle(self):
-        srv = self.server
-        session = {"ehlo": None, "auth": None, "verbs": []}
-        srv.sessions.append(session)
-        tx = None
-        self.out("220 fake.smtp ESMTP ready")
-        while True:
-            line = self.rfile.readline()
-            if not line:
-                return
-            text = line.rstrip(b"\r\n").decode("utf-8", "replace")
-            verb = text.split(" ", 1)[0].upper()
-            session["verbs"].append(verb)
-            addr = text.split(":", 1)[1].strip().strip("<>") if ":" in text else ""
-            if verb == "EHLO":
-                session["ehlo"] = text[5:]
-                self.out("250-fake.smtp\r\n250-AUTH PLAIN\r\n250 SIZE 35000000")
-            elif verb == "AUTH":
-                parts = text.split()
-                _, user, given = base64.b64decode(parts[2]).decode("utf-8").split("\0")
-                session["auth"] = user if (user, given) == (srv.user, srv.password) else None
-                self.out("235 2.7.0 ok" if session["auth"] else "535 5.7.8 Authentication failed")
-            elif verb == "MAIL":
-                if session["auth"] is None:
-                    self.out("530 5.7.0 Authentication required")
-                    continue
-                tx = {"from": addr, "rcpts": []} if srv.mail_code == 250 else None
-                self.out("%d sender" % srv.mail_code)
-            elif verb == "RCPT":
-                code = srv.refuse_rcpt.get(addr, 250) if tx is not None else 503
-                if code == 250:
-                    tx["rcpts"].append(addr)
-                self.out("%d recipient" % code)
-            elif verb == "DATA":
-                if srv.on_data_cmd == "drop":
-                    return
-                if tx is None or not tx["rcpts"] or srv.data_cmd_code != 354:
-                    self.out("%d no data now" % (srv.data_cmd_code if srv.data_cmd_code != 354 else 503))
-                    continue
-                self.out("354 go ahead")
-                lines = []
-                while True:
-                    body_line = self.rfile.readline()
-                    if not body_line:
-                        return
-                    if body_line == b".\r\n":
-                        break
-                    lines.append(body_line[1:] if body_line.startswith(b".") else body_line)
-                if srv.after_body == "drop":
-                    return
-                if srv.after_body == "hang":
-                    time.sleep(srv.hang_s)
-                    return
-                if srv.after_body == "garbage":
-                    self.out("what")
-                    continue
-                if srv.final_code == 250:
-                    srv.delivered.append((tx["from"], tx["rcpts"], b"".join(lines)))
-                    if srv.on_deliver is not None:
-                        srv.on_deliver(tx["from"], tx["rcpts"], b"".join(lines))
-                self.out("%d done" % srv.final_code)
-                tx = None
-            elif verb == "RSET":
-                tx = None
-                self.out("250 reset")
-            elif verb == "NOOP":
-                self.out("250 ok")
-            elif verb == "QUIT":
-                self.out("221 bye")
-                return
-            else:
-                self.out("502 unknown")
-
-
 PROSPECT = "prospect@example.com"
 MID = "<5d1e0c2b9a@fastmail.com>"
 
@@ -1031,218 +1007,78 @@ def reply_bytes(mid=MID, sender=DORIS, extra=b""):
             b"\r\nHello.\r\n.a line that starts with a dot\r\n..and one with two\r\n")
 
 
-def mime(*parts, kind="multipart/mixed"):
-    """A message from her: the (part headers, part body) pairs inside one multipart of this kind,
-    or (kind None) one part alone."""
-    head = (b"From: " + DORIS.encode() + b"\r\nTo: " + PROSPECT.encode() + b"\r\nSubject: Re: hello\r\n"
-            b"Date: Fri, 27 Nov 2026 18:00:00 +0000\r\nMessage-ID: " + MID.encode() + b"\r\nMIME-Version: 1.0\r\n")
-    if kind is None:
-        (headers, body), = parts
-        return head + headers + b"\r\n" + body
-    out = head + b'Content-Type: ' + kind.encode() + b'; boundary="b0"\r\n\r\n'
-    for headers, body in parts:
-        out += b"--b0\r\n" + headers + b"\r\n" + body + b"\r\n"
-    return out + b"--b0--\r\n"
-
-
-TEXT_PART = (b'Content-Type: text/plain; charset="utf-8"\r\n', b"Hello.\r\n")
-
-
-def ics_part(data, content_type=b'text/calendar; charset="utf-8"; method=PUBLISH'):
-    return (b"Content-Type: " + content_type + b'\r\nContent-Disposition: attachment; filename="call.ics"\r\n'
-            b"Content-Transfer-Encoding: base64\r\n", base64.encodebytes(data).replace(b"\n", b"\r\n"))
-
-
-class SmtpFixture(unittest.TestCase):
+class JmapSendFixture(unittest.TestCase):
+    """LiveMail with its JMAP transport dialing fake_jmap's server: the real session URL, so every
+    URL the session names is on api.fastmail.com, as Fastmail's are."""
 
     def setUp(self):
-        self.smtp = FakeSMTP()
-        self.addCleanup(self.smtp.stop)
+        self.jmap = FakeJMAP().as_fastmail()
+        self.addCleanup(self.jmap.stop)
         self.dialed = []
         self.mail = self.make_mail()
 
-    def make_mail(self, timeout_s=2.0):
-        e = env(DORIS_SMTP_HOST="smtp.example.test", DORIS_SMTP_PORT="1465")
-        return live.LiveMail(e, DORIS, timeout_s=timeout_s, smtp_factory=self.factory)
+    def make_mail(self, timeout_s=2.0, **kw):
+        return live.LiveMail(env(), DORIS, timeout_s=timeout_s, jmap_factory=self.factory, **kw)
 
     def factory(self, host, port, timeout):
         self.dialed.append((host, port, timeout))
-        return smtplib.SMTP("127.0.0.1", self.smtp.port, local_hostname="[127.0.0.1]", timeout=timeout)
-
-    def assert_one_try(self):
-        """Never a retry inside the adapter: one connection, at most one transaction."""
-        self.assertEqual(len(self.smtp.sessions), 1)
-        self.assertLessEqual(self.smtp.verbs().count("MAIL"), 1)
-        self.assertLessEqual(self.smtp.verbs().count("DATA"), 1)
+        return http.client.HTTPConnection("127.0.0.1", self.jmap.port, timeout=timeout)
 
     def refused(self, *args, **kw):
         with self.assertRaises(MailError) as cm:
             self.mail.send(*args, **kw)
         self.assertNotIsInstance(cm.exception, SendUnknown)
         secret_free(self, cm.exception)
+        self.assertNotIn(TOKEN, str(cm.exception))
         return cm.exception
 
 
-# ===========================================================================================
-# Mail: send
-# ===========================================================================================
-class SendTest(SmtpFixture):
+class SendTest(JmapSendFixture):
+    """LiveMail.send keeps its contract over JMAP: once, exactly the envelope given, never a retry;
+    MailError when it surely did not go, SendUnknown when it may have."""
 
-    def test_logs_in_as_her_and_hands_over_with_her_sender_and_exactly_the_recipients(self):
-        self.mail.send(reply_bytes(), [PROSPECT, OWNER], MID)
-        self.assertEqual(self.smtp.delivered, [(DORIS, [PROSPECT, OWNER], reply_bytes())])
-        self.assertEqual(self.smtp.sessions[0]["auth"], DORIS)
-        self.assertEqual(self.dialed, [("smtp.example.test", 1465, 2.0)])
-        self.assert_one_try()
+    def test_her_message_goes_once_over_jmap_to_exactly_the_envelope_given(self):
+        self.assertIsNone(self.mail.send(reply_bytes(), [PROSPECT, OWNER], MID, template="T2"))
+        self.assertEqual(self.jmap.delivered, [(DORIS, [PROSPECT, OWNER], reply_bytes())])
+        self.assertEqual(self.jmap.kinds(), ["session", "setup", "upload", "send"])
+        self.assertEqual(self.dialed, [("api.fastmail.com", 443, 2.0)] * 4)
+        self.assertIs(self.mail.last_copy_in_sent, True)
 
-    def test_the_message_arrives_byte_for_byte_with_crlf_line_ends(self):
-        lf_only = reply_bytes().replace(b"\r\n", b"\n")
-        self.mail.send(lf_only, [PROSPECT], MID)
-        self.assertEqual(self.smtp.delivered[0][2], reply_bytes())
+    def test_what_the_sender_refuses_reaches_no_server(self):
+        for raw, to, mid in ((reply_bytes(extra=b"Bcc: hidden@example.com\r\n"), [PROSPECT], MID),
+                             (reply_bytes(sender=OWNER), [PROSPECT], MID),
+                             (reply_bytes(), [PROSPECT], "<another@fastmail.com>"),
+                             (reply_bytes(), ["Name <%s>" % PROSPECT], MID)):
+            self.assertIn("refused before connecting", str(self.refused(raw, to, mid)))
+        self.assertEqual((self.dialed, self.jmap.requests), ([], []))
 
-    def test_the_template_name_is_accepted_and_ignored(self):
-        self.mail.send(reply_bytes(), [PROSPECT], MID, template="T1")
-        self.mail.send(reply_bytes(), [PROSPECT], MID, "T2")
-        self.assertEqual(len(self.smtp.delivered), 2)
+    def test_a_submission_turned_away_surely_did_not_go(self):
+        self.jmap.status["send"] = 400
+        self.assertEqual(str(self.refused(reply_bytes(), [PROSPECT], MID)), "jmap send: 400")
+        self.assertEqual(self.jmap.delivered, [])
 
-    def test_a_bcc_header_is_refused_before_connecting(self):
-        for header in (b"Bcc: hidden@example.com\r\n", b"BCC: hidden@example.com\r\n", b"bcc :hidden@example.com\r\n",
-                       b"Resent-Bcc: hidden@example.com\r\n", b"Bcc:\r\n"):
-            err = self.refused(reply_bytes(extra=header), [PROSPECT, OWNER], MID)
-            self.assertIn("Bcc", str(err))
-        self.assertEqual(self.smtp.sessions, [])
+    def test_an_answer_lost_after_the_submission_went_is_send_unknown_and_never_retried(self):
+        for fault in ("drop", "garbage", 502):
+            self.jmap.fault["send"] = fault
+            with self.assertRaises(SendUnknown) as cm:
+                self.mail.send(reply_bytes(), [PROSPECT], MID)
+            secret_free(self, cm.exception)
+        self.assertEqual(self.jmap.kinds().count("send"), 3)       # one request per send, no retry inside
+        self.assertEqual(len(self.jmap.delivered), 3)
 
-    def test_a_message_not_from_her_or_not_the_recorded_one_is_refused_before_connecting(self):
-        self.refused(reply_bytes(sender=OWNER), [PROSPECT], MID)
-        self.refused(reply_bytes(), [PROSPECT], "<another@fastmail.com>")
-        self.refused(reply_bytes(), [PROSPECT], "")
-        self.refused(reply_bytes(extra=b"From: " + DORIS.encode() + b"\r\n"), [PROSPECT], MID)
-        self.refused(reply_bytes(extra=b"Message-ID: " + MID.encode() + b"\r\n"), [PROSPECT], MID)
-        self.refused(b"", [PROSPECT], MID)
-        self.refused("text, not bytes", [PROSPECT], MID)
-        self.assertEqual(self.smtp.sessions, [])
+    def test_a_copy_that_did_not_reach_sent_is_said(self):
+        self.jmap.fail_update = "invalidPatch"
+        self.mail.send(reply_bytes(), [PROSPECT], MID)
+        self.assertIs(self.mail.last_copy_in_sent, False)
 
-    def test_a_part_other_than_text_or_her_own_ics_is_refused_before_connecting(self):
-        """The only-her-.ics rule holds here too, not only upstream: text/plain and her own .ics."""
-        attendee = her_event(method="PUBLISH").replace(b"STATUS:CONFIRMED",
-                                                       b"STATUS:CONFIRMED\r\nATTENDEE:mailto:x@example.com")
-        for raw in (
-                mime(TEXT_PART, (b'Content-Type: application/pdf\r\nContent-Disposition: attachment; filename="a.pdf"'
-                                 b"\r\nContent-Transfer-Encoding: base64\r\n", base64.encodebytes(b"%PDF-1.4"))),
-                mime(TEXT_PART, (b'Content-Type: text/html; charset="utf-8"\r\n', b"<p>Hello.</p>"),
-                     kind="multipart/alternative"),
-                mime(TEXT_PART, ics_part(attendee)),
-                mime(TEXT_PART, ics_part(b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n")),
-                mime(TEXT_PART, (b"Content-Type: message/rfc822\r\n", eml(1))),
-                mime(TEXT_PART, (b'Content-Type: text/plain\r\nContent-Disposition: attachment; filename="notes.txt"\r\n',
-                                 b"a file, not her words")),
-                mime(TEXT_PART, (b'Content-Type: multipart/mixed; boundary="b1"\r\n',
-                                 b"--b1\r\nContent-Type: text/plain\r\n\r\nnested\r\n--b1--")),
-                mime((b"Content-Type: text/html\r\n", b"<p>Hello.</p>\r\n"), kind=None),
-                mime((b"Content-Type: application/octet-stream\r\n", b"\x00\x01"), kind=None)):
-            err = self.refused(raw, [PROSPECT], MID)
-            self.assertIn("refused before connecting", str(err))
-        self.assertEqual(self.smtp.sessions, [])
-
-    def test_her_reply_with_her_own_ics_goes_as_the_composer_builds_it(self):
-        headers = [("From", DORIS), ("To", PROSPECT), ("Subject", "Re: hello"),
-                   ("Date", "Fri, 27 Nov 2026 18:00:00 +0000"), ("Message-ID", MID), ("Auto-Submitted", "auto-replied")]
-        for method, status in (("PUBLISH", "CONFIRMED"), ("CANCEL", "CANCELLED")):
-            data = ics.build_event(BID, SLOT, LINK, status, 1, u(2026, 11, 27, 12), method)
-            raw = compose._build(headers, compose.with_signature("Booked."), data, method, MID)
-            self.mail.send(raw, [PROSPECT, OWNER], MID)
-            self.assertEqual(self.smtp.delivered[-1][2], raw)
-        self.mail.send(mime(TEXT_PART, ics_part(her_event(method="PUBLISH"))), [PROSPECT], MID)
-        self.assertEqual(len(self.smtp.delivered), 3)
-
-    def test_a_bad_envelope_is_refused_before_connecting(self):
-        for bad in ([], PROSPECT, ["not an address"], [PROSPECT + "\r\nRCPT TO:<x@example.com>"], [None],
-                    ["<%s>" % PROSPECT], ["Name <%s>" % PROSPECT], [PROSPECT + "\n"]):
-            self.refused(reply_bytes(), bad, MID)
-        self.assertEqual(self.smtp.sessions, [])
-
-    def test_a_refused_login_is_a_mail_error_that_carries_no_secret(self):
-        self.smtp.password = "dummy-other-pass"
-        err = self.refused(reply_bytes(), [PROSPECT], MID)
-        self.assertIn("login", str(err))
-        self.assertNotIn("MAIL", self.smtp.verbs())
-        self.assert_one_try()
-
-    def test_a_refused_sender_is_a_mail_error_naming_the_code(self):
-        self.smtp.mail_code = 553
-        err = self.refused(reply_bytes(), [PROSPECT], MID)
-        self.assertIn("553", str(err))
-        self.assertNotIn("DATA", self.smtp.verbs())
-        self.assert_one_try()
-
-    def test_one_refused_recipient_stops_the_whole_send_before_data(self):
-        self.smtp.refuse_rcpt[OWNER] = 550
-        err = self.refused(reply_bytes(), [PROSPECT, OWNER], MID)
-        self.assertIn("550", str(err))
-        self.assertNotIn("DATA", self.smtp.verbs())
-        self.assertEqual(self.smtp.delivered, [])
-        self.assert_one_try()
-
-    def test_a_refused_data_command_is_a_mail_error(self):
-        self.smtp.data_cmd_code = 554
-        err = self.refused(reply_bytes(), [PROSPECT], MID)
-        self.assertIn("554", str(err))
-        self.assert_one_try()
-
-    def test_a_refusal_after_the_message_is_a_mail_error_not_unknown(self):
-        self.smtp.final_code = 554
-        err = self.refused(reply_bytes(), [PROSPECT], MID)
-        self.assertIn("554", str(err))
-        self.assert_one_try()
-
-    def test_a_connection_lost_on_the_data_command_is_a_mail_error_not_unknown(self):
-        self.smtp.on_data_cmd = "drop"
-        self.refused(reply_bytes(), [PROSPECT], MID)
-        self.assert_one_try()
-
-    def test_a_connection_lost_after_the_message_went_is_send_unknown(self):
-        self.smtp.after_body = "drop"
-        with self.assertRaises(SendUnknown) as cm:
-            self.mail.send(reply_bytes(), [PROSPECT], MID)
-        secret_free(self, cm.exception)
-        self.assert_one_try()
-
-    def test_a_timeout_after_the_message_went_is_send_unknown(self):
-        self.smtp.after_body = "hang"
-        mail = self.make_mail(timeout_s=0.3)
-        started = time.monotonic()
-        with self.assertRaises(SendUnknown):
-            mail.send(reply_bytes(), [PROSPECT], MID)
-        self.assertLess(time.monotonic() - started, 1.4)
-        self.assert_one_try()
-
-    def test_an_unreadable_answer_after_the_message_is_send_unknown(self):
-        self.smtp.after_body = "garbage"
-        with self.assertRaises(SendUnknown):
-            self.mail.send(reply_bytes(), [PROSPECT], MID)
-        self.assert_one_try()
-
-    def test_a_connect_failure_is_a_mail_error_not_unknown(self):
-        def refuse(host, port, timeout):
-            raise ConnectionRefusedError("nothing listening")
-        mail = live.LiveMail(env(), DORIS, smtp_factory=refuse)
+    def test_check_send_login_reads_the_session_and_sends_nothing(self):
+        self.assertIsNone(self.mail.check_send_login())
+        self.assertEqual(self.jmap.kinds(), ["session", "setup"])
+        self.assertEqual(self.jmap.delivered, [])
+        self.jmap.token = "dummy-another-jmap-token-that-is-long-enough"
         with self.assertRaises(MailError) as cm:
-            mail.send(reply_bytes(), [PROSPECT], MID)
-        self.assertNotIsInstance(cm.exception, SendUnknown)
-
-
-class SmtpLoginTest(SmtpFixture):
-
-    def test_check_smtp_login_logs_in_and_sends_nothing(self):
-        self.mail.check_smtp_login()
-        self.assertEqual(self.smtp.sessions[0]["auth"], DORIS)
-        self.assertFalse({"MAIL", "RCPT", "DATA"} & set(self.smtp.verbs()))
-
-    def test_check_smtp_login_refused_is_a_mail_error(self):
-        self.smtp.password = "dummy-other-pass"
-        with self.assertRaises(MailError) as cm:
-            self.mail.check_smtp_login()
-        secret_free(self, cm.exception)
+            self.mail.check_send_login()
+        self.assertEqual(str(cm.exception), "jmap session: 401")
 
 
 # ===========================================================================================

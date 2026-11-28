@@ -23,7 +23,8 @@ Steps, in order; each runs whatever the one before it did:
                                              LiveMail.file: FILE_KEYWORD on the message that arrived
                                              last, the only change the smoke makes to her mail; when
                                              the fetch found none (or failed), a line says it did not run
-  smtp login, nothing sent                   LiveMail.check_smtp_login
+  jmap session, nothing sent                 LiveMail.check_send_login: her JMAP session (the token,
+                                             its scopes, her account), mailboxes and identity
   caldav calendar display name               LiveCalendar.display_name, shown as the server reports it
   caldav query, next 7 days                  LiveCalendar.query, counted
   caldav test event left by an earlier run   a test event an earlier smoke left (cut short, or its
@@ -37,7 +38,7 @@ Steps, in order; each runs whatever the one before it did:
   caldav read after delete, gone             LiveCalendar.get is None
   caldav test event may remain               only when it was not seen gone: names the booking ID
 With --send-to (without it, one line in their place says they did not run):
-  smtp send one test message                 LiveMail.send: signed, Auto-Submitted, no Bcc
+  jmap send one test message                 LiveMail.send over JMAP: signed, Auto-Submitted, no Bcc
   sent copy, look 1 (at once)                LiveMail.find_in_sent, as the loop looks right after a send
   sent copy, look 2 (after a short wait)     the same after SENT_LOOK_WAIT_S
   sent copy found                            which look found the copy first, and how long after the
@@ -99,7 +100,7 @@ CLEANUP_TRIES = 3                                # the test event's delete, a sh
 CLEANUP_WAIT_S = caps.CALENDAR_RETRY_WAIT_S
 SENT_LOOK_WAIT_S = caps.SENT_LOOK_WAIT_S         # between the two looks in Sent, as a live run waits
 DISPLAY_NAME_MAX = 120                           # characters of the calendar's display name a line shows
-SEND_NOT_RUN = "smtp send one test message, then its copy in Sent"   # its line when there is no --send-to
+SEND_NOT_RUN = "jmap send one test message, then its copy in Sent"   # its line when there is no --send-to
 TEST_TEXT = "A test message from Doris's live smoke check. Nothing to do and nothing to answer."
 
 _OWN_ERRORS = (MailError, CalendarError, live.ConfigError, envfile.EnvFileError)   # texts built never to hold a value
@@ -169,7 +170,7 @@ def check(mail, calendar, out, send_to=None, now=None, record=None):
         newest = fetched[-1]                     # fetch_new hands them over oldest first, by arrival
         passed.append(_step(out, FILE_STEP, lambda: mail.file(newest.server_id, FILE_KEYWORD)))
     passed += [
-        _step(out, "smtp login, nothing sent", mail.check_smtp_login),
+        _step(out, "jmap session, nothing sent", mail.check_send_login),
         _step(out, "caldav calendar display name", lambda: '"%s"' % _shown(calendar.display_name())),
         _step(out, "caldav query, next 7 days", lambda: _query(calendar, now)),
     ]
@@ -281,7 +282,7 @@ def _send_and_look(mail, out, send_to, now):
     of the send to the end of that look) or None)."""
     message_id = "<%s@%s>" % (secrets.token_hex(16), mail.doris_addr.rsplit("@", 1)[-1])
     raw = _test_message(mail.doris_addr, send_to, message_id, now)
-    sent = _step(out, "smtp send one test message", lambda: mail.send(raw, [send_to], message_id, template="smoke"))
+    sent = _step(out, "jmap send one test message", lambda: mail.send(raw, [send_to], message_id, template="smoke"))
     after_send = _clock()
     found = None
     seen = []
