@@ -177,6 +177,19 @@ class NeverTwice(LongRun):
         self.assertEqual([l for l in receipts.read_lines(again.receipts_path)
                           if l["kind"] == "called" and l["payload"]["call"] in ("send", "sent_lookup")], [])
 
+    def test_a_finite_run_whose_days_digest_went_in_an_earlier_run_says_so_and_claims_no_send(self):
+        self.clock(TUE_450PM)
+        loop.run(self.config(digest=True))                # the demo's shape: one pass, then the day's digest
+        self.assertEqual(len([l for l in self.said if "Digest sent to the owner: " in l]), 1, self.said)
+        del self.said[:]
+        again = loop.run(self.config(digest=True))        # the same day again on the same ledger
+        self.assertEqual(len(self.digests()), 1)
+        self.assertEqual([l for l in receipts.read_lines(again.receipts_path)
+                          if l["kind"] == "called" and l["payload"]["call"] == "send"], [])
+        self.assertEqual([l for l in self.said if "Digest" in l],
+                         ["Tue Dec 1, 5:00 PM Pacific  Digest already sent to the owner earlier today; "
+                          "not sent twice."])
+
     def test_a_kill_after_the_hand_over_before_the_record_sends_nothing_more(self):
         self.clock(TUE_450PM)
         real = sandbox_mod.SandboxMail.send

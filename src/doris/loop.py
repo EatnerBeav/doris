@@ -1947,9 +1947,17 @@ class _Run:
         action = Action(kind="send_digest", message_key="", thread_key="", template="S2", slots=ds,
                         to=[self.cfg.owner_addr], recipient_source="owner", body_text=body)
         if self.check(None, action).passed:
+            before = self.ledger.send(mid)
+            # recorded by an earlier run and past pending: deliver sends nothing, it only finds her copy
+            earlier = before is not None and before["state"] != "pending"
             if self.deliver(None, mid, "send_digest", "S2", self.cfg.owner_addr, raw, body, [self.cfg.owner_addr],
                             ds):
-                self.say("%s  Digest sent to the owner: %s" % (templates.fmt_pacific(now), body.split("\n", 1)[0]))
+                if earlier:             # this date's digest went in an earlier run: no send is claimed
+                    self.say("%s  Digest already sent to the owner earlier today; not sent twice."
+                             % (templates.fmt_pacific(now),))
+                else:
+                    self.say("%s  Digest sent to the owner: %s"
+                             % (templates.fmt_pacific(now), body.split("\n", 1)[0]))
 
     # --- staged faults (sandbox only, labelled simulated on the observed line) ------------------
     def arm(self, e):
