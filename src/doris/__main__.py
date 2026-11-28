@@ -19,18 +19,22 @@
     redteam  the yes-man proof: the real loop and gate with a model that obeys every
              injection, on throwaway state; passes only with 0 bad actions
 
+With ANTHROPIC_API_KEY in .env at the repo root (or in src/.env, or in the environment, which wins),
+demo, the sandbox run and traps --model live call the model and print its measured cost.
+
 Every live run, the smoke included, keeps its trace in traces/live-<run|smoke>-<UTC stamp>/ when
 it ends, pass or fail (livetrace.py); a start refused before anything was contacted keeps none.
 """
 
 import argparse
+import contextlib
 import datetime as _dt
 import json
 import os
 import sys
 import time
 
-from . import caps, livetrace, loop, paths, receipts, story, supervisor
+from . import caps, envfile, livetrace, loop, paths, receipts, story, supervisor
 
 SANDBOX_OWNER = loop.SANDBOX_OWNER
 SANDBOX_DORIS = loop.SANDBOX_DORIS
@@ -44,6 +48,70 @@ RUN_CYCLE_S = loop.CYCLE.total_seconds()   # `run`: the wall-clock wait from one
 def answers_path():
     """Recorded model answers for the judge path: sandbox/answers.jsonl, from a real run."""
     return os.path.join(paths.SANDBOX, "answers.jsonl")
+
+
+# --- the model key from .env --------------------------------------------------------------------
+DOTENV_NAMES = ("ANTHROPIC_API_KEY", "DORIS_MODEL")    # all a sandbox run or traps takes from .env
+
+
+def dotenv_files():
+    """The .env files a judge may fill, first first: the repo root's, beside .env.example, then src/'s,
+    the folder every command is run from."""
+    return [os.path.join(paths.REPO, ".env"), os.path.join(paths.SRC, ".env")]
+
+
+def load_dotenv(environ=None, files=None):
+    """ANTHROPIC_API_KEY and DORIS_MODEL from .env into this command's environment, which the worker it
+    starts inherits, so a key in .env calls the model just as an exported one does. A name already in
+    the environment, even empty, is left as it is: the environment wins. The first file that gives a
+    name a value gives it. No other name is taken, the live run reads none of this (only its own env
+    file), and no value is ever printed. Returns {name: the file it came from}. A file outside the
+    KEY=VALUE format raises envfile.EnvFileError naming the file and the line, never a value."""
+    environ = os.environ if environ is None else environ
+    came_from = {}
+    for path in dotenv_files() if files is None else files:
+        if not os.path.isfile(path):
+            continue
+        try:
+            values = envfile.load(path, names=DOTENV_NAMES)
+        except envfile.EnvFileError as exc:
+            raise envfile.EnvFileError("%s: %s" % (_display(path), exc)) from None
+        for name in DOTENV_NAMES:
+            value = (values.get(name) or "").strip()
+            if value and name not in environ and name not in came_from:
+                if "\x00" in value:          # POSIX refuses it, Windows cuts the value there: neither is the key
+                    raise envfile.EnvFileError("%s: %s holds a character the environment cannot take"
+                                               % (_display(path), name))
+                environ[name] = value
+                came_from[name] = path
+    return came_from
+
+
+def model_key():
+    """load_dotenv, then where the key is from, for the first line: the .env path as typed from here,
+    "the environment", or None when there is no key."""
+    came_from = load_dotenv()
+    if "ANTHROPIC_API_KEY" in came_from:
+        return _display(came_from["ANTHROPIC_API_KEY"])
+    return "the environment" if (os.environ.get("ANTHROPIC_API_KEY") or "").strip() else None
+
+
+@contextlib.contextmanager
+def refusals_said(say):
+    """For one command: the model adapter says a refused call through say, once (model.NOTICE), and
+    the hook is put back as it was afterwards."""
+    from . import model as model_mod
+    before = model_mod.NOTICE
+    model_mod.NOTICE = model_mod.Notice(say)
+    try:
+        yield
+    finally:
+        model_mod.NOTICE = before
+
+
+def _not_started_env(exc):
+    print("Not started: %s. Fix the .env file or remove it." % (exc,))
+    return 2
 
 
 def demo_source(env, answers_exist):
@@ -75,14 +143,16 @@ def _recorded_run(path):
     return _recorded_first(path, "run_id") or "unknown"
 
 
-def first_line(source, model_id):
+def first_line(source, model_id, key_from=None):
+    """The banner: what reads the mail, and for a live model where the key came from (model_key)."""
     if source == "live":
-        return "Sandbox. Model called live (%s); its answers are recorded with this run." % (model_id,)
+        return ("Sandbox. Model called live (%s, key from %s); its answers are recorded with this run."
+                % (model_id, key_from or "the environment"))
     if source == "replayed":
-        return ("Sandbox. Model answers replayed from recorded run %s. No key found."
+        return ("Sandbox. Model answers replayed from recorded run %s. No key in .env or the environment."
                 % (_recorded_run(answers_path()),))
     return ("Sandbox. No key and no recorded answers, so a built-in keyword stand-in (stub) reads the mail; "
-            "every receipt says stub. Add ANTHROPIC_API_KEY to call the model.")
+            "every receipt says stub. Put ANTHROPIC_API_KEY in .env or the environment to call the model.")
 
 
 # --- demo and run --------------------------------------------------------------------------------
@@ -107,10 +177,14 @@ def demo(argv):
                  os.path.join(_display(os.path.join(paths.STATE, "old")), ""),
                  "\n".join("  " + _display(f) for f, _ in left)))
         return 1
+    try:
+        key_from = model_key()
+    except envfile.EnvFileError as exc:
+        return _not_started_env(exc)
     source, model_id = sandbox_source()
     state = paths.state_dir("sandbox")
     name, run_dir = new_run_dir(state, run_name(source, "sandbox"))
-    _say(first_line(source, model_id))
+    _say(first_line(source, model_id, key_from))
     if kept:
         _say("A fresh sandbox day: the last demo's state and her sends and bookings are kept in %s."
              % (os.path.join(_display(kept), ""),))
@@ -264,9 +338,13 @@ def run_cmd(argv):
     state = paths.state_dir(mode)
     every = "every %s until `%s`" % (loop.wait_words(RUN_CYCLE_S), paths.command("stop"))
     if not args.live:
+        try:
+            key_from = model_key()
+        except envfile.EnvFileError as exc:
+            return _not_started_env(exc)
         source, model_id = sandbox_source()
         name, run_dir = new_run_dir(state, run_name(source, "sandbox"))
-        _say(first_line(source, model_id))
+        _say(first_line(source, model_id, key_from))
         _say("She reads the sandbox inbox %s; a new .eml dropped in waits for her next cycle." % every)
         return supervise("sandbox", state, name, run_dir, sandbox_config(
             name, state, run_dir, source, model_id, digest=True, cycles=None, cycle_s=RUN_CYCLE_S))
@@ -380,7 +458,8 @@ def worker(argv):
     lifeline = supervisor.lifeline(fields.get("mode"), fields.get("state_dir"))
     cfg = loop.RunConfig(supervised=True, say=say, lifeline=lifeline, **fields)
     try:
-        s = loop.run(cfg)
+        with refusals_said(say):            # a refused key or tier: said once, before the holds
+            s = loop.run(cfg)
     except loop.Refused as refused:
         say(str(refused))
         return refused.exit_code
@@ -490,7 +569,12 @@ def verify(argv):
 # --- the rest ---------------------------------------------------------------------------------------
 def traps_cmd(argv):
     from . import traps
-    return traps.main(argv)
+    try:
+        load_dotenv()                     # the key and model for `traps --model live`, as for demo
+    except envfile.EnvFileError as exc:
+        return _not_started_env(exc)
+    with refusals_said(print):
+        return traps.main(argv)
 
 
 def replay_cmd(argv):
