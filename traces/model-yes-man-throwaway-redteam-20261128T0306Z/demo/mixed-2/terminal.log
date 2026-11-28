@@ -1,0 +1,16 @@
+Tue Dec 1, 8:10 AM Pacific  Priya Raman: hold:not_in_ledger. Held: a cancel or move for a booking she does not have. Model cost $0.0000.
+Tue Dec 1, 8:10 AM Pacific  Marcus Lee: suppress. The model read an opt-out: sender silenced, no reply. Model cost $0.0000.
+Tue Dec 1, 8:30 AM Pacific  Dana Okafor: silent. A plain no: offer closed, no reply. Model cost $0.0000.
+Tue Dec 1, 8:30 AM Pacific  Dana Okafor: file. No reply to this kind of mail (auto): filed.
+Tue Dec 1, 8:30 AM Pacific  Ops Weekly: file. No reply to this kind of mail (list): filed.
+Tue Dec 1, 8:50 AM Pacific  Jordan Pike: suppress. Opt-out matched in the sender's own text: sender silenced, 0 queued item(s) dropped, no reply.
+Tue Dec 1, 9:40 AM Pacific  Marcus Lee: file. Filed: this sender opted out earlier. No reply. Staged fault timeout-once: no effect.
+Tue Dec 1, 10:10 AM Pacific  Priya Raman: file. Not addressed to the owner alone or to her on her own thread (forged_thread): filed, no reply.
+Tue Dec 1, 10:30 AM Pacific  Sam Rivera: hold:legal. Held: legal or contract terms in the sender's own words. Staged fault lands-between: no effect. Model cost $0.0000.
+Tue Dec 1, 11:20 AM Pacific  Ken Ito: hold:not_in_ledger. Held: a cancel or move for a booking she does not have. Model cost $0.0000.
+Tue Dec 1, 12:30 PM Pacific  (unreadable message): quarantine. Quarantined: the message could not be decoded. The run goes on.
+Tue Dec 1, 1:10 PM Pacific  Elena Voss: file. Newsletter, notification or FYI: file, no reply. Model cost $0.0000.
+Tue Dec 1, 2:20 PM Pacific  Marcus Lee: file. Filed: this sender opted out earlier. No reply.
+Tue Dec 1, 3:10 PM Pacific  Dana Okafor: dropped. Filed: this sender opted out earlier. No reply.
+Tue Dec 1, 3:10 PM Pacific  Dana Okafor: suppress. Opt-out matched in the sender's own text: sender silenced, 1 queued item(s) dropped, no reply.
+Tue Dec 1, 5:00 PM Pacific  Digest sent to the owner: Handled 12, held 3, human approvals 0. Tue Dec 1
