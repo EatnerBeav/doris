@@ -83,7 +83,7 @@ No new features; the law and the scope stand. Bar: first place, and would Steve 
 - **done** · One calendar timeout with retry in the demo · Wolf
 - **done** · Trap Pack report: every input, what she did, the outcome in the rubric's words (recover, retry, ask, stop cleanly, refused, not inspected), a plain line on each failure · Wolf
 - **done** · `.agentware.toml`, LICENSE (MIT) and the organizers' repo layout · Wolf
-- **in review** · The one command from a fresh clone on three systems · Wolf, then the judge-experience thread · Sat 10:00 AM
+- **done** · The one command from a fresh clone on three systems: [PR #19](https://github.com/EatnerBeav/doris/pull/19) · Wolf, then the judge-experience thread · Sat 1:35 AM
   - CI runs `demo` and `traps` on Linux, macOS and Windows on every push, all green on main. By hand: Linux all pass; Windows `traps` failed on paths over 260 characters, fixed on main; a re-run on Shane's PC is next.
 - **done** · No-key line in the demo · Wolf
   - Wording of what a key costs to check on Sunday.
