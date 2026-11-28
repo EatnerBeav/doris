@@ -55,6 +55,8 @@ No new features; the law and the scope stand. Bar: first place, and would Steve 
 ## Safety bonus: audit trail, live monitoring, kill switch, guardrails
 
 - **done** · `verify`: chain check plus the tamper demo · Wolf
+  - PR #25 (decision 105): after a re-save with CRLF line endings (PowerShell's `Set-Content`), `verify` and `replay` still name the line that was really edited, and so do `watch` and the story. A CRLF file never verifies. Each message says its seq once.
+  - Queued low: a re-save in another encoding (Windows PowerShell 5.1's `>` and `Out-File` write UTF-16; `-Encoding UTF8` adds a byte-order mark) still reads "BROKEN at seq 1: the line is not valid JSON". Name the encoding in the reason.
 - **done** · `replay` (audit): step-through of any finished run, chain checked first · replay thread
   - PR #8, merged in PR #11 with the command wired (Fri 10:48 PM).
 - **done** · Watch page: the four labels and a code-written why on every decision, one Stop button · watch thread
