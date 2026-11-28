@@ -18,7 +18,6 @@ Standard library only, and no import of doris: test_fixtures.py checks the fixtu
 import fnmatch
 import functools
 import importlib.util
-import json
 import os
 import shutil
 import subprocess
@@ -37,20 +36,22 @@ RUN_CALENDAR = ("doris-*.ics", "staged-*.ics")
 
 
 @functools.lru_cache(maxsize=None)
-def committed_files():
-    """Every committed file of the sandbox, as "/"-separated paths under sandbox/."""
+def _built():
+    """The generator's build: {"/"-separated path under sandbox/: bytes}. Read it, never change it."""
     spec = importlib.util.spec_from_file_location("build_demo_fixtures", GENERATOR)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    built = {}
     with tempfile.TemporaryDirectory() as tmp:
-        written = module.build(tmp)
-    return tuple(sorted(set(written) | set(HAND_WRITTEN)))
+        for rel in module.build(tmp):
+            with open(os.path.join(tmp, *rel.split("/")), "rb") as fh:
+                built[rel] = fh.read()
+    return built
 
 
-def committed_emails():
-    """The demo's emails: file names in inbox/, in arrival order."""
-    return sorted(rel.split("/", 1)[1] for rel in committed_files()
-                  if rel.startswith("inbox/") and rel.endswith(".eml"))
+def committed_files():
+    """Every committed file of the sandbox, as "/"-separated paths under sandbox/."""
+    return tuple(sorted(set(_built()) | set(HAND_WRITTEN)))
 
 
 def is_run_event(name):
@@ -65,21 +66,17 @@ def owner_ics_files(calendar):
 def copy_committed(dest, source=SANDBOX):
     """Copy the committed sandbox at source (the repository's own by default) to dest: the committed
     files and nothing else, so no booking, staged event or send of a run and no judge's own mail.
-    inbox/facts.json keeps only the demo's emails' lines, laid out as the generator writes it.
-    Reads source, never writes it. Returns dest."""
-    emails = set(committed_emails())
+    inbox/facts.json is the generator's own build, never source's: a judge's line for their mail, or
+    a facts.json an editor saved with a byte order mark or a trailing comma, stays out of every copy
+    (test_fixtures.py checks the committed file itself). Reads source, never writes it. Returns dest."""
     for rel in committed_files():
-        src = os.path.join(source, *rel.split("/"))
         out = os.path.join(dest, *rel.split("/"))
         os.makedirs(os.path.dirname(out), exist_ok=True)
         if rel == FACTS:
-            with open(src, "rb") as fh:
-                facts = json.loads(fh.read().decode("utf-8"))
-            kept = {name: value for name, value in facts.items() if name in emails}
             with open(out, "wb") as fh:
-                fh.write((json.dumps(kept, indent=2, sort_keys=True) + "\n").encode("ascii"))
+                fh.write(_built()[FACTS])
         else:
-            shutil.copyfile(src, out)
+            shutil.copyfile(os.path.join(source, *rel.split("/")), out)
     return dest
 
 

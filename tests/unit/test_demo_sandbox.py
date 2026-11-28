@@ -8,6 +8,8 @@ calendar, an empty outbox. And the committed fixtures are exactly what git track
 All of that is planted in a temporary copy of the sandbox, never in the repository's own.
 """
 
+import codecs
+import importlib.util
 import json
 import os
 import shutil
@@ -41,13 +43,27 @@ def write(path, data):
         fh.write(data)
 
 
+def read(path):
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def generators_facts():
+    """inbox/facts.json as tests/tools/build_demo_fixtures.py writes it."""
+    spec = importlib.util.spec_from_file_location("build_demo_fixtures", demo_sandbox.GENERATOR)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with tempfile.TemporaryDirectory() as tmp:
+        module.build(tmp)
+        return read(os.path.join(tmp, "inbox", "facts.json"))
+
+
 class ACopyOfASandboxAJudgeHasUsed(unittest.TestCase):
 
     def setUp(self):
         tmp = tempfile.mkdtemp(prefix="doris-copy-")
         self.addCleanup(shutil.rmtree, tmp, True)
-        self.used = os.path.join(tmp, "used")
-        shutil.copytree(demo_sandbox.SANDBOX, self.used)
+        self.used = demo_sandbox.copy_committed(os.path.join(tmp, "used"))
         inbox = os.path.join(self.used, "inbox")
         write(os.path.join(inbox, JUDGE_NAME), JUDGE_EML)
         with open(os.path.join(inbox, "facts.json"), encoding="utf-8") as fh:
@@ -72,6 +88,24 @@ class ACopyOfASandboxAJudgeHasUsed(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(os.path.join(self.copy, "calendar"))),
                          demo_sandbox.owner_ics_files(os.path.join(demo_sandbox.SANDBOX, "calendar")))
         self.assertEqual(os.listdir(os.path.join(self.copy, "outbox")), [".gitkeep"])
+
+
+class ACopyOfASandboxWhoseFactsDoNotParse(unittest.TestCase):
+    """A facts.json an editor broke (Notepad's UTF-8 byte order mark, a trailing comma) is the committed
+    file's fault, which test_fixtures reports; every copy still gets the generator's facts.json, so the
+    demo-day tests run as before."""
+
+    def test_the_copy_holds_the_generators_facts_json(self):
+        want = generators_facts()
+        for label, broken in (("byte order mark", codecs.BOM_UTF8 + want),
+                              ("trailing comma", want.rstrip()[:-1].rstrip() + b",\n}\n")):
+            with self.subTest(label):
+                tmp = tempfile.mkdtemp(prefix="doris-copy-")
+                self.addCleanup(shutil.rmtree, tmp, True)
+                used = demo_sandbox.copy_committed(os.path.join(tmp, "used"))
+                write(os.path.join(used, "inbox", "facts.json"), broken)
+                copy = demo_sandbox.copy_committed(os.path.join(tmp, "copy"), source=used)
+                self.assertEqual(read(os.path.join(copy, "inbox", "facts.json")), want)
 
 
 def git(*args):

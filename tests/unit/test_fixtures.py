@@ -186,6 +186,20 @@ def owner_ics_files():
     return demo_sandbox.owner_ics_files(CALENDAR)
 
 
+def read_facts(inbox=INBOX):
+    """inbox/facts.json read as the sandbox adapter reads it (UTF-8 JSON), or an AssertionError that
+    says what is wrong with the file. Only the checks of the committed file read it: every test's
+    sandbox copy takes facts.json from the generator (demo_sandbox.copy_committed)."""
+    raw = read_bytes(os.path.join(inbox, "facts.json"))
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except ValueError as exc:            # a JSONDecodeError or a UnicodeDecodeError
+        bom = (" It starts with a UTF-8 byte order mark, as Notepad's \"UTF-8 with BOM\" saves it: save "
+               "it as UTF-8 without one." if raw.startswith(b"\xef\xbb\xbf") else "")
+        raise AssertionError("inbox/facts.json does not parse (%s), so `python -m doris demo` cannot read "
+                             "the inbox either.%s" % (exc, bom))
+
+
 def judges_emails(inbox=INBOX):
     """A judge's own .eml files in inbox/ (sandbox/README.md): every one but the demo's fifteen."""
     return sorted(f for f in os.listdir(inbox) if f.endswith(".eml") and f not in NAMES)
@@ -376,8 +390,7 @@ class ThreadingTest(unittest.TestCase):
 class FactsTest(unittest.TestCase):
 
     def setUp(self):
-        with open(os.path.join(INBOX, "facts.json"), "rb") as fh:
-            self.facts = json.loads(fh.read().decode("utf-8"))
+        self.facts = read_facts()
 
     def test_every_key_names_a_real_file_and_every_demo_email_has_facts(self):
         on_disk = set(f for f in os.listdir(INBOX) if f.endswith(".eml"))
@@ -478,7 +491,7 @@ class RebuildCheck:
             for rel in written:
                 parts = rel.split("/")
                 built, on_disk = read_bytes(os.path.join(tmp, *parts)), read_bytes(os.path.join(sandbox, *parts))
-                if rel == "inbox/facts.json" and judges_emails(inbox):
+                if rel == "inbox/facts.json":
                     self.assert_the_demos_facts_are_the_generators(built, on_disk, inbox)
                 else:
                     self.assertEqual(built, on_disk, rel)
@@ -486,9 +499,12 @@ class RebuildCheck:
             self.assertEqual(built_ics, demo_sandbox.owner_ics_files(os.path.join(sandbox, "calendar")))
 
     def assert_the_demos_facts_are_the_generators(self, built, on_disk, inbox):
+        facts = read_facts(inbox)            # one that does not parse fails here, and says why
+        if not judges_emails(inbox):
+            self.assertEqual(built, on_disk, "inbox/facts.json")
+            return
         # A judge who follows sandbox/README.md has added a line for each email of theirs, so the file
         # is no longer the committed bytes: every other line must still be exactly the generator's.
-        facts = json.loads(on_disk.decode("utf-8"))
         theirs = set(facts) - set(NAMES)
         self.assertLessEqual(theirs, set(judges_emails(inbox)), "facts.json lines for no judge's .eml")
         self.assertEqual({name: value for name, value in facts.items() if name not in theirs},
@@ -504,7 +520,8 @@ class GeneratorTest(RebuildCheck, unittest.TestCase):
 class GeneratorTestWithAJudgesMail(RebuildCheck, unittest.TestCase):
     """GeneratorTest's check on a temporary copy of the committed sandbox, never the repository's own:
     a judge's own .eml and its line in facts.json pass; a changed demo fact, a line for a file that is
-    not there, or the demo's facts laid out another way with no judge's mail present do not."""
+    not there, the demo's facts laid out another way with no judge's mail present, or a facts.json that
+    does not parse (a byte order mark, a trailing comma) do not, and the last says why."""
 
     JUDGE = "14-robin.eml"
 
@@ -551,6 +568,22 @@ class GeneratorTestWithAJudgesMail(RebuildCheck, unittest.TestCase):
     def test_the_demos_facts_laid_out_another_way_fail_with_no_judges_email(self):
         self.write_facts(indent=1, sort_keys=True)
         with self.assertRaisesRegex(AssertionError, "inbox/facts.json"):
+            self.assert_the_generator_rebuilds(self.sandbox)
+
+    def test_facts_saved_with_a_byte_order_mark_fail_and_say_so(self):
+        path = os.path.join(self.inbox, "facts.json")
+        raw = read_bytes(path)
+        with open(path, "wb") as fh:
+            fh.write(b"\xef\xbb\xbf" + raw)      # what Notepad's "UTF-8 with BOM" puts in front
+        with self.assertRaisesRegex(AssertionError, r"inbox/facts\.json does not parse(.|\n)*byte order mark"):
+            self.assert_the_generator_rebuilds(self.sandbox)
+
+    def test_facts_with_a_trailing_comma_fail_and_say_so_with_a_judges_email_there(self):
+        self.judge_adds_their_email()
+        text = json.dumps(self.facts, indent=2)
+        with open(os.path.join(self.inbox, "facts.json"), "w", encoding="utf-8") as fh:
+            fh.write(text[:-1].rstrip() + ",\n}\n")
+        with self.assertRaisesRegex(AssertionError, r"inbox/facts\.json does not parse"):
             self.assert_the_generator_rebuilds(self.sandbox)
 
 
