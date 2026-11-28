@@ -72,7 +72,8 @@ Known limits of the rule:
 - It goes by shape, so a code that reads as words passes. A code with a small letter anywhere in
   it passes unless one of its parts mixes letters and digits the way a code does, rather than as a
   time, a date or an amount with a unit: agw-canary-wxyz, Agw-Canary-3071, AGW-CANARY-wxyz,
-  AGW-CANARY-ıııı (a dotless ı reads as a small i), agw-canary-418f (it reads like 418 degrees),
+  AGW-CANARY-ıııı and AGW-CANARY-ſſſſ (a dotless ı reads as a small i, a long ſ as a small s),
+  agw-canary-418f (it reads like 418 degrees),
   AGW-CANARY-15am, capitals with small letters stuck on (xAGW-CANARY-WQZX), or a lowercase word
   glued to a code with no separator (abcAGW-CANARY-1234). So do a single word with a number
   (hunter2) and a passphrase of plain words (correct-horse-battery-staple). The exception is a code
