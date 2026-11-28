@@ -627,7 +627,7 @@ def _s2(s):
     offered = _names(s["offered_to"], "offered_to")
     if offered:
         lines.append("Offered times to: " + ", ".join(offered))
-    # The follow-up (brief 6.2, decision 111): what she filed in her ledger in the period, and the nudges
+    # The follow-up (brief row 6.2): what she filed in her ledger in the period, and the nudges
     # that went. Each part is left out at zero, and the whole line when all three are.
     if not isinstance(s["follow_ups"], (list, tuple)) or len(s["follow_ups"]) != 3:
         raise TemplateError("follow_ups holds three counts: nudges filed, booking checks filed, nudges sent")
