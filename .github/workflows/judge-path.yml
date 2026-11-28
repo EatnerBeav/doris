@@ -1,0 +1,120 @@
+name: judge path
+
+# A stranger's first minute, on each system and in each shell a judge is likely to open: a plain
+# `git clone` (no checkout action), the README's run lines as written, the runner's own Python
+# (no setup-python), and the tree left clean. Plus the ZIP a judge downloads instead of cloning.
+# ci.yml runs the suite; this file only walks the README.
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  readme:
+    name: README on ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: "Linux, bash", os: ubuntu-latest, shell: bash, py: python3 }
+          - { label: "macOS, zsh", os: macos-latest, shell: "zsh {0}", py: python3 }
+          - { label: "Windows, PowerShell 7", os: windows-latest, shell: pwsh, py: py }
+          - { label: "Windows, Windows PowerShell 5.1", os: windows-latest, shell: powershell, py: py }
+          - { label: "Windows, cmd", os: windows-latest, shell: cmd, py: py }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    env:
+      REPO_URL: https://github.com/${{ github.repository }}
+      SHA: ${{ github.sha }}
+    steps:
+      - name: Which Python a judge would get
+        run: ${{ matrix.py }} --version
+
+      - name: git clone, as the README says (then the commit under test)
+        run: |
+          git clone -q ${{ env.REPO_URL }}
+          git -C doris checkout -q ${{ env.SHA }}
+
+      - name: The one command (bash, zsh)
+        if: matrix.os != 'windows-latest'
+        run: |
+          set -e
+          set -o pipefail
+          cd doris/src
+          ${{ matrix.py }} -m doris demo | tee ../../first.txt
+          ${{ matrix.py }} -m doris demo | tee ../../second.txt
+          ${{ matrix.py }} -m doris verify
+          ${{ matrix.py }} -m doris replay > ../../replay.txt
+          cd ..
+          test -z "$(git status --porcelain)" || { git status --short; echo "the demo left the tree dirty"; exit 1; }
+
+      - name: The one command (PowerShell)
+        if: matrix.shell == 'pwsh' || matrix.shell == 'powershell'
+        run: |
+          cd doris/src
+          $out = py -m doris demo; $code = $LASTEXITCODE
+          $out; $out | Out-File -Encoding utf8 ..\..\first.txt
+          if ($code -ne 0) { exit 1 }
+          $out = py -m doris demo; $code = $LASTEXITCODE
+          $out; $out | Out-File -Encoding utf8 ..\..\second.txt
+          if ($code -ne 0) { exit 1 }
+          py -m doris verify
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $null = py -m doris replay
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cd ..
+          $dirty = git status --porcelain
+          if ($dirty) { git status --short; Write-Output "the demo left the tree dirty"; exit 1 }
+          exit 0
+
+      - name: The one command (cmd)
+        if: matrix.shell == 'cmd'
+        run: |
+          cd doris\src || exit /b 1
+          py -m doris demo > ..\..\first.txt || exit /b 1
+          type ..\..\first.txt
+          py -m doris demo > ..\..\second.txt || exit /b 1
+          type ..\..\second.txt
+          py -m doris verify || exit /b 1
+          py -m doris replay > ..\..\replay.txt || exit /b 1
+          cd .. || exit /b 1
+          git status --porcelain > ..\dirty.txt
+          for %%A in (..\dirty.txt) do if %%~zA GTR 0 (type ..\dirty.txt & echo the demo left the tree dirty & exit /b 1)
+          exit /b 0
+
+      - name: What a judge reads at the end
+        shell: bash
+        run: |
+          grep -q "0 human approvals" first.txt || { echo "first run: no '0 human approvals' line"; exit 1; }
+          grep -q "chain verified" first.txt || { echo "first run: no 'chain verified'"; exit 1; }
+          { echo "### ${{ matrix.label }}"; echo; echo '```'; tail -n 3 first.txt; echo '```'; echo "Second run:"; echo '```'; tail -n 3 second.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  zip:
+    name: Downloaded ZIP on ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: "Linux", os: ubuntu-latest, py: python3 }
+          - { label: "Windows", os: windows-latest, py: py }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Download and unpack the ZIP (no git, no .git folder)
+        shell: bash
+        run: |
+          curl -sSfL -o doris.zip "https://github.com/${{ github.repository }}/archive/${{ github.sha }}.zip"
+          if [ "$RUNNER_OS" = "Windows" ]; then pwsh -NoProfile -Command "Expand-Archive doris.zip -DestinationPath ."; else unzip -q doris.zip; fi
+          ls -d doris-*
+          mv doris-* doris-main
+      - name: The one command from the unpacked folder
+        shell: bash
+        run: |
+          cd doris-main/src
+          ${{ matrix.py }} -m doris demo | tee ../../first.txt
+          grep -q "0 human approvals" ../../first.txt
+          grep -q "chain verified" ../../first.txt
