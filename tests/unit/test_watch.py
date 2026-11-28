@@ -146,6 +146,10 @@ class TempState(unittest.TestCase):
     def look(self):
         return watch.snapshot(watch.newest_run())
 
+    def look_at(self, name, mode="live"):
+        folder = os.path.join(self.state, mode, "runs", name)
+        return watch.snapshot(watch.Run(name, folder, mode, 0, True, False))
+
 
 def serve(test, say=None):
     """A watch server on a free port in a thread of its own, shut down at the test's end."""
@@ -417,6 +421,24 @@ class Panes(TempState):
         write_run(self.state, "model-stub-sandbox-20261128T020000Z", [start_line("c", "stub")], started=now)
         run = watch.newest_run()
         self.assertEqual((run.name, run.mode), ("model-stub-sandbox-20261128T020000Z", "sandbox"))
+
+    def test_the_smokes_own_run_of_her_loop_is_watched_and_its_stop_is_said_plainly(self):
+        now = time.time()
+        older = "model-live-live-20261128T050000Z"
+        write_run(self.state, older, [start_line(older, "live", "live")], mode="live", started=now - 60)
+        name = "model-live-live-smoke-20261128T060000Z"
+        folder = os.path.join(self.state, "live", "smoke", "20261128T060000Z", "runs", name)
+        os.makedirs(folder)                 # where smoke.py runs her loop: no config.json, its own ledger
+        writer = receipts.ReceiptWriter(os.path.join(folder, "receipts.jsonl"), name, "live", clock=lambda: T0)
+        writer.write(*start_line(name, "live", "live"))
+        run = watch.newest_run()
+        self.assertEqual((run.name, run.mode, run.folder), (name, "live", folder))
+        snap = self.look()
+        self.assertEqual(snap["run"], name)
+        # her loop under the smoke has no supervisor to kill it mid-call: the page must not imply one
+        self.assertIn("The smoke's own run of her loop", snap["source"])
+        self.assertIn("halts it at her next check, after any call in flight returns, not mid-call", snap["source"])
+        self.assertNotIn("smoke", self.look_at(older)["source"])
 
     def test_a_run_whose_receipts_are_not_written_yet_is_starting(self):
         folder = os.path.join(self.state, "sandbox", "runs", "model-stub-sandbox-20261128T030000Z")

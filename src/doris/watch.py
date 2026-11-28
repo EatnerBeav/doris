@@ -53,7 +53,7 @@ MAX_BODY = 1024                     # the Stop form is one token
 CLIP = 120                          # email text is cut to this many characters on the page
 MAX_ROWS = 1000                     # the page holds the newest lines; the receipt file holds every one
 
-Run = namedtuple("Run", "name folder mode started has_receipts")
+Run = namedtuple("Run", "name folder mode started has_receipts smoke")
 
 
 # ------------------------------------------------------------------------------------------
@@ -69,26 +69,38 @@ def _started(folder):
     return None
 
 
-def newest_run():
-    """The run started last under state/<mode>/runs, for the sandbox and live, or None. A run with receipts
-    comes first: a run refused at the start (a halt in force, or another run holding the ledger) leaves a
-    folder with its config.json and no receipts, and must not hide the run that is going. A folder with no
-    receipts is watched only when no run has any (one starting, before its first line)."""
-    best = {True: None, False: None}
+def _listed(runs):
+    try:
+        return [(name, os.path.join(runs, name)) for name in os.listdir(runs)]
+    except OSError:
+        return []
+
+
+def _run_folders():
+    """(name, folder, mode, smoke) for every run folder the page follows: state/<mode>/runs/* for the sandbox
+    and live, and the smoke's own runs of her loop, state/live/smoke/<stamp>/runs/* (smoke.py)."""
     for mode in WATCHED_MODES:
-        runs = paths.runs_dir(mode)
-        try:
-            names = os.listdir(runs)
-        except OSError:
+        for name, folder in _listed(paths.runs_dir(mode)):
+            yield name, folder, mode, False
+    smoke = os.path.join(paths.state_dir("live"), "smoke")
+    for _stamp, stamp_folder in _listed(smoke):
+        for name, folder in _listed(os.path.join(stamp_folder, "runs")):
+            yield name, folder, "live", True
+
+
+def newest_run():
+    """The run started last, in the sandbox or live (the smoke's own runs of her loop included), or None. A
+    run with receipts comes first: a run refused at the start (a halt in force, or another run holding the
+    ledger) leaves a folder with its config.json and no receipts, and must not hide the run that is going.
+    A folder with no receipts is watched only when no run has any (one starting, before its first line)."""
+    best = {True: None, False: None}
+    for name, folder, mode, smoke in _run_folders():
+        started = _started(folder)
+        if started is None:
             continue
-        for name in names:
-            folder = os.path.join(runs, name)
-            started = _started(folder)
-            if started is None:
-                continue
-            has = os.path.exists(os.path.join(folder, "receipts.jsonl"))
-            if best[has] is None or (started, name) > best[has][0]:
-                best[has] = ((started, name), Run(name, folder, mode, started, has))
+        has = os.path.exists(os.path.join(folder, "receipts.jsonl"))
+        if best[has] is None or (started, name) > best[has][0]:
+            best[has] = ((started, name), Run(name, folder, mode, started, has, smoke))
     pick = best[True] or best[False]
     return pick[1] if pick is not None else None
 
@@ -309,6 +321,9 @@ SOURCE_WORDS = {
     "replayed": "Model answers replayed from a recorded real run; no model is called now.",
     "live": "Model called live; the cost is measured.",
 }
+# smoke.py runs her loop itself, not under the supervisor: her own halt check stops it, between calls
+SMOKE_WORDS = ("The smoke's own run of her loop, on its one test request. It runs without the kill switch's "
+               "supervisor, so Stop halts it at her next check, after any call in flight returns, not mid-call.")
 
 
 def _chain(path):
@@ -501,7 +516,8 @@ def snapshot(run):
             if len(rows) > MAX_ROWS else "")
     name = _text(run.name, 200)          # a folder name is bytes on disk, not always text
     return {"run": name, "title": "Doris watch: " + name, "run_line": "Run %s" % name,
-            "source": " ".join(w for w in (MODE_WORDS.get(mode, ""), SOURCE_WORDS.get(source, "")) if w),
+            "source": " ".join(w for w in (MODE_WORDS.get(mode, ""), SOURCE_WORDS.get(source, ""),
+                                           SMOKE_WORDS if run.smoke else "") if w),
             "status": status, "chain": chain, "chain_ok": chain_ok, "state": state, "panes": panes,
             "rows": rows, "after": max([r["seq"] for r in rows] or [0]), "more": more, "empty": ""}
 
