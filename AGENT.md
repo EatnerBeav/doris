@@ -47,11 +47,20 @@ Every send and every calendar write is one of five fixed action kinds (`shapes.A
 
 | Action | What it is | Who it can reach |
 |---|---|---|
-| `send_reply` | An approved template (T1, T2, T3, T4, T9, T10, T12, T13, T18) | The sender of the message she is answering, on their thread, with one blind copy to the owner's address from config |
+| `send_reply` | An approved template (T1, T2, T3, T4, T9, T10, T12, T13, T18) | The sender of the message she is answering, on their thread, with one blind copy to the owner's address from config. The nudge (T9) answers no message: it goes only to the address her open offer on that thread went to |
 | `send_hold_notice` | S1: the reason, the sender's own words (defanged, codes blanked) and a draft | The owner only |
 | `send_digest` | S2: the day's counts, from receipts | The owner only |
 | `calendar_create` | Her event, create-only, under her own booking ID | The owner's calendar. No organizer, no attendees, so the calendar server mails nobody |
 | `calendar_delete` | Removes her own event by booking ID | The owner's calendar, her own `doris-` events only |
+
+### The follow-up
+
+Every offer and every booking leaves a dated entry in her ledger (`ledger.Ledger.file_followup`, table `followups`). Each is named in its own `decided` receipt line (`follow_up`: the entry, its date, and the offer's expiry), on the message's closing line, in the terminal and in the digest ("Follow-ups filed: ...").
+
+- **An offer's entry is its one nudge**, due two business days after the offer went out (`loop.nudge_due`: Mon to Fri, her holidays off). Each cycle she looks at every open entry (`loop._Run.follow_ups`). It closes with no nudge as soon as there is nobody to nudge: the offer was answered, closed or expired, the thread is held, they opted out, or they wrote anything since the offer. Once due, the nudge (T9) goes once, through the gate like every send, listing only the offer's own times that are still available (`loop._Run.nudge`). Never a second on a thread (G7), never a new time (G9), and no nudge at all when none of the offer's times is left.
+- **A booking's entry is her calendar check** (ruling 17). Each cycle, after the stop scan and before any new message, she reads every future booking by its booking ID (`loop._Run.check_bookings`). Missing on two reads a short wait apart, it is marked gone in her ledger, the owner gets a hold notice ("you removed this booking from your calendar; I haven't told them") and the prospect gets nothing. A read that fails is never "missing", and edits are not checked.
+
+Tests: `tests/unit/test_followups.py` (`test_owner_deleted_holds` is ruling 17's).
 
 Her other calls are listed in `receipts.CALLS`: fetch mail, look in Sent, query the calendar, read one event back, the model call, and filing a message. There is no tool for the web, a shell, a payment, deleting or moving mail, editing an event, or writing to anyone an email names.
 
@@ -133,7 +142,8 @@ Settings that are not secrets: `DORIS_OWNER_ADDRESS` (where hold notices, the di
 
 - Google and Microsoft calendars need an OAuth adapter we did not build. She reads and files mail over IMAP, sends over JMAP (Fastmail's API; there is no SMTP sender), and uses CalDAV for the calendar.
 - The overnight run stays under 60 emails.
-- Not built yet: the one nudge on an unanswered offer (T9), and the once-a-cycle check that her future bookings are still on the calendar (ruling 17; today it runs only when a booking is resumed after a restart).
+- The nudge never offers a new time. It lists only the offer's own times that are still available and more than a day away, so an offer of times in the next three days often has none left when the nudge is due two business days later: then no nudge goes, and the offer stays open until it expires.
+- The calendar check sees a booking that is gone, not one that was edited: a moved or shortened event is not noticed.
 - The Trap Pack's known limits, and what each run got wrong, are in `tests/trap-pack/RUNS.md`.
 
 ## Repo layout
