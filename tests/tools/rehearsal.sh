@@ -5,6 +5,7 @@
 #   bash /root/doris_rehearsal_on_wide.sh prep     look only, plus one copy: the live ledger kept aside before
 #                                                  the schema 3 to 4 upgrade; her bookings and Rae's Thursday
 #                                                  read from the calendar (times and status only)
+#   bash /root/doris_rehearsal_on_wide.sh drymigrate   main's code opens a copy of that ledger in a scratch folder
 #   bash /root/doris_rehearsal_on_wide.sh start    checkout main, resume, `run --live` in tmux doris-live,
 #                                                  `watch` in tmux doris-watch (127.0.0.1:8765 on wide)
 #   bash /root/doris_rehearsal_on_wide.sh status   what she has done so far
@@ -100,6 +101,33 @@ prep() {
   fi
   say "calendar, read only:"; calendar_look
   say "PREP DONE"
+}
+
+drymigrate() {
+  # main's own code opens a COPY of the ledger kept aside, in a scratch folder: the schema upgrade is seen
+  # to work on her real rows before the live run makes it for good. Nothing live is opened or written.
+  cd "$DORIS" || die "no $DORIS"
+  git fetch -q origin main || die "fetch main"
+  A=$(ls "$LOOP"/aside/ledger.sqlite.before-rehearsal-* 2>/dev/null | head -1)
+  [ -n "$A" ] || die "no ledger copy aside: run prep first"
+  D=$(mktemp -d "$LOOP/main-check.XXXXXX") || die "no scratch folder"
+  git archive origin/main src | tar -x -C "$D" || die "archive of main failed"
+  say "main is $(git log --oneline -1 origin/main)"
+  cp -p "$A" "$D/ledger.sqlite" || die "copy failed"
+  say "the copy before:"; ledger_look "$D/ledger.sqlite"
+  python3 -I - "$D" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/src")
+from doris import ledger
+led = ledger.Ledger(sys.argv[1] + "/ledger.sqlite", create=False)
+led.close()
+print("main's code opened the copy: no error (it reads schema version %d)" % ledger.SCHEMA_VERSION)
+PY
+  say "python exit $?"
+  say "the copy after:"; ledger_look "$D/ledger.sqlite"
+  python3 -I -c 'import sqlite3,sys; c=sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True); print("followups rows:", c.execute("SELECT COUNT(*) FROM followups").fetchone()[0], "| quick_check:", c.execute("PRAGMA quick_check").fetchone()[0])' "$D/ledger.sqlite"
+  say "live ledger untouched: $(sha256sum state/live/ledger.sqlite | cut -c1-16) (aside copy $(sha256sum "$A" | cut -c1-16))"
+  say "DRY MIGRATION DONE in $D"
 }
 
 start() {
@@ -224,8 +252,9 @@ MSG
 
 case "${1:-}" in
   prep) prep ;;
+  drymigrate) drymigrate ;;
   start) start ;;
   status) shift; status "${1:-}" ;;
   finish) finish ;;
-  *) echo "usage: $0 prep | start | status [lines] | finish"; exit 2 ;;
+  *) echo "usage: $0 prep | drymigrate | start | status [lines] | finish"; exit 2 ;;
 esac
