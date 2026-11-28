@@ -48,13 +48,13 @@ class Isolated(unittest.TestCase):
             patcher = mock.patch.object(target, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        env = mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "DORIS_MODEL": ""})
+        env.start()
+        self.addCleanup(env.stop)
 
     def runs(self):
         runs = os.path.join(self.state, "sandbox", "runs")
         return [os.path.join(runs, n) for n in sorted(os.listdir(runs))]
-        env = mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "DORIS_MODEL": ""})
-        env.start()
-        self.addCleanup(env.stop)
 
 
 class ModelSource(unittest.TestCase):
@@ -69,6 +69,16 @@ class ModelSource(unittest.TestCase):
 
     def test_the_run_name_starts_with_the_source_then_the_mode(self):
         self.assertRegex(cli.run_name("stub", "sandbox"), r"^model-stub-sandbox-\d{8}T\d{6}Z$")
+
+
+class TheEnvironmentStaysOut(Isolated):
+    """A judge may have a key and a model exported. Inside these tests neither is seen, so the demo
+    reads the mail with the stub, as the tests here expect, and never calls the API."""
+
+    def test_no_key_or_model_from_the_environment_reaches_the_demo(self):
+        from doris import model
+        self.assertEqual(cli.demo_source(os.environ, answers_exist=False), "stub")
+        self.assertEqual(model.default_model_id(), model.DEFAULT_MODEL)
 
 
 class Demo(Isolated):
